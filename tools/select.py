@@ -1,10 +1,9 @@
 from core.registry import register_tool
 from geo.points import FreePoint
 from tools.base import Tool, snap_target
-from ui.icons import icon_select
 
 
-@register_tool(name="选择", shortcut="V", order=0, icon=icon_select,
+@register_tool(name="选择", shortcut="V", order=0, icon="select",
                hint="拖动点移动整幅图（靠近点自动磁吸抓取）；Delete 级联删除")
 class SelectTool(Tool):
     def __init__(self):
@@ -29,8 +28,8 @@ class SelectTool(Tool):
         if isinstance(self.dragged, FreePoint):
             self.dragged.drag_to((wpt[0] + self.offset[0],
                                   wpt[1] + self.offset[1]))
-        else:                                       # 吸附点：投影到宿主，无偏移概念
-            self.dragged.drag_to(wpt) # pyright: ignore[reportAttributeAccessIssue]
+        else:
+            self.dragged.drag_to(wpt)
         canvas.doc.recompute_from(self.dragged)
 
     def release(self, canvas, wpt, hit):

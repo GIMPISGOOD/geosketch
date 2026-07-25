@@ -1,12 +1,10 @@
-# tools/segment_tool.py
 from core.registry import register_tool
 from geo.segments import Segment
 from tools.base import Tool, point_or_snap
-from ui.icons import icon_segment
 from ui import theme
 
 
-@register_tool(name="线段", shortcut="S", order=2, icon=icon_segment,
+@register_tool(name="线段", shortcut="S", order=2, icon="segment",
                hint="点击两次确定两个端点（端点自动吸附已有对象）；Esc 取消")
 class SegmentTool(Tool):
     def __init__(self):

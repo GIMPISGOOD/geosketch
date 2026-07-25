@@ -44,3 +44,5 @@ LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
 
 AXIS_FONT = QFont("Georgia", 11, QFont.Weight.DemiBold)   # 斜体衬线，数学标注感
 AXIS_FONT.setItalic(True)
+
+INTERSECT = QColor("#0c8599")     # 交点：青蓝，暗示"派生点"身份

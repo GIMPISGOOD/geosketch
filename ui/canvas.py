@@ -1,14 +1,16 @@
 import math
 
-from PySide6.QtCore import QPointF, Qt, Signal
+from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QToolButton
 
 from core.registry import find_renderer
+from geo.points import SNAP_PX, AbstractPoint, nearest_point
+from tools.select import SelectTool
 from ui import theme
+from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
-from geo.points import SNAP_PX, nearest_point
 
 BASE_SCALE = 48.0          # 48 像素/单位 记为 100%
 
@@ -27,23 +29,34 @@ class Canvas(QWidget):
         self.origin = QPointF(0.0, 0.0)
         self._origin_ready = False
         self.tool = None
-        self.snap_target = None 
         self.cursor_wpt: tuple[float, float] = (0.0, 0.0)
+        self.snap_target = None          # 当前磁吸候选点（驱动指示环）
         self._panning = False
         self._pan_anchor = QPointF()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
-        # 悬浮件：左侧工具栏 + 右下缩放控件（都是画布的子控件）
+        # 悬浮件：左侧工具栏 + 右下缩放控件
         self.rail = ToolRail(self)
         self.rail.tool_chosen.connect(self.set_tool)
         self.tool_activated.connect(self.rail.sync)
         self.zoom_bar = ZoomBar(self, self)
 
-    # ================= 坐标变换（类型严格区分）=================
+        # ★ 悬浮删除按钮：选择模式下选中单个点时出现在点旁
+        self._trash = QToolButton(self)
+        self._trash.setObjectName("trashBtn")
+        self._trash.setIcon(trash_icon())
+        self._trash.setIconSize(QSize(15, 15))
+        self._trash.setFixedSize(28, 28)
+        self._trash.setToolTip("删除选中对象（级联删除依赖它的对象）")
+        self._trash.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._trash.clicked.connect(self.doc.remove_selected)
+        self._trash.hide()
+
+    # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:
         return QPointF(self.origin.x() + x * self.scale,
-                       self.origin.y() - y * self.scale)   # y 轴翻转
+                       self.origin.y() - y * self.scale)
 
     def to_world(self, pt: QPointF) -> tuple[float, float]:
         return ((pt.x() - self.origin.x()) / self.scale,
@@ -51,7 +64,6 @@ class Canvas(QWidget):
 
     # ================= 工具 =================
     def set_tool(self, tool) -> None:
-        # 兼容两种来源：ToolRail 发来的是工具类，快捷键动作发来的是实例
         if isinstance(tool, type):
             tool = tool()
         if self.tool is not None:
@@ -62,9 +74,8 @@ class Canvas(QWidget):
         self.tool_activated.emit(tool)
         self.update()
 
-    # ================= 缩放：可在任意锚点 =================
+    # ================= 缩放 =================
     def zoom_at(self, factor: float, anchor: QPointF | None = None) -> None:
-        """按锚点缩放；anchor=None 时用画布中心。滚轮传光标位置，按钮用中心。"""
         if anchor is None:
             anchor = QPointF(self.width() / 2, self.height() / 2)
         new_scale = min(max(self.scale * factor, 4.0), 4000.0)
@@ -104,20 +115,9 @@ class Canvas(QWidget):
             if self.tool is not None:
                 self.tool.draw_overlay(p, self)
         finally:
-            p.end()  
-            
-    def _draw_snap_indicator(self, p: QPainter) -> None:
-        """磁吸指示环：实线环锁定目标点，四向刻度标出吸附半径（= SNAP_PX 屏幕像素）"""
-        if self.snap_target is None:
-            return
-        qpt = self.to_screen(self.snap_target.x, self.snap_target.y)
-        p.setPen(theme.pen(theme.ACCENT, 1.6))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawEllipse(qpt, 9.0, 9.0)
-        r, tick = SNAP_PX, 5.0
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            x0, y0 = qpt.x() + dx * r, qpt.y() + dy * r
-            p.drawLine(QPointF(x0, y0), QPointF(x0 - dx * tick, y0 - dy * tick))
+            p.end()
+        # 绘制结束后更新删除按钮位置
+        self._place_trash()
 
     def _draw_background(self, p: QPainter) -> None:
         g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
@@ -127,8 +127,8 @@ class Canvas(QWidget):
 
     def _draw_grid(self, p: QPainter) -> None:
         w, h = self.width(), self.height()
-        step = self._nice_step(64.0 / self.scale)      # 次网格 ≈64px 一档
-        major = step * 5.0                             # 主网格：明确分界
+        step = self._nice_step(64.0 / self.scale)
+        major = step * 5.0
         x0, y0 = self.to_world(QPointF(0.0, float(h)))
         x1, y1 = self.to_world(QPointF(float(w), 0.0))
         eps = step * 1e-6
@@ -137,7 +137,7 @@ class Canvas(QWidget):
             p.setPen(theme.pen(color, 1.0))
             gx = math.ceil(x0 / s) * s
             while gx <= x1:
-                if abs(gx) > eps:                      # 坐标轴位置留空，单独画
+                if abs(gx) > eps:
                     sx = self.to_screen(gx, 0.0).x()
                     p.drawLine(QPointF(sx, 0.0), QPointF(sx, float(h)))
                 gx += s
@@ -148,7 +148,6 @@ class Canvas(QWidget):
                     p.drawLine(QPointF(0.0, sy), QPointF(float(w), sy))
                 gy += s
 
-        # 主刻度数值（沿轴，轴移出视野时贴边）
         ox, oy = self.origin.x(), self.origin.y()
         p.setPen(theme.pen(theme.LABEL, 1.0))
         p.setFont(theme.LABEL_FONT)
@@ -168,15 +167,14 @@ class Canvas(QWidget):
             gy += major
 
     def _draw_axes(self, p: QPainter) -> None:
-        """坐标轴：加粗实线 + 箭头 + x/y/O 标注，与网格明确分界。"""
         w, h = float(self.width()), float(self.height())
         ox, oy = self.origin.x(), self.origin.y()
         p.setPen(theme.pen(theme.AXIS, 1.6))
         p.setBrush(theme.brush(theme.AXIS))
-        if 0.0 <= oy <= h:                             # x 轴
+        if 0.0 <= oy <= h:
             p.drawLine(QPointF(0.0, oy), QPointF(w, oy))
             p.drawPath(self._arrow(QPointF(w - 2.0, oy), 0.0))
-        if 0.0 <= ox <= w:                             # y 轴
+        if 0.0 <= ox <= w:
             p.drawLine(QPointF(ox, 0.0), QPointF(ox, h))
             p.drawPath(self._arrow(QPointF(ox, 2.0), 90.0))
 
@@ -191,7 +189,6 @@ class Canvas(QWidget):
 
     @staticmethod
     def _arrow(tip: QPointF, angle_deg: float) -> QPainterPath:
-        """实心箭头。angle_deg 为指向（屏幕坐标：0=右，90=上）。"""
         a = math.radians(angle_deg)
         size = 9.0
         bx = tip.x() - math.cos(a) * size
@@ -205,9 +202,21 @@ class Canvas(QWidget):
         return path
 
     @staticmethod
-    def _nice_step(raw: float) -> float:               # 1-2-5 序列
+    def _nice_step(raw: float) -> float:
         e = 10.0 ** math.floor(math.log10(raw))
         return next(m * e for m in (1.0, 2.0, 5.0, 10.0) if m * e >= raw)
+
+    def _draw_snap_indicator(self, p: QPainter) -> None:
+        if self.snap_target is None:
+            return
+        qpt = self.to_screen(self.snap_target.x, self.snap_target.y)
+        p.setPen(theme.pen(theme.ACCENT, 1.6))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawEllipse(qpt, 9.0, 9.0)
+        r, tick = SNAP_PX, 5.0
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            x0, y0 = qpt.x() + dx * r, qpt.y() + dy * r
+            p.drawLine(QPointF(x0, y0), QPointF(x0 - dx * tick, y0 - dy * tick))
 
     # ================= 拾取 =================
     def pick(self, screen_pt: QPointF, tol_px: float = 9.0):
@@ -224,18 +233,18 @@ class Canvas(QWidget):
 
     # ================= 事件 =================
     def showEvent(self, ev) -> None:
-        if not self._origin_ready:                     # 首次显示：原点居中
+        if not self._origin_ready:
             self.origin = QPointF(self.width() / 2.0, self.height() / 2.0)
             self._origin_ready = True
 
-    def resizeEvent(self, ev) -> None:                 # 悬浮件贴边定位
+    def resizeEvent(self, ev) -> None:
         self.rail.move(14, 14)
         zb = self.zoom_bar
         zb.move(self.width() - zb.width() - 16,
                 self.height() - zb.height() - 16)
 
     def mousePressEvent(self, ev) -> None:
-        if ev.button() == Qt.MouseButton.MiddleButton:         # 中键平移
+        if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_anchor = ev.position() - self.origin
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
@@ -259,7 +268,7 @@ class Canvas(QWidget):
         hover = getattr(hit, "draggable", False) or self.snap_target is not None
         self.setCursor(Qt.CursorShape.SizeAllCursor if hover
                        else Qt.CursorShape.ArrowCursor)
-        self.update()                                  # 刷新橡皮筋
+        self.update()
 
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
@@ -270,7 +279,7 @@ class Canvas(QWidget):
             self.tool.release(self, self.to_world(ev.position()),
                               self.pick(ev.position()))
 
-    def wheelEvent(self, ev) -> None:                  # 滚轮：以光标为锚点
+    def wheelEvent(self, ev) -> None:
         k = 1.15 if ev.angleDelta().y() > 0 else 1.0 / 1.15
         self.zoom_at(k, ev.position())
 
@@ -281,3 +290,15 @@ class Canvas(QWidget):
             self.tool.cancel(self)
         else:
             super().keyPressEvent(ev)
+
+    def _place_trash(self) -> None:
+        """删除按钮跟随选中点：仅选择模式下选中恰好一个点时显示。"""
+        sel = [o for o in self.doc.objects if o.selected]
+        if (len(sel) == 1 and isinstance(sel[0], AbstractPoint)
+                and isinstance(self.tool, SelectTool)):
+            qpt = self.to_screen(sel[0].x, sel[0].y)
+            self._trash.move(int(qpt.x()) + 12, int(qpt.y()) - 36)
+            self._trash.show()
+            self._trash.raise_()
+        else:
+            self._trash.hide()

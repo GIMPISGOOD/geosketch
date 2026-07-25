@@ -6,10 +6,9 @@ from core.registry import register_tool
 from geo.circles import Circle
 from tools.base import Tool, point_or_snap
 from ui import theme
-from ui.icons import icon_circle
 
 
-@register_tool(name="圆", shortcut="C", order=3, icon=icon_circle,
+@register_tool(name="圆", shortcut="C", order=3, icon="circle",
                hint="第一下定圆心，第二下定圆周上的点（均自动磁吸）；Esc 取消")
 class CircleTool(Tool):
     def __init__(self):
@@ -35,7 +34,6 @@ class CircleTool(Tool):
         canvas.update()
 
     def draw_overlay(self, p, view):
-        """橡皮筋：从圆心拉到光标的预览圆"""
         if self.center is None:
             return
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
