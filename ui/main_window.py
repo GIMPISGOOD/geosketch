@@ -74,6 +74,19 @@ class MainWindow(QMainWindow):
         if not plugin_specs:
             e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
 
+                # 视图菜单：撤销 / 重做
+        vm = mb.addMenu("视图(&W)")
+        self._undo_act = QAction("撤销(&U)", self)
+        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)      # Ctrl+Z
+        self._undo_act.triggered.connect(self.doc.undo)
+        vm.addAction(self._undo_act)
+        self._redo_act = QAction("重做(&R)", self)
+        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)      # Ctrl+Shift+Z
+        self._redo_act.triggered.connect(self.doc.redo)
+        vm.addAction(self._redo_act)
+        self.doc.history_changed.connect(self._update_history_actions)
+        self._update_history_actions()
+
         # 主题菜单：互斥单选
         thm = mb.addMenu("主题(&M)")
         tgroup = QActionGroup(self)
@@ -115,6 +128,10 @@ class MainWindow(QMainWindow):
             self, "保存", "sketch.json", "GeoSketch 文件 (*.json)")
         if path:
             self.doc.save(path)
+
+    def _update_history_actions(self) -> None:
+        self._undo_act.setEnabled(self.doc.can_undo)
+        self._redo_act.setEnabled(self.doc.can_redo)
 
     def _open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(

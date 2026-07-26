@@ -26,6 +26,10 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "angle":     ("fa5s.drafting-compass",    "mdi.angle-acute"),
     "ratio":     ("fa5s.balance-scale",       "mdi.scale-balance"),
     "text":      ("fa5s.font",                "mdi.format-text"),
+    "perp":         ("mdi.angle-right",        "fa5s.drafting-compass"),
+    "parallel":     ("fa5s.equals",            "mdi.vector-parallel"),
+    "bisector":     ("fa5s.drafting-compass",  "mdi.vector-radius"),
+    "angle_divide": ("fa5s.chart-pie",         "mdi.pie-chart-outline"),
 }
 
 

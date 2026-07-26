@@ -16,6 +16,7 @@ from geo.circles import Circle
 from geo.intersects import register_solver, _seg_circle, _seg_seg
 from geo.segments import Segment
 from tools.base import Tool, point_or_snap
+from geo.points import AbstractPoint
 from ui import theme
 
 
@@ -180,7 +181,9 @@ class PolygonTool(Tool):
             self.center = pt
         else:
             if pt is not self.center:
-                canvas.doc.add(RegularPolygon(self.center, pt, PolygonTool.n))
+                poly = canvas.doc.add(RegularPolygon(self.center, pt, PolygonTool.n))
+                for k in range(PolygonTool.n):          # 每个顶点标记为特殊点
+                    canvas.doc.add(PolygonVertex(poly, k))
             self.center = None
 
     def cancel(self, canvas):
@@ -204,3 +207,37 @@ class PolygonTool(Tool):
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
+
+# ───────────── 新增：多边形顶点（特殊点，从动于多边形，可磁吸）─────────────
+@register_geo("PolygonVertex")
+class PolygonVertex(AbstractPoint):
+    """正多边形的第 k 个顶点：从动于多边形，不可拖动，可被磁吸。"""
+    def __init__(self, poly, k):
+        super().__init__(parents=(poly,))
+        self.poly = poly
+        self.k = k
+        self.recompute()
+
+    def recompute(self):
+        self.x, self.y = self.poly.verts[self.k]
+
+    def dump(self):
+        return {"k": self.k}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents[0], params["k"])
+
+
+@register_renderer(PolygonVertex)
+def draw_poly_vertex(p, obj, view):
+    """空心环 + 中心点（与交点同风格，表示"派生点"）"""
+    qpt = view.to_screen(obj.x, obj.y)
+    color = theme.SELECTED if obj.selected else theme.POLYGON
+    r = 4.5 if obj.selected else 3.5
+    p.setPen(theme.pen(color, 1.8))
+    p.setBrush(theme.brush(theme.BG_TOP))
+    p.drawEllipse(qpt, r, r)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(theme.brush(color))
+    p.drawEllipse(qpt, 1.5, 1.5)

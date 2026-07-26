@@ -251,8 +251,12 @@ class Canvas(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
         if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
+            # 撤销包裹：按压前暂存快照，若本次按压产生几何变更则记入撤销栈。
+            # → 所有"点击即创建"的工具自动获得"一次点击 = 一个撤销步"。
+            self.doc._arm_undo()
             self.tool.press(self, self.to_world(ev.position()),
                             self.pick(ev.position()))
+            self.doc._commit_undo_if_changed()
 
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
