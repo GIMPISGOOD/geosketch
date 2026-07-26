@@ -1,5 +1,4 @@
-# plugins/angle_tool.py
-"""角度插件：先点顶点再点两侧点，测量夹角（度）。"""
+"""角度插件：先点顶点再点两侧点，测量夹角（度）。拖动任一点实时刷新。"""
 import math
 
 from PySide6.QtCore import QPointF
@@ -13,33 +12,36 @@ from ui import theme
 
 @register_geo("AngleMeasure")
 class AngleMeasure(GeoObject):
-    """角度测量：顶点 + 两侧点。拖动任一点实时更新读数。"""
     def __init__(self, vertex, p1, p2):
         super().__init__(parents=(vertex, p1, p2))
         self.vertex, self.p1, self.p2 = vertex, p1, p2
-        self.degrees = 0.0
         self.a1 = self.a2 = 0.0
-        self.label = (0.0, 0.0)
+        self.degrees = 0.0
+        self.anchor = (0.0, 0.0)        # 拾取锚点（世界坐标）
         self.recompute()
 
-    def recompute(self):
-        v = self.vertex
-        self.a1 = math.atan2(self.p1.y - v.y, self.p1.x - v.x)
-        self.a2 = math.atan2(self.p2.y - v.y, self.p2.x - v.x)
-        span = math.degrees(self.a2 - self.a1) % 360
-        self.degrees = span if span <= 180 else 360 - span
-        # 标签放在角平分线方向
-        mid = self.a1 + self._span() / 2
-        self.label = (v.x + 40 * math.cos(mid) / 1, v.y + 40 * math.sin(mid) / 1)
-
     def _span(self):
+        """带符号的较短扫掠角（弧度）"""
         s = self.a2 - self.a1
         while s > math.pi: s -= 2 * math.pi
         while s < -math.pi: s += 2 * math.pi
         return s
 
+    def recompute(self):
+        v = self.vertex
+        self.a1 = math.atan2(self.p1.y - v.y, self.p1.x - v.x)
+        self.a2 = math.atan2(self.p2.y - v.y, self.p2.x - v.x)
+        span_deg = math.degrees(self.a2 - self.a1) % 360
+        self.degrees = span_deg if span_deg <= 180 else 360 - span_deg
+        # 拾取锚点：沿角平分线，距离取两臂较短者的 40%（至少 0.3 世界单位）
+        arm = min(math.hypot(self.p1.x - v.x, self.p1.y - v.y),
+                  math.hypot(self.p2.x - v.x, self.p2.y - v.y))
+        mid = self.a1 + self._span() / 2
+        d = max(arm * 0.4, 0.3)
+        self.anchor = (v.x + d * math.cos(mid), v.y + d * math.sin(mid))
+
     def distance_to(self, x, y):
-        return math.hypot(x - self.label[0], y - self.label[1])
+        return math.hypot(x - self.anchor[0], y - self.anchor[1])
 
     def dump(self):
         return {}
@@ -53,25 +55,31 @@ class AngleMeasure(GeoObject):
 def draw_angle(p, obj, view):
     v = obj.vertex
     color = theme.SELECTED if obj.selected else theme.MEASURE
-    # 两条短臂
+    span = obj._span()
+
+    # 两条短臂（屏幕长度 30px → 世界长度 30/scale）
+    arm = 30.0 / view.scale
     p.setPen(theme.pen(color, 1.5))
     for a in (obj.a1, obj.a2):
         p.drawLine(view.to_screen(v.x, v.y),
-                   view.to_screen(v.x + 30 * math.cos(a) / view.scale * view.scale,
-                                  v.y + 30 * math.sin(a) / view.scale * view.scale))
-    # 圆弧（世界半径 = 22 屏幕像素）
-    r = 22.0 / view.scale
-    span = obj._span()
+                   view.to_screen(v.x + arm * math.cos(a), v.y + arm * math.sin(a)))
+
+    # 圆弧（屏幕半径 20px）
+    r = 20.0 / view.scale
     path = QPainterPath()
     for i in range(33):
         a = obj.a1 + span * i / 32
         sp = view.to_screen(v.x + r * math.cos(a), v.y + r * math.sin(a))
         path.moveTo(sp) if i == 0 else path.lineTo(sp)
     p.drawPath(path)
-    # 度数文本
+
+    # 度数文本（屏幕半径 34px 处的角平分线方向）
+    lr = 34.0 / view.scale
+    mid = obj.a1 + span / 2
+    lp = view.to_screen(v.x + lr * math.cos(mid), v.y + lr * math.sin(mid))
     p.setPen(theme.pen(color))
     p.setFont(theme.LABEL_FONT)
-    p.drawText(view.to_screen(*obj.label) + QPointF(-14, 4), f"{obj.degrees:.1f}°")
+    p.drawText(lp + QPointF(-12, 4), f"{obj.degrees:.1f}°")
 
 
 @register_tool(name="角度", shortcut="A", order=24, icon="angle", panel="menu",
@@ -104,7 +112,6 @@ class AngleTool(Tool):
         for i in range(1, len(self.pts)):
             p.drawLine(view.to_screen(self.pts[i-1].x, self.pts[i-1].y),
                        view.to_screen(self.pts[i].x, self.pts[i].y))
-        if len(self.pts) < 3:
-            last = self.pts[-1]
-            p.drawLine(view.to_screen(last.x, last.y),
-                       view.to_screen(*view.cursor_wpt))
+        last = self.pts[-1]
+        p.drawLine(view.to_screen(last.x, last.y),
+                   view.to_screen(*view.cursor_wpt))

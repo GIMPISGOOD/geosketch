@@ -1,14 +1,12 @@
-# plugins/divide_tool.py
-"""N 等分点插件：点线段生成 N-1 个等分点（复用吸附点）。"""
+"""N 等分插件：依次点两个点，把它们的连线段 N 等分（从动，始终保持等分）。"""
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QButtonGroup, QGraphicsDropShadowEffect,
                                QHBoxLayout, QLabel, QToolButton, QWidget)
 
 from core.registry import register_tool
-from geo.points import PointOnObject
-from geo.segments import Segment
-from tools.base import Tool
+from geo.division import DivisionPoint
+from tools.base import Tool, point_or_snap
 
 
 class DividePicker(QWidget):
@@ -40,14 +38,16 @@ class DividePicker(QWidget):
 
 
 @register_tool(name="N等分", shortcut="D", order=21, icon="divide", panel="menu",
-               hint="点击线段生成 N-1 个等分点；上方选择等分数（2~12）")
+               hint="依次点击两个点，将连线段 N 等分；上方选择等分数（2~12）")
 class DivideTool(Tool):
     n = 4
 
     def __init__(self):
+        self.first = None
         self._picker = None
 
     def activated(self, canvas):
+        self.first = None
         self._picker = DividePicker(canvas)
         self._picker.n_changed.connect(self._set_n)
         self._picker.adjustSize()
@@ -58,11 +58,24 @@ class DivideTool(Tool):
         DivideTool.n = n
 
     def deactivated(self, canvas):
+        self.first = None
         if self._picker is not None:
             self._picker.hide(); self._picker.deleteLater()
             self._picker = None
 
     def press(self, canvas, wpt, hit):
-        if isinstance(hit, Segment):
-            for k in range(1, DivideTool.n):
-                canvas.doc.add(PointOnObject(hit, k / DivideTool.n))
+        pt = point_or_snap(canvas, wpt, hit)
+        if self.first is None:
+            self.first = pt
+            canvas.doc.set_selection([pt])
+        else:
+            if pt is not self.first:
+                for k in range(1, DivideTool.n):
+                    canvas.doc.add(DivisionPoint(self.first, pt, k / DivideTool.n))
+            self.first = None
+            canvas.doc.set_selection([])
+
+    def cancel(self, canvas):
+        self.first = None
+        canvas.doc.set_selection([])
+        canvas.update()

@@ -53,7 +53,7 @@ class TextObject(GeoObject):
 @register_renderer(TextObject)
 def draw_text(p, obj, view):
     wx, wy = obj.world_pos()
-    sp = view.to_screen(wx, wy) + QPointF(12, -12)     # 显示在锚点右上方
+    sp = view.to_screen(wx, wy) + QPointF(12, 24)     # 显示在锚点右上方
     font = QFont()
     font.setPixelSize(obj.size)
     p.setFont(font)
