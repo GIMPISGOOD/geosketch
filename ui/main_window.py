@@ -60,6 +60,10 @@ class MainWindow(QMainWindow):
             act.setShortcut(key)
             act.triggered.connect(slot)
             fm.addAction(act)
+        export_act = QAction("导出图像(&E)…", self)
+        export_act.setShortcut(QKeySequence("Ctrl+E"))
+        export_act.triggered.connect(self._export_image)
+        fm.addAction(export_act)
         fm.addSeparator()
         quit_act = QAction("退出(&X)", self)
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
@@ -107,6 +111,18 @@ class MainWindow(QMainWindow):
         for spec in TOOL_REGISTRY:                    # 重建工具图标配色
             self._actions[spec["cls"]].setIcon(build_tool_icon(spec))
         self.canvas.refresh_theme()
+
+    def _export_image(self) -> None:
+        path, _ = QFileDialog.getSaveFileName(
+            self, "导出图像", "sketch.png",
+            "PNG 图像 (*.png);;SVG 矢量图 (*.svg)")
+        if not path:
+            return
+        try:
+            self.canvas.export_image(path)
+        except Exception as e:
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "导出失败", f"导出图像时出错：\n{e}")
 
     def _build_statusbar(self) -> None:
         sb = QStatusBar(self)

@@ -1,8 +1,10 @@
 import math
+import os
 
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget, QToolButton
+from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
@@ -105,20 +107,60 @@ class Canvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self._draw_background(p)
-            self._draw_grid(p)
-            self._draw_axes(p)
-            for obj in self.doc.objects:
-                if obj.visible and obj.exists:
-                    renderer = find_renderer(obj)
-                    if renderer is not None:
-                        renderer(p, obj, self)
+            self.render_scene(p)                 # 几何场景（屏幕/导出共用）
+            # —— 以下仅屏幕显示，不导出 ——
             self._draw_snap_indicator(p)
             if self.tool is not None:
                 self.tool.draw_overlay(p, self)
         finally:
             p.end()
         self._place_trash()
+
+    def render_scene(self, p: QPainter) -> None:
+        """渲染几何场景（背景 + 网格 + 坐标轴 + 全部对象）。
+        屏幕显示与图像导出共用，不含任何临时 UI。"""
+        self._draw_background(p)
+        self._draw_grid(p)
+        self._draw_axes(p)
+        for obj in self.doc.objects:
+            if obj.visible and obj.exists:
+                renderer = find_renderer(obj)
+                if renderer is not None:
+                    renderer(p, obj, self)
+
+        # ================= 图像导出 =================
+    def export_image(self, path: str) -> None:
+        """按扩展名导出：.svg → 矢量图；其余（.png 等）→ 2× 高清位图。"""
+        ext = os.path.splitext(path)[1].lower()
+        if ext == ".svg":
+            self._export_svg(path)
+        else:
+            self._export_png(path)
+
+    def _export_svg(self, path: str) -> None:
+        from PySide6.QtCore import QRectF
+        from PySide6.QtSvg import QSvgGenerator
+        gen = QSvgGenerator()
+        gen.setFileName(path)
+        gen.setSize(self.size())
+        gen.setViewBox(QRectF(0, 0, self.width(), self.height()))
+        gen.setTitle("GeoSketch 导出")
+        p = QPainter()
+        p.begin(gen)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self.render_scene(p)
+        p.end()
+
+    def _export_png(self, path: str, scale: float = 2.0) -> None:
+        img = QImage(int(self.width() * scale), int(self.height() * scale),
+                     QImage.Format.Format_ARGB32)
+        p = QPainter()
+        p.begin(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.scale(scale, scale)              # 放大绘制 → 高清输出
+        self.render_scene(p)
+        p.end()
+        img.save(path)
 
     def _draw_background(self, p: QPainter) -> None:
         g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
