@@ -12,14 +12,14 @@ from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
 
-BASE_SCALE = 48.0          # 48 像素/单位 记为 100%
+BASE_SCALE = 48.0
 
 
 class Canvas(QWidget):
-    cursor_info = Signal(str)        # 光标处世界坐标 → 状态栏
-    tool_changed = Signal(str)       # 当前工具提示语 → 状态栏
-    tool_activated = Signal(object)  # 当前工具实例 → 同步按钮/动作
-    zoom_changed = Signal(float)     # 缩放百分比 → ZoomBar
+    cursor_info = Signal(str)
+    tool_changed = Signal(str)
+    tool_activated = Signal(object)
+    zoom_changed = Signal(float)
 
     def __init__(self, doc, parent=None):
         super().__init__(parent)
@@ -30,7 +30,7 @@ class Canvas(QWidget):
         self._origin_ready = False
         self.tool = None
         self.cursor_wpt: tuple[float, float] = (0.0, 0.0)
-        self.snap_target = None          # 当前磁吸候选点（驱动指示环）
+        self.snap_target = None
         self._panning = False
         self._pan_anchor = QPointF()
         self.setMouseTracking(True)
@@ -42,7 +42,7 @@ class Canvas(QWidget):
         self.tool_activated.connect(self.rail.sync)
         self.zoom_bar = ZoomBar(self, self)
 
-        # ★ 悬浮删除按钮：选择模式下选中单个点时出现在点旁
+        # 悬浮删除按钮
         self._trash = QToolButton(self)
         self._trash.setObjectName("trashBtn")
         self._trash.setIcon(trash_icon())
@@ -52,6 +52,8 @@ class Canvas(QWidget):
         self._trash.setCursor(Qt.CursorShape.PointingHandCursor)
         self._trash.clicked.connect(self.doc.remove_selected)
         self._trash.hide()
+
+        self.refresh_theme()
 
     # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:
@@ -116,7 +118,6 @@ class Canvas(QWidget):
                 self.tool.draw_overlay(p, self)
         finally:
             p.end()
-        # 绘制结束后更新删除按钮位置
         self._place_trash()
 
     def _draw_background(self, p: QPainter) -> None:
@@ -292,7 +293,6 @@ class Canvas(QWidget):
             super().keyPressEvent(ev)
 
     def _place_trash(self) -> None:
-        """删除按钮跟随选中点：仅选择模式下选中恰好一个点时显示。"""
         sel = [o for o in self.doc.objects if o.selected]
         if (len(sel) == 1 and isinstance(sel[0], AbstractPoint)
                 and isinstance(self.tool, SelectTool)):
@@ -302,3 +302,10 @@ class Canvas(QWidget):
             self._trash.raise_()
         else:
             self._trash.hide()
+    def refresh_theme(self) -> None:
+        """换肤：刷新悬浮面板样式与全部图标配色，然后重绘。"""
+        self.setStyleSheet(theme.canvas_qss())
+        self._trash.setIcon(trash_icon())
+        self.zoom_bar.refresh_icons()
+        self.rail.refresh_icons()
+        self.update()

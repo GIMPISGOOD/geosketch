@@ -1,18 +1,21 @@
-from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import (QFileDialog, QLabel, QMainWindow, QStatusBar)
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel,
+                               QMainWindow, QStatusBar)
 
-import geo            # noqa: F401  触发几何对象注册
-import tools          # noqa: F401  触发工具注册
+import geo            # noqa: F401
+import tools          # noqa: F401
+import plugins        # noqa: F401
 from core.document import Document
 from core.registry import TOOL_REGISTRY
 from ui import theme
 from ui.canvas import Canvas
+from ui.icons import build_tool_icon
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("GeoSketch · 几何画板 v0.1")
+        self.setWindowTitle("GeoSketch · 几何画板")
         self.resize(1240, 780)
 
         self.doc = Document()
@@ -20,17 +23,18 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.canvas)
 
         self._actions: dict[type, QAction] = {}
-        self._build_shortcuts()
+        self._create_tool_actions()
+        self._build_menubar()
         self._build_statusbar()
-        self._build_menu()
 
-        self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())   # 默认：选择
+        theme.bus.changed.connect(self._on_theme_changed)
+        self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
 
-    # ---------- 窗口级快捷键（工具栏已移到画布悬浮件）----------
-    def _build_shortcuts(self) -> None:
+    def _create_tool_actions(self) -> None:
         for spec in TOOL_REGISTRY:
             act = QAction(spec["name"], self, checkable=True)
-            if spec["shortcut"]:                       # 空快捷键不建 QKeySequence
+            act.setIcon(build_tool_icon(spec))
+            if spec["shortcut"]:
                 act.setShortcut(QKeySequence(spec["shortcut"]))
             act.setStatusTip(spec["hint"])
             act.triggered.connect(
@@ -43,25 +47,10 @@ class MainWindow(QMainWindow):
         for cls, act in self._actions.items():
             act.setChecked(type(tool) is cls)
 
-    # ---------- 状态栏 ----------
-    def _build_statusbar(self) -> None:
-        sb = QStatusBar(self)
-        self.setStatusBar(sb)
-        self._hint_label = QLabel("就绪")
-        self._coord_label = QLabel("(    0.00 ,    0.00 )")
-        self._coord_label.setFont(theme.LABEL_FONT)
-        self._count_label = QLabel("0 个对象")
-        sb.addWidget(self._hint_label, 1)
-        sb.addPermanentWidget(self._count_label)
-        sb.addPermanentWidget(self._coord_label)
-        self.canvas.cursor_info.connect(self._coord_label.setText)
-        self.canvas.tool_changed.connect(self._hint_label.setText)
-        self.doc.changed.connect(
-            lambda: self._count_label.setText(f"{len(self.doc.objects)} 个对象"))
+    def _build_menubar(self) -> None:
+        mb = self.menuBar()
 
-    # ---------- 菜单：显式 QAction，避开 addAction 重载歧义 ----------
-    def _build_menu(self) -> None:
-        fm = self.menuBar().addMenu("文件(&F)")
+        fm = mb.addMenu("文件(&F)")
         for text, slot, key in (
             ("新建(&N)", self.doc.clear, QKeySequence.StandardKey.New),
             ("打开(&O)…", self._open, QKeySequence.StandardKey.Open),
@@ -76,6 +65,50 @@ class MainWindow(QMainWindow):
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         quit_act.triggered.connect(self.close)
         fm.addAction(quit_act)
+
+        # 工具菜单：插件工具
+        tm = mb.addMenu("工具(&T)")
+        plugin_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "menu"]
+        for spec in plugin_specs:
+            tm.addAction(self._actions[spec["cls"]])
+        if not plugin_specs:
+            e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
+
+        # 主题菜单：互斥单选
+        thm = mb.addMenu("主题(&M)")
+        tgroup = QActionGroup(self)
+        tgroup.setExclusive(True)
+        for name in theme.theme_names():
+            act = QAction(name, self, checkable=True)
+            act.setChecked(name == theme.active_name())
+            act.triggered.connect(lambda _=False, n=name: theme.set_theme(n))
+            tgroup.addAction(act)
+            thm.addAction(act)
+
+    def _on_theme_changed(self, name) -> None:
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)
+        
+        app.setStyleSheet(theme.app_stylesheet())
+        
+        for spec in TOOL_REGISTRY:                    # 重建工具图标配色
+            self._actions[spec["cls"]].setIcon(build_tool_icon(spec))
+        self.canvas.refresh_theme()
+
+    def _build_statusbar(self) -> None:
+        sb = QStatusBar(self)
+        self.setStatusBar(sb)
+        self._hint_label = QLabel("就绪")
+        self._coord_label = QLabel("(    0.00 ,    0.00 )")
+        self._coord_label.setFont(theme.LABEL_FONT)
+        self._count_label = QLabel("0 个对象")
+        sb.addWidget(self._hint_label, 1)
+        sb.addPermanentWidget(self._count_label)
+        sb.addPermanentWidget(self._coord_label)
+        self.canvas.cursor_info.connect(self._coord_label.setText)
+        self.canvas.tool_changed.connect(self._hint_label.setText)
+        self.doc.changed.connect(
+            lambda: self._count_label.setText(f"{len(self.doc.objects)} 个对象"))
 
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

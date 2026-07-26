@@ -18,6 +18,14 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "segment":   ("fa5s.slash",         "mdi.vector-line",  "fa.minus"),
     "circle":    ("fa5.circle",         "mdi.circle-outline", "fa5s.circle"),
     "intersect": ("fa5s.crosshairs",    "fa.crosshairs",    "mdi.target"),
+    "polygon":   ("fa5s.draw-polygon",  "mdi.vector-polygon", "fa5s.shapes"),
+    "midpoint":  ("mdi.circle-double",        "fa5s.dot-circle"),
+    "divide":    ("fa5s.divide",              "mdi.division"),
+    "line":      ("mdi.vector-line",          "fa5s.minus"),
+    "ray":       ("fa5s.long-arrow-alt-right","mdi.arrow-right-bold"),
+    "angle":     ("fa5s.drafting-compass",    "mdi.angle-acute"),
+    "ratio":     ("fa5s.balance-scale",       "mdi.scale-balance"),
+    "text":      ("fa5s.font",                "mdi.format-text"),
 }
 
 

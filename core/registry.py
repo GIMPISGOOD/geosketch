@@ -1,9 +1,4 @@
-"""三个注册表，全部扩展都经过这里（本版新增 icon 参数）：
-
-  GEO_REGISTRY     类型名 → 几何对象类      （存盘/读盘时按名字重建）
-  RENDER_REGISTRY  几何对象类 → 绘制函数    （沿 MRO 查找，子类可复用父类画法）
-  TOOL_REGISTRY    工具规格列表             （左侧工具栏按 order 自动生成）
-"""
+"""三个注册表 + 工具面板归属。所有扩展都经过这里。"""
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
@@ -29,7 +24,6 @@ def register_renderer(cls):
 
 
 def find_renderer(obj) -> Optional[Callable]:
-    """沿 MRO 查找渲染器；找不到返回 None（调用方必须判空）。"""
     for klass in type(obj).__mro__:
         if klass in RENDER_REGISTRY:
             return RENDER_REGISTRY[klass]
@@ -37,14 +31,17 @@ def find_renderer(obj) -> Optional[Callable]:
 
 
 def register_tool(name: str, shortcut: Optional[str] = None, order: int = 100,
-                  hint: str = "", icon: Optional[Callable] = None):
-    """注册工具。icon 为 (QPainter, QRectF, QColor) -> None 的绘制函数。"""
+                  hint: str = "", icon: Optional[str] = None, panel: str = "rail"):
+    """注册工具。
+    panel="rail" → 左侧工具栏（核心工具）；
+    panel="menu" → 菜单栏「工具」下拉菜单（plugins/ 插件工具）。"""
     def deco(cls):
         cls.tool_name = name
         cls.shortcut = shortcut
         cls.hint = hint
+        cls.panel = panel
         TOOL_REGISTRY.append({"name": name, "shortcut": shortcut, "order": order,
-                              "hint": hint, "icon": icon, "cls": cls})
+                              "hint": hint, "icon": icon, "panel": panel, "cls": cls})
         TOOL_REGISTRY.sort(key=lambda d: d["order"])
         return cls
     return deco
