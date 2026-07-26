@@ -30,6 +30,8 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "parallel":     ("fa5s.equals",            "mdi.vector-parallel"),
     "bisector":     ("fa5s.drafting-compass",  "mdi.vector-radius"),
     "angle_divide": ("fa5s.chart-pie",         "mdi.pie-chart-outline"),
+    "ellipse":  ("mdi.ellipse-outline", "fa5s.circle"),
+    "bezier":   ("fa5s.bezier-curve",   "mdi.vector-bezier"),
 }
 
 

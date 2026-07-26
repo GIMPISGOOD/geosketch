@@ -42,6 +42,14 @@ class GeoObject:
         """世界坐标 (x,y) 到本对象的距离；返回 None 表示不可拾取。"""
         return None
 
+    def point_at(self, t):
+        """参数化位置：t → (x, y)。可吸附对象（线段/圆/直线等）需实现。"""
+        raise NotImplementedError(f"{type(self).__name__} 不支持 point_at")
+
+    def project(self, x, y):
+        """把世界坐标 (x, y) 投影到对象上，返回参数 t。可吸附对象需实现。"""
+        raise NotImplementedError(f"{type(self).__name__} 不支持 project")
+
     # ---- 序列化接口（与 @register_geo 配套）----
     def dump(self) -> dict:
         """导出自由参数（不由 parents 决定的那部分）。"""

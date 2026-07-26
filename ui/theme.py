@@ -27,6 +27,7 @@ THEMES = {
         "PANEL_HOVER": "rgba(25,113,194,0.10)", "PANEL_CHECKED": "rgba(25,113,194,0.16)",
         "WINDOW_BG": "#eef2f8", "MENU_BG": "#ffffff",
         "MENU_HOVER": "#e7edf6", "BORDER": "#dde5ef",
+        "ELLIPSE": "#862e9c", "BEZIER": "#087f5b",
     },
     "墨夜": {
         "BG_TOP": "#101826", "BG_BOTTOM": "#0a0f1a",
@@ -42,6 +43,7 @@ THEMES = {
         "PANEL_HOVER": "rgba(94,200,245,0.12)", "PANEL_CHECKED": "rgba(94,200,245,0.20)",
         "WINDOW_BG": "#0d1420", "MENU_BG": "#16202f",
         "MENU_HOVER": "#223148", "BORDER": "#263449",
+        "ELLIPSE": "#da77f2", "BEZIER": "#63e6be",
     },
     "蓝图": {
         "BG_TOP": "#143a6b", "BG_BOTTOM": "#0e2a50",
@@ -57,6 +59,7 @@ THEMES = {
         "PANEL_HOVER": "rgba(116,179,255,0.16)", "PANEL_CHECKED": "rgba(116,179,255,0.28)",
         "WINDOW_BG": "#0c2344", "MENU_BG": "#123059",
         "MENU_HOVER": "#1c4076", "BORDER": "#2a5288",
+        "ELLIPSE": "#e599f7", "BEZIER": "#96f2d7",
     },
     "黑板": {
         "BG_TOP": "#20362c", "BG_BOTTOM": "#17271f",
@@ -72,6 +75,7 @@ THEMES = {
         "PANEL_HOVER": "rgba(127,214,164,0.14)", "PANEL_CHECKED": "rgba(127,214,164,0.25)",
         "WINDOW_BG": "#142019", "MENU_BG": "#1c2c23",
         "MENU_HOVER": "#28402f", "BORDER": "#31503c",
+        "ELLIPSE": "#eebefa", "BEZIER": "#8ce99a",
     },
 }
 

@@ -21,7 +21,7 @@ class Document(QObject):
         self._undo = []                 # 历史状态快照栈
         self._redo = []
         self._group_depth = 0           # 动作分组深度（拖动/批量）
-        self._mutation_count = 0        # 几何变更计数（判断一次按压是否真的改了东西）
+        self._mutation_count = 0        # 几何变更计数
         self._pending = None            # 按压前暂存的快照
         self._mut_before = 0
 
@@ -32,7 +32,6 @@ class Document(QObject):
         return obj
 
     def add(self, obj):
-        """新增对象。撤销由"按压包裹"或显式 action 负责，这里不重复入栈。"""
         self._add(obj)
         self.changed.emit()
         return obj
@@ -116,7 +115,6 @@ class Document(QObject):
         self.history_changed.emit()
 
     def begin_action(self):
-        """开启一个动作分组：组内多次变更只算一个撤销步（用于拖动/批量创建）。"""
         if self._group_depth == 0:
             self._push_undo()
         self._group_depth += 1
@@ -133,12 +131,10 @@ class Document(QObject):
             self.end_action()
 
     def _arm_undo(self):
-        """按压前调用：暂存快照，等按压结束后按需入栈。"""
         self._pending = self.snapshot()
         self._mut_before = self._mutation_count
 
     def _commit_undo_if_changed(self):
-        """按压后调用：仅当本次按压真的改了几何，才把暂存快照入栈（避免空撤销步）。"""
         if self._pending is not None and self._mutation_count != self._mut_before:
             self._undo.append(self._pending)
             if len(self._undo) > UNDO_LIMIT:
@@ -176,7 +172,9 @@ class Document(QObject):
         for item in data:
             cls = GEO_REGISTRY[item["type"]]
             parents = [pool[pid] for pid in item["parents"]]
-            pool[item["id"]] = self._add(cls.build(parents, item["params"]))
+            obj = cls.build(parents, item["params"])
+            obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+            pool[item["id"]] = self._add(obj)
         if data:
             GeoObject.bump_ids(max(item["id"] for item in data))
         self.changed.emit()
