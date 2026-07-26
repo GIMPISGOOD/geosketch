@@ -49,14 +49,14 @@
 需要 **Python ≥ 3.9**（推荐 3.12）。
 
 ## bash
-git clone https://github.com/GIMPISGOOD/geosketch.git
-cd geosketch
-pip install PySide6 qtawesome
+- git clone https://github.com/GIMPISGOOD/geosketch.git
+- cd geosketch
+- pip install PySide6 qtawesome
 
 ## 基本操作
-左键：使用当前工具绘制 / 选择
-滚轮：以光标为锚点缩放
-中键拖拽：平移画布
-Delete：删除选中对象（级联）
-Esc：取消进行中的操作
-Ctrl+S / Ctrl+O：保存 / 打开（JSON）
+- 左键：使用当前工具绘制 / 选择
+- 滚轮：以光标为锚点缩放
+- 中键拖拽：平移画布
+- Delete：删除选中对象（级联）
+- Esc：取消进行中的操作
+- Ctrl+S / Ctrl+O：保存 / 打开（JSON）
