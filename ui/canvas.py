@@ -116,12 +116,15 @@ class Canvas(QWidget):
             p.end()
         self._place_trash()
 
-    def render_scene(self, p: QPainter) -> None:
-        """渲染几何场景（背景 + 网格 + 坐标轴 + 全部对象）。
-        屏幕显示与图像导出共用，不含任何临时 UI。"""
+    def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
+        """渲染几何场景（背景 + 可选网格/坐标轴 + 全部对象）。
+        bg_mode: "grid"=网格+坐标轴, "axes"=仅坐标轴, "none"=都不画。"""
         self._draw_background(p)
-        self._draw_grid(p)
-        self._draw_axes(p)
+        if bg_mode == "grid":
+            self._draw_grid(p)
+            self._draw_axes(p)
+        elif bg_mode == "axes":
+            self._draw_axes(p)
         for obj in self.doc.objects:
             if obj.visible and obj.exists:
                 renderer = find_renderer(obj)
@@ -129,39 +132,68 @@ class Canvas(QWidget):
                     renderer(p, obj, self)
 
         # ================= 图像导出 =================
-    def export_image(self, path: str) -> None:
-        """按扩展名导出：.svg → 矢量图；其余（.png 等）→ 2× 高清位图。"""
-        ext = os.path.splitext(path)[1].lower()
-        if ext == ".svg":
-            self._export_svg(path)
-        else:
-            self._export_png(path)
+        # ================= 图像导出 =================
+    def _apply_fit(self, bbox) -> None:
+        """把包围盒适配到画布尺寸并居中（四周留白 70px）。"""
+        x0, y0, x1, y1 = bbox
+        cw, ch = max(x1 - x0, 1e-9), max(y1 - y0, 1e-9)
+        margin = 70.0
+        avail_w = max(self.width() - 2 * margin, 1.0)
+        avail_h = max(self.height() - 2 * margin, 1.0)
+        self.scale = min(avail_w / cw, avail_h / ch)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        self.origin = QPointF(self.width() / 2 - cx * self.scale,
+                              self.height() / 2 + cy * self.scale)
 
-    def _export_svg(self, path: str) -> None:
+    def render_to_image(self, fit=False, bg_mode="grid", scale=2.0):
+        """渲染为 QImage（PNG 导出与向导预览共用）。fit=True 时先适配内容并居中。
+        临时改写 scale/origin，结束后恢复，不影响当前视图。"""
+        saved = (self.scale, self.origin)
+        try:
+            if fit:
+                bbox = content_bbox(self.doc)
+                if bbox:
+                    self._apply_fit(bbox)
+            img = QImage(int(self.width() * scale), int(self.height() * scale),
+                         QImage.Format.Format_ARGB32)
+            p = QPainter()
+            p.begin(img)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            p.scale(scale, scale)
+            self.render_scene(p, bg_mode)
+            p.end()
+            return img
+        finally:
+            self.scale, self.origin = saved
+
+    def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0):
+        """按扩展名导出：.svg → 矢量；其余 → PNG 位图。"""
+        if os.path.splitext(path)[1].lower() == ".svg":
+            self._export_svg(path, fit, bg_mode)
+        else:
+            self.render_to_image(fit, bg_mode, png_scale).save(path)
+
+    def _export_svg(self, path, fit=False, bg_mode="grid"):
         from PySide6.QtCore import QRectF
         from PySide6.QtSvg import QSvgGenerator
-        gen = QSvgGenerator()
-        gen.setFileName(path)
-        gen.setSize(self.size())
-        gen.setViewBox(QRectF(0, 0, self.width(), self.height()))
-        gen.setTitle("GeoSketch 导出")
-        p = QPainter()
-        p.begin(gen)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self.render_scene(p)
-        p.end()
-
-    def _export_png(self, path: str, scale: float = 2.0) -> None:
-        img = QImage(int(self.width() * scale), int(self.height() * scale),
-                     QImage.Format.Format_ARGB32)
-        p = QPainter()
-        p.begin(img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        p.scale(scale, scale)              # 放大绘制 → 高清输出
-        self.render_scene(p)
-        p.end()
-        img.save(path)
-
+        saved = (self.scale, self.origin)
+        try:
+            if fit:
+                bbox = content_bbox(self.doc)
+                if bbox:
+                    self._apply_fit(bbox)
+            gen = QSvgGenerator()
+            gen.setFileName(path)
+            gen.setSize(self.size())
+            gen.setViewBox(QRectF(0, 0, self.width(), self.height()))
+            gen.setTitle("GeoSketch 导出")
+            p = QPainter()
+            p.begin(gen)
+            p.setRenderHint(QPainter.RenderHint.Antialiasing)
+            self.render_scene(p, bg_mode)
+            p.end()
+        finally:
+            self.scale, self.origin = saved
     def _draw_background(self, p: QPainter) -> None:
         g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
         g.setColorAt(0.0, theme.BG_TOP)
@@ -355,3 +387,20 @@ class Canvas(QWidget):
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
         self.update()
+
+def content_bbox(doc):
+    """所有可见几何对象的世界坐标包围盒 (x0,y0,x1,y1)；无对象返回 None。
+    点取自身坐标；曲线按 t∈[0,1] 采样 37 个点（无限直线只取定义段，画出时自会裁剪）。"""
+    xs, ys = [], []
+    for o in doc.objects:
+        if not (o.visible and o.exists):
+            continue
+        if isinstance(o, AbstractPoint):
+            xs.append(o.x); ys.append(o.y)
+        elif hasattr(o, "point_at"):
+            for i in range(37):
+                px, py = o.point_at(i / 36)
+                xs.append(px); ys.append(py)
+    if not xs:
+        return None
+    return min(xs), min(ys), max(xs), max(ys)

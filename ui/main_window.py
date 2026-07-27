@@ -113,16 +113,8 @@ class MainWindow(QMainWindow):
         self.canvas.refresh_theme()
 
     def _export_image(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self, "导出图像", "sketch.png",
-            "PNG 图像 (*.png);;SVG 矢量图 (*.svg)")
-        if not path:
-            return
-        try:
-            self.canvas.export_image(path)
-        except Exception as e:
-            from PySide6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "导出失败", f"导出图像时出错：\n{e}")
+        from ui.export_wizard import ExportWizard
+        ExportWizard(self.canvas, self).exec()
 
     def _build_statusbar(self) -> None:
         sb = QStatusBar(self)
