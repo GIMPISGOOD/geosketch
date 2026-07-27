@@ -118,6 +118,12 @@ def __getattr__(name):
 def app_stylesheet() -> str:
     t = THEMES[_active]
     return f"""
+    #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
+    #infoPanel, #lengthPanel, #anglePanel {{
+        background: {t["PANEL_BG"]};
+        border: 1px solid {t["PANEL_BORDER"]};
+        border-radius: 14px;
+    }}
     QMainWindow {{ background: {t["WINDOW_BG"]}; }}
     QMenuBar {{ background: {t["MENU_BG"]}; color: {t["INK"]};
                border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}

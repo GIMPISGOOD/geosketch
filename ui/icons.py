@@ -32,6 +32,9 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "angle_divide": ("fa5s.chart-pie",         "mdi.pie-chart-outline"),
     "ellipse":  ("mdi.ellipse-outline", "fa5s.circle"),
     "bezier":   ("fa5s.bezier-curve",   "mdi.vector-bezier"),
+    "box":        ("fa5s.vector-square",  "mdi.vector-rectangle"),
+    "length":     ("mdi.ruler",           "fa5s.ruler-horizontal"),
+    "fixedangle": ("mdi.angle-acute",     "fa5s.drafting-compass"),
 }
 
 

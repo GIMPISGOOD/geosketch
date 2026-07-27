@@ -13,6 +13,7 @@ from ui import theme
 from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
+from ui.info_panel import InfoPanel
 
 BASE_SCALE = 48.0
 
@@ -54,6 +55,8 @@ class Canvas(QWidget):
         self._trash.setCursor(Qt.CursorShape.PointingHandCursor)
         self._trash.clicked.connect(self.doc.remove_selected)
         self._trash.hide()
+
+        self.info_panel = InfoPanel(self, self)
 
         self.refresh_theme()
 
@@ -317,6 +320,7 @@ class Canvas(QWidget):
         zb = self.zoom_bar
         zb.move(self.width() - zb.width() - 16,
                 self.height() - zb.height() - 16)
+        self.info_panel.reposition()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:

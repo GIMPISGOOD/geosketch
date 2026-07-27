@@ -1,108 +1,95 @@
-"""选择工具：点选/拖动单个对象；空白处拖拽框选多个对象。"""
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor
-
+"""选择工具：点选对象；拖点移动单点；点图形整体平移；多选后拖动整组移动。
+框选功能已独立为「框选」工具。"""
 from core.registry import register_tool
-from geo.points import AbstractPoint, FreePoint
+from geo.points import AbstractPoint, FreePoint, PointOnObject
 from tools.base import Tool, snap_target
-from ui import theme
 
 
-def _collect_defining_points(obj, acc, seen):
-    """递归收集对象的定义点（自身是点则收自己，否则沿 parents 往下找）。"""
+def _free_points_of(obj, acc, seen):
+    """收集对象依赖闭包中的全部自由点（整体拖动用）。
+    派生点（中点/交点等）不收——它们由父对象决定，父对象移动后自动跟随。"""
     if id(obj) in seen:
         return
     seen.add(id(obj))
-    if isinstance(obj, AbstractPoint):
+    if isinstance(obj, FreePoint):
         acc.append(obj)
         return
     for p in obj.parents:
-        _collect_defining_points(p, acc, seen)
-
-
-def _object_in_rect(obj, x0, y0, x1, y1):
-    """对象是否落入选框：点看坐标范围；其他对象看其定义点是否落入。"""
-    if not (obj.visible and obj.exists):
-        return False
-    if isinstance(obj, AbstractPoint):
-        return x0 <= obj.x <= x1 and y0 <= obj.y <= y1
-    pts = []
-    _collect_defining_points(obj, pts, set())
-    return any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for p in pts)
+        _free_points_of(p, acc, seen)
 
 
 @register_tool(name="选择", shortcut="V", order=0, icon="select",
-               hint="点选/拖动对象；空白处拖拽框选多个；Delete 级联删除")
+               hint="点选对象；拖点移动，点图形整体移动；框选请用「框选」工具")
 class SelectTool(Tool):
     def __init__(self):
-        self.dragged = None
-        self.offset = (0.0, 0.0)
-        self._drag_undo_begun = False
-        self.box_start = None
-        self.box_end = None
+        self._reset()
 
     def activated(self, canvas):
-        self.dragged = None
-        self.box_start = None
+        self._reset()
+
+    def _reset(self):
+        self.drag_pts = []          # 偏移拖动的自由点（单个或一组）
+        self.drag_poo = None        # 参数拖动的吸附点
+        self._orig_pos = []
+        self._grab_wpt = None
+        self._drag_undo_begun = False
 
     def press(self, canvas, wpt, hit):
+        self._reset()
         target = snap_target(canvas, wpt, hit)
-        self.dragged = None
-        self.box_start = None
-        self._drag_undo_begun = False
-        if target is not None:
+        if target is None:
+            canvas.doc.set_selection([])          # 空白处点击 = 取消选择
+            return
+
+        selected = [o for o in canvas.doc.objects if o.selected]
+        multi = (len(selected) > 1) and (target in selected)
+
+        if multi:
+            # 已框选多个对象：整体拖动其中全部自由点
+            canvas.doc.set_selection(selected)
+            pts, seen = [], set()
+            for o in selected:
+                _free_points_of(o, pts, seen)
+            self.drag_pts = pts
+        elif isinstance(target, PointOnObject):
             canvas.doc.set_selection([target])
-            if getattr(target, "draggable", False):
-                self.dragged = target
-                self.offset = (0.0, 0.0)
-                if isinstance(target, FreePoint):
-                    # 记录光标与点心的偏移：拖动时点不会"跳"到光标上
-                    self.offset = (target.x - wpt[0], target.y - wpt[1])
+            self.drag_poo = target
+        elif isinstance(target, FreePoint):
+            canvas.doc.set_selection([target])
+            self.drag_pts = [target]
+        elif isinstance(target, AbstractPoint):
+            # 派生点（中点/交点/等分点/顶点）：只选中，不拖动
+            canvas.doc.set_selection([target])
         else:
-            # 空白处：开始框选
-            canvas.doc.set_selection([])
-            self.box_start = wpt
-            self.box_end = wpt
+            # 几何图形：整体平移（移动它的全部自由定义点）
+            canvas.doc.set_selection([target])
+            pts, seen = [], set()
+            _free_points_of(target, pts, seen)
+            self.drag_pts = pts
+
+        self._grab_wpt = wpt
+        self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
     def move(self, canvas, wpt, hit):
-        if self.dragged is not None:
-            if not self._drag_undo_begun:
-                canvas.doc.begin_action()          # 首次移动才记撤销（整段拖动=1步）
-                self._drag_undo_begun = True
-            if isinstance(self.dragged, FreePoint):
-                self.dragged.drag_to((wpt[0] + self.offset[0],
-                                      wpt[1] + self.offset[1]))
-            else:
-                self.dragged.drag_to(wpt)
-            canvas.doc.recompute_from(self.dragged)
-        elif self.box_start is not None:
-            self.box_end = wpt
-            canvas.update()                        # 重绘选框
+        if self.drag_poo is None and not self.drag_pts:
+            return
+        if not self._drag_undo_begun:
+            canvas.doc.begin_action()             # 首次移动才记撤销
+            self._drag_undo_begun = True
+        if self.drag_poo is not None:
+            self.drag_poo.drag_to(wpt)
+            canvas.doc.recompute_from(self.drag_poo)
+        else:
+            dx = wpt[0] - self._grab_wpt[0]
+            dy = wpt[1] - self._grab_wpt[1]
+            for p, ox, oy in self._orig_pos:
+                p.drag_to((ox + dx, oy + dy))
+            canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
-        if self.dragged is not None:
-            if self._drag_undo_begun:
-                canvas.doc.end_action()
-            self.dragged = None
-            self._drag_undo_begun = False
-        elif self.box_start is not None:
-            x0, x1 = sorted((self.box_start[0], self.box_end[0]))
-            y0, y1 = sorted((self.box_start[1], self.box_end[1]))
-            sel = [o for o in canvas.doc.objects
-                   if _object_in_rect(o, x0, y0, x1, y1)]
-            canvas.doc.set_selection(sel)
-            self.box_start = None
-            self.box_end = None
+        if self._drag_undo_begun:
+            canvas.doc.end_action()
+        self._reset()
 
-    def draw_overlay(self, p, view):
-        """半透明选框"""
-        if self.box_start is None or self.box_end is None:
-            return
-        a = view.to_screen(*self.box_start)
-        b = view.to_screen(*self.box_end)
-        rect = QRectF(a, b).normalized()
-        fill = QColor(theme.ACCENT)
-        fill.setAlpha(28)
-        p.setBrush(theme.brush(fill))
-        p.setPen(theme.pen(theme.ACCENT, 1.5))
-        p.drawRect(rect)
+    def cancel(self, canvas):
+        self._reset()
