@@ -35,6 +35,7 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "box":        ("fa5s.vector-square",  "mdi.vector-rectangle"),
     "length":     ("mdi.ruler",           "fa5s.ruler-horizontal"),
     "fixedangle": ("mdi.angle-acute",     "fa5s.drafting-compass"),
+    "freefill":  ("fa5s.shapes",  "mdi.shape"),
 }
 
 

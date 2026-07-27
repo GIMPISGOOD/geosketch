@@ -119,7 +119,7 @@ def app_stylesheet() -> str:
     t = THEMES[_active]
     return f"""
     #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
-    #infoPanel, #lengthPanel, #anglePanel {{
+    #infoPanel, #lengthPanel, #anglePanel, #fillConfigPanel {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["PANEL_BORDER"]};
         border-radius: 14px;
