@@ -9,6 +9,7 @@ from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
 from tools.select import SelectTool
+from ui.variable_widgets import VariableSliderPanel
 from ui import theme
 from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
@@ -57,6 +58,8 @@ class Canvas(QWidget):
         self._trash.hide()
 
         self.info_panel = InfoPanel(self, self)
+
+        self.var_panel = VariableSliderPanel(self, self)
 
         self.refresh_theme()
 
@@ -321,6 +324,7 @@ class Canvas(QWidget):
         zb.move(self.width() - zb.width() - 16,
                 self.height() - zb.height() - 16)
         self.info_panel.reposition()
+        self.var_panel.reposition()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:

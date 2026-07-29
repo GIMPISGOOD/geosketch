@@ -7,6 +7,9 @@ from PySide6.QtCore import QObject, Signal
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
 
+from core.variables import get_store
+from geo.constraints import ExprSegment, ExprAngle
+
 UNDO_LIMIT = 100
 
 
@@ -24,11 +27,15 @@ class Document(QObject):
         self._mutation_count = 0        # 几何变更计数
         self._pending = None            # 按压前暂存的快照
         self._mut_before = 0
+        self.vars = get_store()
+        self.expr_objects = []
 
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
+        if isinstance(obj, (ExprSegment, ExprAngle)):
+            self.expr_objects.append(obj)
         return obj
 
     def add(self, obj):
@@ -52,6 +59,8 @@ class Document(QObject):
                     p.children.remove(o)
             if o in self.objects:
                 self.objects.remove(o)
+            if o in self.expr_objects:
+                self.expr_objects.remove(o)
         return doomed
 
     def remove(self, obj):
@@ -76,6 +85,7 @@ class Document(QObject):
         if self.objects:
             self._push_undo()
         self.objects.clear()
+        self.expr_objects.clear()
         self.changed.emit()
 
     # ================= 选择 =================
@@ -121,6 +131,18 @@ class Document(QObject):
 
     def end_action(self):
         self._group_depth = max(0, self._group_depth - 1)
+
+    def refresh_variables(self):
+        """变量变化后，重算所有表达式约束对象并联动其后代。"""
+        moved = []
+        for eo in sorted(self.expr_objects, key=lambda o: o.id):
+            if eo.exists:
+                eo.recompute()
+                moved.extend(eo.moved_points())
+        if moved:
+            self.recompute_from(moved)
+        else:
+            self.changed.emit()
 
     @contextmanager
     def action(self):

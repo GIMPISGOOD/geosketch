@@ -13,7 +13,7 @@ def main() -> None:
     
     # 设置全局默认字体
     font = QFont()
-    font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"])
+    font.setFamilies(["STIX Two Math", "PingFang SC", "Microsoft YaHei", "sans-serif"])
     font.setPointSize(10)
     app.setFont(font)
     

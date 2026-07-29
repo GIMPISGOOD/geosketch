@@ -145,6 +145,14 @@ def app_stylesheet() -> str:
 def canvas_qss() -> str:
     t = THEMES[_active]
     return f"""
+        #varSliderPanel, #exprPanel {{
+        background: {t["PANEL_BG"]};
+        border: 1px solid {t["PANEL_BORDER"]};
+        border-radius: 12px;
+    }}
+    #varSliderPanel QLabel {{ color: {t["INK"]}; }}
+    #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
+    #exprPanel QLabel {{ color: {t["INK"]}; }}
     #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["PANEL_BORDER"]};

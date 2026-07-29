@@ -1,6 +1,9 @@
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel,
                                QMainWindow, QStatusBar)
+from PySide6.QtWidgets import QInputDialog
+from PySide6.QtWidgets import QInputDialog, QMessageBox
+from ui.variable_widgets import VariableWizard, VariableRangeDialog
 
 import geo            # noqa: F401
 import tools          # noqa: F401
@@ -10,6 +13,8 @@ from core.registry import TOOL_REGISTRY
 from ui import theme
 from ui.canvas import Canvas
 from ui.icons import build_tool_icon
+from ui.variable_widgets import VariableWizard
+from plugins.expr_tools import ExprSegmentTool, ExprAngleTool
 
 
 class MainWindow(QMainWindow):
@@ -27,6 +32,8 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
 
+        self._build_var_menu()
+
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
 
@@ -42,6 +49,90 @@ class MainWindow(QMainWindow):
             self.addAction(act)
             self._actions[spec["cls"]] = act
         self.canvas.tool_activated.connect(self._sync_actions)
+
+    def _build_var_menu(self):
+        mb = self.menuBar()
+        top = mb.addMenu("变量与函数(&B)")
+        self._var_submenu = top.addMenu("变量(&A)")
+        self._var_submenu.aboutToShow.connect(self._rebuild_var_submenu)
+        func = top.addMenu("函数(&F)")          # 预留，后续实现
+        func.setEnabled(False)
+
+    def _rebuild_var_submenu(self):
+        m = self._var_submenu
+        m.clear()
+        act = QAction("新建变量…", self)
+        act.triggered.connect(self._new_variable)
+        m.addAction(act)
+        m.addSeparator()
+
+        store = self.doc.vars
+        if store.names():
+            for name in store.names():
+                var = store.get_var(name)
+                # 每个变量一个子菜单：修改值 / 修改范围 / 删除
+                assert var is not None
+                sub = m.addMenu(f"{name} = {var.value:.3f}")
+                a_val = QAction("修改值…", self)
+                a_val.triggered.connect(lambda _=False, n=name: self._edit_variable(n))
+                sub.addAction(a_val)
+                a_rng = QAction(f"修改范围…（当前 {var.vmin:g} ~ {var.vmax:g}）", self)
+                a_rng.triggered.connect(lambda _=False, n=name: self._edit_variable_range(n))
+                sub.addAction(a_rng)
+                a_del = QAction("删除变量", self)
+                a_del.triggered.connect(lambda _=False, n=name: self._delete_variable(n))
+                sub.addAction(a_del)
+        else:
+            e = QAction("（暂无变量）", self); e.setEnabled(False)
+            m.addAction(e)
+
+        m.addSeparator()
+        s = QAction("表达式线段…", self)
+        s.triggered.connect(lambda: self.canvas.set_tool(ExprSegmentTool()))
+        m.addAction(s)
+        g = QAction("表达式角度…", self)
+        g.triggered.connect(lambda: self.canvas.set_tool(ExprAngleTool()))
+        m.addAction(g)
+
+    def _new_variable(self):
+        wiz = VariableWizard(self)
+        if wiz.exec():
+            name, val, lo, hi = wiz.result_data()
+            self.doc.vars.define(name, val, lo, hi)
+            self.doc.refresh_variables()
+            self.canvas.var_panel.refresh()
+
+    def _edit_variable_range(self, name):
+        var = self.doc.vars.get_var(name)
+        if var is None:
+            return
+        dlg = VariableRangeDialog(name, var.vmin, var.vmax, self)
+        if dlg.exec():
+            lo, hi = dlg.result_data()
+            self.doc.vars.set_range(name, lo, hi)
+            self.doc.refresh_variables()
+            self.canvas.var_panel.refresh()      # 滑杆按新范围重建
+
+    def _delete_variable(self, name):
+        reply = QMessageBox.question(
+            self, "删除变量",
+            f"确定删除变量「{name}」吗？\n引用它的表达式线段/角度将随之失效。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.doc.vars.delete(name)
+            self.doc.refresh_variables()
+            self.canvas.var_panel.refresh()
+
+    def _edit_variable(self, name):
+        var = self.doc.vars.get_var(name)
+        if var is None:
+            return
+        val, ok = QInputDialog.getDouble(
+            self, "修改变量", f"{name} =", var.value, var.vmin, var.vmax, 3)
+        if ok:
+            self.doc.vars.set(name, val)
+            self.doc.refresh_variables()
+            self.canvas.var_panel.refresh()
 
     def _sync_actions(self, tool) -> None:
         for cls, act in self._actions.items():
