@@ -131,17 +131,17 @@ def _point_label(obj: AbstractPoint, view) -> str:
 
 
 # ───────────────────────────── 渲染 ─────────────────────────────
+from ui.math import draw_math
+
 @register_renderer(AbstractPoint)
-def draw_point(p, obj: AbstractPoint, view) -> None:
-    """两种点共用：选中时放大换色，右上角标注名称。"""
+def draw_point(p, obj, view):
     qpt = view.to_screen(obj.x, obj.y)
-    radius = 6.0 if obj.selected else 4.0
+    r = 6.0 if obj.selected else 4.0
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
-    p.drawEllipse(qpt, radius, radius)
-    p.setPen(theme.pen(theme.LABEL))
-    p.setFont(theme.LABEL_FONT)
-    p.drawText(qpt + QPointF(9, -8), _point_label(obj, view))
+    p.drawEllipse(qpt, r, r)
+    draw_math(p, qpt.x() + 9, qpt.y() - 8, _point_label(obj, view),
+              size=13, color=theme.LABEL)
 
 
 # ───────────────────────────── 磁吸 ─────────────────────────────
