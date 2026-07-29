@@ -8,7 +8,8 @@ from core.registry import register_geo, register_renderer, register_tool
 from geo.base import GeoObject
 from tools.base import Tool, point_or_snap
 from ui import theme
-
+from geo.constraints import expr_driver
+from ui.math import draw_math, measure_math
 
 @register_geo("AngleMeasure")
 class AngleMeasure(GeoObject):
@@ -55,32 +56,32 @@ class AngleMeasure(GeoObject):
 def draw_angle(p, obj, view):
     v = obj.vertex
     color = theme.SELECTED if obj.selected else theme.MEASURE
-    span = obj._span()
-
-    # 两条短臂（屏幕长度 30px → 世界长度 30/scale）
+    a1 = math.atan2(obj.p1.y - v.y, obj.p1.x - v.x)
+    a2 = math.atan2(obj.p2.y - v.y, obj.p2.x - v.x)
+    span = (a2 - a1 + 3 * math.pi) % (2 * math.pi) - math.pi   # 较短扫掠
+    # 两条短臂（屏幕 30px）
     arm = 30.0 / view.scale
     p.setPen(theme.pen(color, 1.5))
-    for a in (obj.a1, obj.a2):
+    for a in (a1, a2):
         p.drawLine(view.to_screen(v.x, v.y),
                    view.to_screen(v.x + arm * math.cos(a), v.y + arm * math.sin(a)))
-
-    # 圆弧（屏幕半径 20px）
+    # 圆弧（屏幕 20px）
     r = 20.0 / view.scale
     path = QPainterPath()
     for i in range(33):
-        a = obj.a1 + span * i / 32
+        a = a1 + span * i / 32
         sp = view.to_screen(v.x + r * math.cos(a), v.y + r * math.sin(a))
         path.moveTo(sp) if i == 0 else path.lineTo(sp)
     p.drawPath(path)
-
-    # 度数文本（屏幕半径 34px 处的角平分线方向）
-    lr = 34.0 / view.scale
-    mid = obj.a1 + span / 2
+    # 标签：沿角平分线 outward，表达式优先
+    mid = a1 + span / 2
+    lr = 36.0 / view.scale
     lp = view.to_screen(v.x + lr * math.cos(mid), v.y + lr * math.sin(mid))
-    p.setPen(theme.pen(color))
-    p.setFont(theme.LABEL_FONT)
-    p.drawText(lp + QPointF(-12, 4), f"{obj.degrees:.1f}°")
-
+    drv = expr_driver(obj)
+    label = f"{drv.expr} = {obj.degrees:.1f}°" if drv else f"{obj.degrees:.1f}°"
+    w, _, _ = measure_math(label, 12)
+    draw_math(p, lp.x() - w / 2, lp.y() + 4, label, 12,
+              theme.SELECTED if obj.selected else theme.LABEL)
 
 @register_tool(name="角度", shortcut="A", order=24, icon="angle", panel="menu",
                hint="先点顶点，再点两侧的点，测量夹角")

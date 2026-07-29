@@ -78,3 +78,10 @@ class ExprAngle(GeoObject):
         obj = cls(parents[0], params["expr"])
         obj.sign = params.get("sign", obj.sign)
         return obj
+
+def expr_driver(obj):
+    """返回对象身上的表达式约束（ExprSegment / ExprAngle），没有则 None。"""
+    for c in obj.children:
+        if hasattr(c, "expr"):
+            return c
+    return None

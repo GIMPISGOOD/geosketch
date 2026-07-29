@@ -397,18 +397,47 @@ class Canvas(QWidget):
         self.update()
 
 def content_bbox(doc):
-    """所有可见几何对象的世界坐标包围盒 (x0,y0,x1,y1)；无对象返回 None。
-    点取自身坐标；曲线按 t∈[0,1] 采样 37 个点（无限直线只取定义段，画出时自会裁剪）。"""
+    """所有可见几何对象的世界坐标包围盒 (x0,y0,x1,y1)；无对象返回 None。"""
     xs, ys = [], []
     for o in doc.objects:
         if not (o.visible and o.exists):
             continue
+            
+        # 1. 点类对象
         if isinstance(o, AbstractPoint):
-            xs.append(o.x); ys.append(o.y)
-        elif hasattr(o, "point_at"):
+            xs.append(o.x)
+            ys.append(o.y)
+            continue
+            
+        # 2. 文本对象（有 world_pos 方法）
+        if hasattr(o, "world_pos"):
+            try:
+                wx, wy = o.world_pos()
+                xs.append(wx); ys.append(wy)
+                continue
+            except Exception:
+                pass
+                
+        # 3. 角度/比例等测量对象（有特定锚点属性）
+        if hasattr(o, "anchor") and isinstance(getattr(o, "anchor", None), tuple):
+            xs.append(o.anchor[0]); ys.append(o.anchor[1])
+            continue
+        if hasattr(o, "label_pos") and isinstance(getattr(o, "label_pos", None), tuple):
+            xs.append(o.label_pos[0]); ys.append(o.label_pos[1])
+            continue
+
+        # 4. 参数化曲线（线段、圆、多边形、椭圆、贝塞尔等）
+        # 使用 try-except 忽略不支持 point_at 的对象（基类默认会抛出 NotImplementedError）
+        try:
             for i in range(37):
                 px, py = o.point_at(i / 36)
-                xs.append(px); ys.append(py)
+                xs.append(px)
+                ys.append(py)
+        except NotImplementedError:
+            pass
+        except Exception:
+            pass
+
     if not xs:
         return None
     return min(xs), min(ys), max(xs), max(ys)

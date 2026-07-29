@@ -4,6 +4,9 @@ from core.registry import register_geo, register_renderer
 from geo.base import GeoObject
 from ui import theme
 
+from geo.constraints import expr_driver
+from ui.math import draw_math, measure_math
+
 
 @register_geo("Segment")
 class Segment(GeoObject):
@@ -43,5 +46,20 @@ class Segment(GeoObject):
 def draw_segment(p, obj, view):
     p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.SEGMENT,
                        3 if obj.selected else 2))
-    p.drawLine(view.to_screen(obj.a.x, obj.a.y),
-               view.to_screen(obj.b.x, obj.b.y))
+    sa = view.to_screen(obj.a.x, obj.a.y)
+    sb = view.to_screen(obj.b.x, obj.b.y)
+    p.drawLine(sa, sb)
+    # 长度标签：中点沿屏幕垂线偏移 14px，水平居中
+    mx, my = (sa.x() + sb.x()) / 2, (sa.y() + sb.y()) / 2
+    sdx, sdy = sb.x() - sa.x(), sb.y() - sa.y()
+    slen = math.hypot(sdx, sdy)
+    if slen > 1e-6:
+        px, py = -sdy / slen, sdx / slen
+        lx, ly = mx + px * 14, my + py * 14
+    else:
+        lx, ly = mx + 10, my - 10
+    drv = expr_driver(obj)
+    label = f"{drv.expr} = {obj.length():.2f}" if drv else f"{obj.length():.2f}"
+    w, _, _ = measure_math(label, 12)
+    draw_math(p, lx - w / 2, ly, label, 12,
+              theme.SELECTED if obj.selected else theme.LABEL)
