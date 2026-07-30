@@ -55,8 +55,10 @@ class MainWindow(QMainWindow):
         top = mb.addMenu("变量与函数(&B)")
         self._var_submenu = top.addMenu("变量(&A)")
         self._var_submenu.aboutToShow.connect(self._rebuild_var_submenu)
-        func = top.addMenu("函数(&F)")          # 预留，后续实现
-        func.setEnabled(False)
+        func = top.addMenu("函数(&F)")
+        new_func = QAction("新建函数…", self)
+        new_func.triggered.connect(lambda: self.canvas.function_panel.new_function())
+        func.addAction(new_func)
 
     def _rebuild_var_submenu(self):
         m = self._var_submenu

@@ -116,14 +116,9 @@ def __getattr__(name):
 
 # ───────────────────────── 样式表生成 ─────────────────────────
 def app_stylesheet() -> str:
+    """全局样式：主窗口 / 菜单 / 状态栏 / 输入控件。"""
     t = THEMES[_active]
     return f"""
-    #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
-    #infoPanel, #lengthPanel, #anglePanel, #fillConfigPanel {{
-        background: {t["PANEL_BG"]};
-        border: 1px solid {t["PANEL_BORDER"]};
-        border-radius: 14px;
-    }}
     QMainWindow {{ background: {t["WINDOW_BG"]}; }}
     QMenuBar {{ background: {t["MENU_BG"]}; color: {t["INK"]};
                border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
@@ -143,17 +138,12 @@ def app_stylesheet() -> str:
 
 
 def canvas_qss() -> str:
+    """画布内全部悬浮面板的样式（磨砂玻璃）——面板都是 canvas 子控件，必须放这里。"""
     t = THEMES[_active]
     return f"""
-        #varSliderPanel, #exprPanel {{
-        background: {t["PANEL_BG"]};
-        border: 1px solid {t["PANEL_BORDER"]};
-        border-radius: 12px;
-    }}
-    #varSliderPanel QLabel {{ color: {t["INK"]}; }}
-    #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
-    #exprPanel QLabel {{ color: {t["INK"]}; }}
-    #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor {{
+    #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
+    #infoPanel, #lengthPanel, #anglePanel, #fillConfigPanel,
+    #varSliderPanel, #exprPanel, #functionPanel {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["PANEL_BORDER"]};
         border-radius: 14px;
@@ -177,12 +167,26 @@ def canvas_qss() -> str:
     #zoomBar QLabel, #sidesPicker QLabel, #dividePicker QLabel {{
         color: {t["SUBINK"]}; font-weight: 600;
     }}
+    #varSliderPanel QLabel {{ color: {t["INK"]}; }}
+    #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
+    #exprPanel QLabel {{ color: {t["INK"]}; }}
     #trashBtn {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["SELECTED"]};
         border-radius: 14px;
     }}
     #trashBtn:hover {{ background: {t["SELECTED"]}; }}
+        #functionPanel QScrollBar:vertical {{
+        background: transparent; width: 8px; margin: 2px;
+    }}
+    #functionPanel QScrollBar::handle:vertical {{
+        background: rgba(120,140,170,0.35); border-radius: 3px; min-height: 24px;
+    }}
+    #functionPanel QScrollBar::handle:vertical:hover {{
+        background: rgba(120,140,170,0.60);
+    }}
+    #functionPanel QScrollBar::add-line:vertical,
+    #functionPanel QScrollBar::sub-line:vertical {{ height: 0px; }}
     """
 
 

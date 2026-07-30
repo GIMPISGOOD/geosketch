@@ -15,6 +15,7 @@ from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
 from ui.info_panel import InfoPanel
+from ui.function_panel import FunctionPanel
 
 BASE_SCALE = 48.0
 
@@ -60,6 +61,9 @@ class Canvas(QWidget):
         self.info_panel = InfoPanel(self, self)
 
         self.var_panel = VariableSliderPanel(self, self)
+
+        self.function_panel = FunctionPanel(self, self)
+        self.function_panel.refresh()
 
         self.refresh_theme()
 
@@ -325,6 +329,7 @@ class Canvas(QWidget):
                 self.height() - zb.height() - 16)
         self.info_panel.reposition()
         self.var_panel.reposition()
+        self.function_panel.reposition()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:

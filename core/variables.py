@@ -6,6 +6,7 @@ import keyword
 import math
 import operator
 import re
+from typing import Optional
 
 from PySide6.QtCore import QObject, Signal
 
@@ -39,7 +40,7 @@ def _preprocess(expr):
     return s
 
 
-def _eval(node, vars):
+def _eval(node: ast.AST, vars: dict[str, float]) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return float(node.value)
     if isinstance(node, ast.Name):
@@ -58,7 +59,7 @@ def _eval(node, vars):
     raise ValueError("不支持的语法")
 
 
-def evaluate(expr, variables):
+def evaluate(expr: str, variables: dict[str, float]) -> Optional[float]:
     """安全求值（AST 白名单，绝不执行任意代码）；非法返回 None。"""
     try:
         return _eval(ast.parse(_preprocess(expr), mode="eval").body, variables)
@@ -118,10 +119,10 @@ class VariableStore(QObject):
             self.version += 1
             self.changed.emit()
 
-    def as_dict(self):
+    def as_dict(self) -> dict[str, float]:
         return {n: v.value for n, v in self._vars.items()}
 
-    def evaluate(self, expr):
+    def evaluate(self, expr: str) -> Optional[float]:
         return evaluate(expr, self.as_dict())
 
 
