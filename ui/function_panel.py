@@ -1,10 +1,9 @@
-"""函数列表面板：Desmos 风格 —— 数学渲染的表达式行，悬停显示操作。
-函数多时列表内部滚动，面板高度按行数自适应，绝不被裁切。"""
+"""函数编辑器：相对独立的停靠组件（QDockWidget），函数显示于此，可增删改、显隐。"""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QColorDialog, QCheckBox,
-                               QScrollArea, QFrame)
+                               QScrollArea, QFrame, QDockWidget)
 
 from geo.function_curve import FunctionCurve
 from ui import theme
@@ -12,17 +11,15 @@ from ui.math import draw_math
 
 
 class ExprLabel(QWidget):
-    """用 draw_math 渲染表达式（数学排版，而非纯文本）。"""
+    """用 draw_math 渲染表达式。"""
     def __init__(self, text, color, parent=None):
         super().__init__(parent)
-        self._text = text
-        self._color = color
+        self._text, self._color = text, color
         self.setFixedHeight(30)
         self.setMinimumWidth(40)
 
     def set_text(self, text, color):
-        self._text = text
-        self._color = color
+        self._text, self._color = text, color
         self.update()
 
     def paintEvent(self, ev):
@@ -32,11 +29,10 @@ class ExprLabel(QWidget):
 
 
 class FunctionRow(QWidget):
-    """单条函数：色点 + 数学表达式 + 悬停操作（显隐/编辑/删除）。"""
-    def __init__(self, func, panel, parent=None):
+    """单条函数：色点 + 数学表达式 + 悬停操作。"""
+    def __init__(self, func, editor, parent=None):
         super().__init__(parent)
-        self.func = func
-        self.panel = panel
+        self.func, self.editor = func, editor
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         h = QHBoxLayout(self)
         h.setContentsMargins(6, 2, 4, 2)
@@ -46,14 +42,13 @@ class FunctionRow(QWidget):
         self.dot.setFixedSize(13, 13)
         self.dot.setCursor(Qt.CursorShape.PointingHandCursor)
         self.dot.setToolTip("更改颜色")
-        self.dot.clicked.connect(lambda _=False, f=func: panel.recolor(f))
+        self.dot.clicked.connect(lambda _=False, f=func: editor.recolor(f))
         h.addWidget(self.dot)
 
         self.expr = ExprLabel(func.default_label(), func.color)
         h.addWidget(self.expr, 1)
 
-        # 操作区（默认隐藏，悬停浮现）
-        # 注意：不能命名为 actions —— 会与 QWidget.actions() 内置方法冲突
+        # 操作区（不能叫 actions，与 QWidget.actions() 冲突）
         self._ops = QWidget()
         ah = QHBoxLayout(self._ops)
         ah.setContentsMargins(0, 0, 0, 0)
@@ -61,30 +56,28 @@ class FunctionRow(QWidget):
         self.eye = QCheckBox()
         self.eye.setToolTip("显示/隐藏")
         self.eye.setChecked(func.visible)
-        self.eye.toggled.connect(lambda on, f=func: panel.toggle(f, on))
+        self.eye.toggled.connect(lambda on, f=func: editor.toggle(f, on))
         ah.addWidget(self.eye)
         edit = QPushButton("✎")
         edit.setFixedSize(22, 22)
         edit.setCursor(Qt.CursorShape.PointingHandCursor)
         edit.setStyleSheet("border:none;")
-        edit.clicked.connect(lambda _=False, f=func: panel.edit(f))
+        edit.clicked.connect(lambda _=False, f=func: editor.edit(f))
         ah.addWidget(edit)
         rm = QPushButton("×")
         rm.setFixedSize(22, 22)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
         rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
-        rm.clicked.connect(lambda _=False, f=func: panel.delete(f))
+        rm.clicked.connect(lambda _=False, f=func: editor.delete(f))
         ah.addWidget(rm)
         h.addWidget(self._ops)
         self._ops.hide()
-
-        self.setToolTip(func.default_label())      # 悬停看完整表达式
+        self.setToolTip(func.default_label())
         self._style()
 
     def _style(self):
         self.dot.setStyleSheet(
-            f"background:{self.func.color};border-radius:6px;"
-            f"border:1px solid rgba(0,0,0,0.25);")
+            f"background:{self.func.color};border-radius:6px;border:1px solid rgba(0,0,0,0.25);")
         self.expr.set_text(self.func.default_label(), self.func.color)
 
     def enterEvent(self, ev):
@@ -96,32 +89,25 @@ class FunctionRow(QWidget):
         self.setStyleSheet("background:transparent;")
 
 
-class FunctionPanel(QWidget):
-    PANEL_W = 340          # 面板宽度：保证典型表达式完整显示
-
+class FunctionEditorWidget(QWidget):
+    """函数编辑器内容：标题 + 新建 + 可滚动函数列表。"""
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
-        self.setObjectName("functionPanel")
         self.canvas = canvas
-        self.setFixedWidth(self.PANEL_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 9, 8, 9)
         outer.setSpacing(6)
 
-        # 头部：标题 + 新建
         head = QHBoxLayout()
         self._cap = QLabel("函 数")
         head.addWidget(self._cap)
         head.addStretch(1)
-        self._add = QPushButton("＋")
-        self._add.setFixedSize(26, 26)
+        self._add = QPushButton("＋ 新建函数")
         self._add.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._add.setToolTip("新建函数")
         self._add.clicked.connect(self.new_function)
         head.addWidget(self._add)
         outer.addLayout(head)
 
-        # 可滚动的函数列表
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -133,7 +119,7 @@ class FunctionPanel(QWidget):
         self._rows = QVBoxLayout(self._list)
         self._rows.setContentsMargins(0, 0, 0, 0)
         self._rows.setSpacing(2)
-        self._rows.addStretch(1)                   # 行全部顶到最上
+        self._rows.addStretch(1)
         self._scroll.setWidget(self._list)
         outer.addWidget(self._scroll, 1)
 
@@ -141,38 +127,17 @@ class FunctionPanel(QWidget):
         self._cap.setStyleSheet(
             f"font-weight:800;font-size:13px;letter-spacing:3px;color:{theme.INK.name()};")
         self._add.setStyleSheet(
-            f"border:none;border-radius:13px;background:{theme.ACCENT.name()};"
-            f"color:#fff;font-weight:700;font-size:15px;")
-        # 清空旧行（保留末尾 stretch）
+            f"border:none;border-radius:8px;background:{theme.ACCENT.name()};"
+            f"color:#fff;font-weight:700;padding:5px 12px;")
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
             if item is not None:
                 w = item.widget()
                 if w is not None:
                     w.deleteLater()
-        funcs = [o for o in self.canvas.doc.objects if isinstance(o, FunctionCurve)]
-        for i, f in enumerate(funcs):
+        for i, f in enumerate(o for o in self.canvas.doc.objects if isinstance(o, FunctionCurve)):
             self._rows.insertWidget(i, FunctionRow(f, self))
-        self.reposition()
-        self.show()
-        self.raise_()
 
-    def reposition(self):
-        self._fit_height()
-        # 位于工具栏右侧；想放右侧改为：self.move(self.canvas.width() - self.width() - 14, 14)
-        self.move(80, 14)
-
-    def _fit_height(self):
-        """按行数确定高度（不依赖 sizeHint 时序），封顶 画布高-40，超出内部滚动。"""
-        n = max(self._rows.count() - 1, 0)       # 减去末尾 stretch
-        row_h = 34
-        header_h = 44
-        margin = 18
-        content_h = header_h + margin + n * row_h
-        max_h = self.canvas.height() - 40
-        self.setFixedHeight(max(72, min(content_h, max_h)))
-
-    # ───────── 操作 ─────────
     def new_function(self):
         from ui.formula_editor import FormulaEditor
         dlg = FormulaEditor(self.canvas, None, self)
@@ -204,3 +169,20 @@ class FunctionPanel(QWidget):
     def delete(self, f):
         self.canvas.doc.remove(f)
         self.refresh()
+
+
+class FunctionEditorDock(QDockWidget):
+    """函数编辑器停靠组件：可停靠左右、可浮动拉伸。"""
+    def __init__(self, canvas, parent=None):
+        super().__init__("函数编辑器", parent)
+        self.setObjectName("functionEditorDock")
+        self.canvas = canvas
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.setMinimumWidth(300)
+        self._widget = FunctionEditorWidget(canvas)
+        self.setWidget(self._widget)
+
+    def refresh(self):
+        self._widget.refresh()

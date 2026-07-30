@@ -30,13 +30,24 @@ def is_valid_name(name):
             and not keyword.iskeyword(name) and name not in RESERVED)
 
 
+_FUNCS = ("arcsin", "arccos", "arctan", "sin", "cos", "tan",
+          "sqrt", "abs", "ln", "exp", "log", "cot", "sec", "csc")
+
+
 def _preprocess(expr):
-    s = expr.replace("^", "**")
-    s = re.sub(r"(\d)([^\W\d_])", r"\1*\2", s)   # 2a / 2边长 → 2*a / 2*边长
-    s = re.sub(r"(\d)\(", r"\1*(", s)             # 2( → 2*(
-    s = re.sub(r"\)(\d)", r")*\1", s)             # )2 → )*2
-    s = re.sub(r"\)\(", r")*(", s)                # )( → )*(
-    s = re.sub(r"\)([^\W\d_])", r")*\1", s)       # )a → )*a
+    s = expr.replace("^", "**").replace(" ", "")   # 去空格：2 x → 2x
+    # 不影响函数名的隐式乘法
+    s = re.sub(r"(\d)([^\W\d_])", r"\1*\2", s)     # 2x / 2π / 2sin → 2*x / 2*π / 2*sin
+    s = re.sub(r"(\d)\(", r"\1*(", s)              # 2( → 2*(
+    s = re.sub(r"\)\(", r")*(", s)                 # )( → )*(
+    s = re.sub(r"\)(\d)", r")*\1", s)              # )2 → )*2
+    s = re.sub(r"\)([^\W\d_])", r")*\1", s)        # )x → )*x
+    # letter-( ：先保护函数名，再插 *（x(x+1)→x*(x+1)，sin(x) 不变）
+    for fn in _FUNCS:
+        s = s.replace(fn, f"\x01{fn}\x01")
+    s = re.sub(r"([^\W\d_])\(", r"\1*(", s)        # x( → x*(
+    for fn in _FUNCS:
+        s = s.replace(f"\x01{fn}\x01", fn)
     return s
 
 

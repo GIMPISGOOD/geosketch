@@ -119,20 +119,26 @@ class FunctionCurve(GeoObject):
             pts.append(p)
         return pts
     # ── 参数化接口（取点 / 磁吸 / 未来的交点）──
+    def _param_domain(self):
+        """点参数化的稳定定义域（不随视窗变化，保证拖动平滑）。"""
+        if self.domain:
+            return self.domain
+        if self.kind == "explicit":
+            return (-50.0, 50.0)
+        return (0.0, 4 * math.pi)
+
     def point_at(self, t):
-        a, b = self._domain or self.domain or (0.0, 1.0)
+        a, b = self._param_domain()
         u = a + (b - a) * max(0.0, min(1.0, t))
         p = self._eval_at(u)
         return p if p else (0.0, 0.0)
 
     def project(self, x, y):
-        """曲线上离 (x,y) 最近点的参数 t∈[0,1]（粗采样 + 局部精化）。"""
-        a, b = self._domain or self.domain or (0.0, 1.0)
+        a, b = self._param_domain()
         n = 500
         best_t, best_d = 0.0, float("inf")
         for i in range(n + 1):
-            u = a + (b - a) * i / n
-            p = self._eval_at(u)
+            p = self._eval_at(a + (b - a) * i / n)
             if p is None:
                 continue
             d = (p[0] - x) ** 2 + (p[1] - y) ** 2

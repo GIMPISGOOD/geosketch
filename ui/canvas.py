@@ -8,6 +8,7 @@ from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
+from geo.function_curve import FunctionCurve
 from tools.select import SelectTool
 from ui.variable_widgets import VariableSliderPanel
 from ui import theme
@@ -15,7 +16,7 @@ from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
 from ui.info_panel import InfoPanel
-from ui.function_panel import FunctionPanel
+
 
 BASE_SCALE = 48.0
 
@@ -62,8 +63,6 @@ class Canvas(QWidget):
 
         self.var_panel = VariableSliderPanel(self, self)
 
-        self.function_panel = FunctionPanel(self, self)
-        self.function_panel.refresh()
 
         self.refresh_theme()
 
@@ -329,7 +328,6 @@ class Canvas(QWidget):
                 self.height() - zb.height() - 16)
         self.info_panel.reposition()
         self.var_panel.reposition()
-        self.function_panel.reposition()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
@@ -402,19 +400,19 @@ class Canvas(QWidget):
         self.update()
 
 def content_bbox(doc):
-    """所有可见几何对象的世界坐标包围盒 (x0,y0,x1,y1)；无对象返回 None。"""
+    """所有可见对象的包围盒。函数曲线可能无限延伸，不参与包围盒计算，
+    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。"""
     xs, ys = [], []
+    funcs = []
     for o in doc.objects:
         if not (o.visible and o.exists):
             continue
-            
-        # 1. 点类对象
-        if isinstance(o, AbstractPoint):
-            xs.append(o.x)
-            ys.append(o.y)
+        if isinstance(o, FunctionCurve):
+            funcs.append(o)
             continue
-            
-        # 2. 文本对象（有 world_pos 方法）
+        if isinstance(o, AbstractPoint):
+            xs.append(o.x); ys.append(o.y)
+            continue
         if hasattr(o, "world_pos"):
             try:
                 wx, wy = o.world_pos()
@@ -422,26 +420,41 @@ def content_bbox(doc):
                 continue
             except Exception:
                 pass
-                
-        # 3. 角度/比例等测量对象（有特定锚点属性）
-        if hasattr(o, "anchor") and isinstance(getattr(o, "anchor", None), tuple):
-            xs.append(o.anchor[0]); ys.append(o.anchor[1])
-            continue
-        if hasattr(o, "label_pos") and isinstance(getattr(o, "label_pos", None), tuple):
-            xs.append(o.label_pos[0]); ys.append(o.label_pos[1])
-            continue
-
-        # 4. 参数化曲线（线段、圆、多边形、椭圆、贝塞尔等）
-        # 使用 try-except 忽略不支持 point_at 的对象（基类默认会抛出 NotImplementedError）
+        if isinstance(getattr(o, "anchor", None), tuple):
+            xs.append(o.anchor[0]); ys.append(o.anchor[1]); continue
+        if isinstance(getattr(o, "label_pos", None), tuple):
+            xs.append(o.label_pos[0]); ys.append(o.label_pos[1]); continue
         try:
             for i in range(37):
                 px, py = o.point_at(i / 36)
-                xs.append(px)
-                ys.append(py)
-        except NotImplementedError:
+                xs.append(px); ys.append(py)
+        except (NotImplementedError, Exception):
             pass
-        except Exception:
-            pass
+
+    # 用非函数对象的包围盒（加边距）裁剪函数
+    if funcs:
+        if xs:
+            x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
+            m = max(x_max - x_min, y_max - y_min) * 0.3 + 2.0
+            cx0, cx1, cy0, cy1 = x_min - m, x_max + m, y_min - m, y_max + m
+        else:
+            cx0, cx1, cy0, cy1 = -10.0, 10.0, -10.0, 10.0
+        for f in funcs:
+            if f.kind == "explicit":
+                a, b = f._param_domain()
+                a, b = max(a, cx0), min(b, cx1)
+                if a >= b:
+                    a, b = cx0, cx1
+                for i in range(200):
+                    p = f._eval_at(a + (b - a) * i / 199)
+                    if p is not None and cy0 <= p[1] <= cy1:
+                        xs.append(p[0]); ys.append(p[1])
+            else:
+                a, b = f._param_domain()
+                for i in range(300):
+                    p = f._eval_at(a + (b - a) * i / 299)
+                    if p is not None and cx0 <= p[0] <= cx1 and cy0 <= p[1] <= cy1:
+                        xs.append(p[0]); ys.append(p[1])
 
     if not xs:
         return None

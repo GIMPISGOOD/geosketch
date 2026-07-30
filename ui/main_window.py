@@ -1,4 +1,5 @@
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel,
                                QMainWindow, QStatusBar)
 from PySide6.QtWidgets import QInputDialog
@@ -15,7 +16,7 @@ from ui.canvas import Canvas
 from ui.icons import build_tool_icon
 from ui.variable_widgets import VariableWizard
 from plugins.expr_tools import ExprSegmentTool, ExprAngleTool
-
+from ui.function_panel import FunctionEditorDock
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -25,6 +26,11 @@ class MainWindow(QMainWindow):
 
         self.doc = Document()
         self.canvas = Canvas(self.doc)
+
+        self.function_dock = FunctionEditorDock(self.canvas, self)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.function_dock)
+        self.doc.changed.connect(self.function_dock.refresh)
+        self.function_dock.refresh()
         self.setCentralWidget(self.canvas)
 
         self._actions: dict[type, QAction] = {}
@@ -57,7 +63,7 @@ class MainWindow(QMainWindow):
         self._var_submenu.aboutToShow.connect(self._rebuild_var_submenu)
         func = top.addMenu("函数(&F)")
         new_func = QAction("新建函数…", self)
-        new_func.triggered.connect(lambda: self.canvas.function_panel.new_function())
+        new_func.triggered.connect(self.function_dock._widget.new_function)
         func.addAction(new_func)
 
     def _rebuild_var_submenu(self):

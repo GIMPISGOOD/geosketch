@@ -119,6 +119,11 @@ def app_stylesheet() -> str:
     """全局样式：主窗口 / 菜单 / 状态栏 / 输入控件。"""
     t = THEMES[_active]
     return f"""
+    QDockWidget {{ background: {t["MENU_BG"]}; color: {t["INK"]}; }}
+    QDockWidget::title {{
+        background: {t["PANEL_BG"]}; padding: 6px;
+        border-bottom: 1px solid {t["BORDER"]};
+    }}
     QMainWindow {{ background: {t["WINDOW_BG"]}; }}
     QMenuBar {{ background: {t["MENU_BG"]}; color: {t["INK"]};
                border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
