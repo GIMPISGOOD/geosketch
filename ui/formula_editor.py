@@ -1,5 +1,5 @@
 """函数编辑器：Desmos 风格 —— 虚拟数学键盘 + 实时数学预览。"""
-from PySide6.QtCore import Qt, QEvent
+from PySide6.QtCore import Qt, QEvent, QPointF
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLabel, QLineEdit, QRadioButton, QButtonGroup,
@@ -30,12 +30,11 @@ class MathPreview(QWidget):
             draw_math(p, 12, self.height() / 2 + 8, self._text, 18, theme.INK)
         else:
             p.setPen(theme.pen(theme.SUBINK))
-            p.drawText(12, self.height() / 2 + 6, "在下方键盘输入表达式…")
+            p.drawText(QPointF(12.0, self.height() / 2 + 6), "在下方键盘输入表达式…")
 
 
 class FormulaKeypad(QWidget):
     """Desmos 风格虚拟数学键盘：按键不抢焦点，直接插入当前输入框。"""
-    # (显示, 插入文本, 样式类)；None 表示特殊键
     KEYS = [
         ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"), ("a⁄b", "/", "op"), ("⌫", None, "util"),
         ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"), ("×", "*", "op"), ("AC", None, "util"),
@@ -56,7 +55,7 @@ class FormulaKeypad(QWidget):
             b = QPushButton(label)
             b.setProperty("keyclass", cls)
             b.setFixedHeight(38)
-            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)      # 关键：不抢输入框焦点
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             if ins is None:
                 if label == "⌫":
@@ -118,7 +117,6 @@ class FormulaEditor(QDialog):
         root = QVBoxLayout(self)
         root.setSpacing(10)
 
-        # 类型（分段选择）
         kind_row = QHBoxLayout()
         self._kind_group = QButtonGroup(self)
         self._kinds = {}
@@ -132,7 +130,6 @@ class FormulaEditor(QDialog):
             kind_row.addWidget(rb)
         root.addLayout(kind_row)
 
-        # 表达式输入 1
         self._expr1_lbl = QLabel("y =")
         self._expr1 = QLineEdit()
         self._expr1.installEventFilter(self)
@@ -140,7 +137,6 @@ class FormulaEditor(QDialog):
         row1 = QHBoxLayout(); row1.addWidget(self._expr1_lbl); row1.addWidget(self._expr1)
         root.addLayout(row1)
 
-        # 表达式输入 2（仅参数方程）
         self._expr2_row = QHBoxLayout()
         self._expr2_lbl = QLabel("y(t) =")
         self._expr2 = QLineEdit()
@@ -149,15 +145,12 @@ class FormulaEditor(QDialog):
         self._expr2_row.addWidget(self._expr2_lbl); self._expr2_row.addWidget(self._expr2)
         root.addLayout(self._expr2_row)
 
-        # 实时数学预览
         self._preview = MathPreview()
         root.addWidget(self._preview)
 
-        # 虚拟键盘（插入当前聚焦的输入框）
         self._keypad = FormulaKeypad(lambda: self._active_field or self._expr1)
         root.addWidget(self._keypad)
 
-        # 定义域
         dom = QHBoxLayout()
         self._auto_dom = QCheckBox("自动（跟随视窗）")
         self._auto_dom.toggled.connect(self._on_auto_toggled)
@@ -171,7 +164,6 @@ class FormulaEditor(QDialog):
         dom.addStretch(1)
         root.addLayout(dom)
 
-        # 颜色
         crow = QHBoxLayout()
         crow.addWidget(QLabel("颜色"))
         self._color = QColor(self.func.color if self.func else PALETTE[0])
@@ -222,9 +214,11 @@ class FormulaEditor(QDialog):
         kind = self._current_kind()
         is_param = (kind == "parametric")
         for i in range(self._expr2_row.count()):
-            w = self._expr2_row.itemAt(i).widget()
-            if w:
-                w.setVisible(is_param)
+            item = self._expr2_row.itemAt(i)
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.setVisible(is_param)
         if kind == "explicit":
             self._expr1_lbl.setText("y =")
             self._auto_dom.setVisible(True)

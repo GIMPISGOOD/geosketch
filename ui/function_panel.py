@@ -1,5 +1,5 @@
 """函数列表面板：Desmos 风格 —— 数学渲染的表达式行，悬停显示操作。
-函数多时列表内部滚动，面板高度随画布自适应，绝不被裁切。"""
+函数多时列表内部滚动，面板高度按行数自适应，绝不被裁切。"""
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -39,7 +39,7 @@ class FunctionRow(QWidget):
         self.panel = panel
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
         h = QHBoxLayout(self)
-        h.setContentsMargins(8, 2, 6, 2)
+        h.setContentsMargins(6, 2, 4, 2)
         h.setSpacing(7)
 
         self.dot = QPushButton()
@@ -53,8 +53,9 @@ class FunctionRow(QWidget):
         h.addWidget(self.expr, 1)
 
         # 操作区（默认隐藏，悬停浮现）
-        self.actions = QWidget()
-        ah = QHBoxLayout(self.actions)
+        # 注意：不能命名为 actions —— 会与 QWidget.actions() 内置方法冲突
+        self._ops = QWidget()
+        ah = QHBoxLayout(self._ops)
         ah.setContentsMargins(0, 0, 0, 0)
         ah.setSpacing(2)
         self.eye = QCheckBox()
@@ -74,8 +75,8 @@ class FunctionRow(QWidget):
         rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
         rm.clicked.connect(lambda _=False, f=func: panel.delete(f))
         ah.addWidget(rm)
-        h.addWidget(self.actions)
-        self.actions.hide()
+        h.addWidget(self._ops)
+        self._ops.hide()
 
         self.setToolTip(func.default_label())      # 悬停看完整表达式
         self._style()
@@ -87,20 +88,22 @@ class FunctionRow(QWidget):
         self.expr.set_text(self.func.default_label(), self.func.color)
 
     def enterEvent(self, ev):
-        self.actions.show()
+        self._ops.show()
         self.setStyleSheet("background:rgba(120,140,170,0.10);border-radius:7px;")
 
     def leaveEvent(self, ev):
-        self.actions.hide()
+        self._ops.hide()
         self.setStyleSheet("background:transparent;")
 
 
 class FunctionPanel(QWidget):
+    PANEL_W = 340          # 面板宽度：保证典型表达式完整显示
+
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.setObjectName("functionPanel")
         self.canvas = canvas
-        self.setFixedWidth(260)
+        self.setFixedWidth(self.PANEL_W)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 9, 8, 9)
         outer.setSpacing(6)
@@ -143,9 +146,10 @@ class FunctionPanel(QWidget):
         # 清空旧行（保留末尾 stretch）
         while self._rows.count() > 1:
             item = self._rows.takeAt(0)
-            w = item.widget()
-            if w:
-                w.deleteLater()
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
         funcs = [o for o in self.canvas.doc.objects if isinstance(o, FunctionCurve)]
         for i, f in enumerate(funcs):
             self._rows.insertWidget(i, FunctionRow(f, self))
@@ -155,17 +159,18 @@ class FunctionPanel(QWidget):
 
     def reposition(self):
         self._fit_height()
-        # 位于工具栏右侧；若想放到右侧，改为：
-        # self.move(self.canvas.width() - self.width() - 14, 14)
-        self.move(86, 14)
+        # 位于工具栏右侧；想放右侧改为：self.move(self.canvas.width() - self.width() - 14, 14)
+        self.move(80, 14)
 
     def _fit_height(self):
-        """高度 = 内容高度，封顶为 画布高-40；超出部分列表内部滚动。"""
-        self._list.adjustSize()
-        content_h = self._list.sizeHint().height()
-        header_h = 42
+        """按行数确定高度（不依赖 sizeHint 时序），封顶 画布高-40，超出内部滚动。"""
+        n = max(self._rows.count() - 1, 0)       # 减去末尾 stretch
+        row_h = 34
+        header_h = 44
+        margin = 18
+        content_h = header_h + margin + n * row_h
         max_h = self.canvas.height() - 40
-        self.setFixedHeight(max(72, min(content_h + header_h + 22, max_h)))
+        self.setFixedHeight(max(72, min(content_h, max_h)))
 
     # ───────── 操作 ─────────
     def new_function(self):
