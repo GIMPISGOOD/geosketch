@@ -36,6 +36,16 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "length":     ("mdi.ruler",           "fa5s.ruler-horizontal"),
     "fixedangle": ("mdi.angle-acute",     "fa5s.drafting-compass"),
     "freefill":  ("fa5s.shapes",  "mdi.shape"),
+    "length":    ("fa5s.ruler",            "mdi.ruler"),
+    "distance":  ("fa5s.arrows-alt-h",     "mdi.arrow-expand-horizontal"),
+    "angle":     ("fa5s.drafting-compass", "mdi.angle-acute"),
+    "ratio":     ("fa5s.balance-scale",    "mdi.scale-balance"),
+    "area":      ("fa5s.draw-polygon",     "mdi.texture-box"),
+    "perimeter": ("fa5s.vector-square",    "mdi.ruler-square"),
+    "radius":    ("fa5s.circle-notch",     "mdi.radius"),
+    "diameter":  ("fa5s.circle",           "mdi.circle-diameter"),
+    "slope":     ("fa5s.chart-line",       "mdi.slope-downhill"),
+    "coord":     ("fa5s.crosshairs",       "mdi.crosshairs-gps"),
 }
 
 

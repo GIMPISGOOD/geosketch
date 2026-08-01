@@ -309,13 +309,24 @@ class CoordMeasureTool(MeasureTool):
 
 
 # 全部注册到「度量」菜单（panel="measure"）
-register_tool(name="长度", order=1, panel="measure", hint="点击线段度量长度")(LengthMeasureTool)
-register_tool(name="距离", order=2, panel="measure", hint="点击两点度量距离")(DistanceMeasureTool)
-register_tool(name="角度", order=3, panel="measure", hint="依次点顶点、两边上的点度量角度")(AngleMeasureTool)
-register_tool(name="比值", order=4, panel="measure", hint="点击两条线段度量长度比值")(RatioMeasureTool)
-register_tool(name="面积", order=5, panel="measure", hint="点击多边形/圆/椭圆度量面积")(AreaMeasureTool)
-register_tool(name="周长", order=6, panel="measure", hint="点击多边形/圆/椭圆度量周长")(PerimeterMeasureTool)
-register_tool(name="半径", order=7, panel="measure", hint="点击圆度量半径")(RadiusMeasureTool)
-register_tool(name="直径", order=8, panel="measure", hint="点击圆度量直径")(DiameterMeasureTool)
-register_tool(name="斜率", order=9, panel="measure", hint="点击线段/直线度量斜率")(SlopeMeasureTool)
-register_tool(name="坐标", order=10, panel="measure", hint="点击点度量其坐标")(CoordMeasureTool)
+# 全部注册到「度量」菜单（panel="measure"），并配上图标
+register_tool(name="长度", order=1, panel="measure", icon="length",
+              hint="点击线段度量长度")(LengthMeasureTool)
+register_tool(name="距离", order=2, panel="measure", icon="distance",
+              hint="点击两点度量距离")(DistanceMeasureTool)
+register_tool(name="角度", order=3, panel="measure", icon="angle",
+              hint="依次点顶点、两边上的点度量角度")(AngleMeasureTool)
+register_tool(name="比值", order=4, panel="measure", icon="ratio",
+              hint="点击两条线段度量长度比值")(RatioMeasureTool)
+register_tool(name="面积", order=5, panel="measure", icon="area",
+              hint="点击多边形/圆/椭圆度量面积")(AreaMeasureTool)
+register_tool(name="周长", order=6, panel="measure", icon="perimeter",
+              hint="点击多边形/圆/椭圆度量周长")(PerimeterMeasureTool)
+register_tool(name="半径", order=7, panel="measure", icon="radius",
+              hint="点击圆度量半径")(RadiusMeasureTool)
+register_tool(name="直径", order=8, panel="measure", icon="diameter",
+              hint="点击圆度量直径")(DiameterMeasureTool)
+register_tool(name="斜率", order=9, panel="measure", icon="slope",
+              hint="点击线段/直线度量斜率")(SlopeMeasureTool)
+register_tool(name="坐标", order=10, panel="measure", icon="coord",
+              hint="点击点度量其坐标")(CoordMeasureTool)
