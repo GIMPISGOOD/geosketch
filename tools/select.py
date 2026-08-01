@@ -1,4 +1,5 @@
 """选择工具：点选对象；拖点移动单点；点图形整体平移；多选后拖动整组移动。
+吸附点（PointOnObject）优先级最高：点它就直接沿宿主图形滑动。
 框选功能已独立为「框选」工具。"""
 from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject
@@ -41,9 +42,16 @@ class SelectTool(Tool):
             canvas.doc.set_selection([])          # 空白处点击 = 取消选择
             return
 
+        # ★ 吸附点优先级最高：无论是否处于多选，点它就直接沿宿主图形滑动
+        if isinstance(target, PointOnObject):
+            canvas.doc.set_selection([target])
+            self.drag_poo = target
+            self._grab_wpt = wpt
+            self._orig_pos = []
+            return
+
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
-
         if multi:
             # 已框选多个对象：整体拖动其中全部自由点
             canvas.doc.set_selection(selected)
@@ -51,9 +59,6 @@ class SelectTool(Tool):
             for o in selected:
                 _free_points_of(o, pts, seen)
             self.drag_pts = pts
-        elif isinstance(target, PointOnObject):
-            canvas.doc.set_selection([target])
-            self.drag_poo = target
         elif isinstance(target, FreePoint):
             canvas.doc.set_selection([target])
             self.drag_pts = [target]
@@ -66,7 +71,6 @@ class SelectTool(Tool):
             pts, seen = [], set()
             _free_points_of(target, pts, seen)
             self.drag_pts = pts
-
         self._grab_wpt = wpt
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
@@ -77,7 +81,7 @@ class SelectTool(Tool):
             canvas.doc.begin_action()             # 首次移动才记撤销
             self._drag_undo_begun = True
         if self.drag_poo is not None:
-            self.drag_poo.drag_to(wpt)
+            self.drag_poo.drag_to(wpt)            # 投影到宿主 → 沿图形滑动
             canvas.doc.recompute_from(self.drag_poo)
         else:
             dx = wpt[0] - self._grab_wpt[0]
