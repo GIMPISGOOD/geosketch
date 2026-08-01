@@ -1,11 +1,15 @@
 """表达式约束：把线段长度 / 角度度数锁定为变量的代数式。
 变量变化时由 Document.refresh_variables 驱动重算。"""
 import math
+from PySide6.QtCore import Qt
 
-from core.registry import register_geo
+from core.registry import register_geo, register_renderer
+from ui import theme
+from ui.math import draw_math
 from core.variables import eval_expr
 from geo.base import GeoObject
-
+from geo.points import AbstractPoint
+from core.variables import eval_expr
 
 @register_geo("ExprSegment")
 class ExprSegment(GeoObject):
@@ -85,3 +89,68 @@ def expr_driver(obj):
         if hasattr(c, "expr"):
             return c
     return None
+
+@register_geo("ExprCircle")
+class ExprCircle(GeoObject):
+    """表达式圆：圆心 + 表达式半径，变量变化时半径实时更新。"""
+    def __init__(self, center, expr):
+        super().__init__(parents=(center,))
+        self.center = center
+        self.expr = expr
+        self.r = 0.0
+        self.recompute()
+
+    def recompute(self):
+        r = eval_expr(self.expr)
+        self.r = abs(r) if r is not None else 0.0
+
+    def point_at(self, t):
+        ang = 2 * math.pi * t
+        return (self.center.x + self.r * math.cos(ang),
+                self.center.y + self.r * math.sin(ang))
+
+    def project(self, x, y):
+        return (math.atan2(y - self.center.y, x - self.center.x) / (2 * math.pi)) % 1.0
+
+    def distance_to(self, x, y):
+        return abs(math.hypot(x - self.center.x, y - self.center.y) - self.r)
+
+    def dump(self):
+        return {"expr": self.expr}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents[0], params["expr"])
+
+
+@register_geo("ExprPoint")
+class ExprPoint(AbstractPoint):
+    """表达式点：坐标由表达式决定，随变量变化，不可拖动。"""
+    def __init__(self, expr_x, expr_y):
+        super().__init__(parents=())
+        self.expr_x = expr_x
+        self.expr_y = expr_y
+        self.recompute()
+
+    def recompute(self):
+        x = eval_expr(self.expr_x)
+        y = eval_expr(self.expr_y)
+        self.x = x if x is not None else 0.0
+        self.y = y if y is not None else 0.0
+
+    def dump(self):
+        return {"expr_x": self.expr_x, "expr_y": self.expr_y}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["expr_x"], params["expr_y"])
+
+
+@register_renderer(ExprCircle)
+def draw_expr_circle(p, obj, view):
+    c = view.to_screen(obj.center.x, obj.center.y)
+    p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.CIRCLE, 2))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(c, obj.r * view.scale, obj.r * view.scale)
+    draw_math(p, c.x() + obj.r * view.scale * 0.7, c.y(),
+              f"r={obj.expr}", 12, theme.MEASURE)

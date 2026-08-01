@@ -1,9 +1,9 @@
-"""函数编辑器：相对独立的停靠组件（QDockWidget），函数显示于此，可增删改、显隐。"""
-from PySide6.QtCore import Qt
+"""函数编辑器：可折叠的停靠侧栏（QDockWidget），函数显示于此。"""
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QColorDialog, QCheckBox,
-                               QScrollArea, QFrame, QDockWidget)
+                               QScrollArea, QFrame, QDockWidget, QMainWindow)
 
 from geo.function_curve import FunctionCurve
 from ui import theme
@@ -11,7 +11,6 @@ from ui.math import draw_math
 
 
 class ExprLabel(QWidget):
-    """用 draw_math 渲染表达式。"""
     def __init__(self, text, color, parent=None):
         super().__init__(parent)
         self._text, self._color = text, color
@@ -29,7 +28,6 @@ class ExprLabel(QWidget):
 
 
 class FunctionRow(QWidget):
-    """单条函数：色点 + 数学表达式 + 悬停操作。"""
     def __init__(self, func, editor, parent=None):
         super().__init__(parent)
         self.func, self.editor = func, editor
@@ -48,8 +46,7 @@ class FunctionRow(QWidget):
         self.expr = ExprLabel(func.default_label(), func.color)
         h.addWidget(self.expr, 1)
 
-        # 操作区（不能叫 actions，与 QWidget.actions() 冲突）
-        self._ops = QWidget()
+        self._ops = QWidget()                      # 不能叫 actions（与 QWidget.actions() 冲突）
         ah = QHBoxLayout(self._ops)
         ah.setContentsMargins(0, 0, 0, 0)
         ah.setSpacing(2)
@@ -90,7 +87,9 @@ class FunctionRow(QWidget):
 
 
 class FunctionEditorWidget(QWidget):
-    """函数编辑器内容：标题 + 新建 + 可滚动函数列表。"""
+    """侧栏内容：标题（含折叠钮）+ 新建 + 可滚动函数列表。"""
+    collapse_requested = Signal(bool)
+
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
@@ -99,10 +98,16 @@ class FunctionEditorWidget(QWidget):
         outer.setSpacing(6)
 
         head = QHBoxLayout()
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setFixedWidth(24)
+        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_btn.setToolTip("折叠侧栏")
+        self._collapse_btn.clicked.connect(lambda: self.collapse_requested.emit(True))
+        head.addWidget(self._collapse_btn)
         self._cap = QLabel("函 数")
         head.addWidget(self._cap)
         head.addStretch(1)
-        self._add = QPushButton("＋ 新建函数")
+        self._add = QPushButton("＋ 新建")
         self._add.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add.clicked.connect(self.new_function)
         head.addWidget(self._add)
@@ -172,17 +177,53 @@ class FunctionEditorWidget(QWidget):
 
 
 class FunctionEditorDock(QDockWidget):
-    """函数编辑器停靠组件：可停靠左右、可浮动拉伸。"""
+    """可折叠函数编辑器侧栏：« 收成窄条，» 展开。"""
     def __init__(self, canvas, parent=None):
         super().__init__("函数编辑器", parent)
         self.setObjectName("functionEditorDock")
         self.canvas = canvas
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
-                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
-        self.setMinimumWidth(300)
-        self._widget = FunctionEditorWidget(canvas)
-        self.setWidget(self._widget)
+                         QDockWidget.DockWidgetFeature.DockWidgetFloatable |
+                         QDockWidget.DockWidgetFeature.DockWidgetClosable)
+        self._editor = FunctionEditorWidget(canvas, self)
+        self._editor.collapse_requested.connect(self.set_collapsed)
+        self._collapsed = False
+
+        # 折叠后的窄条
+        self._strip = QWidget()
+        sl = QVBoxLayout(self._strip)
+        sl.setContentsMargins(4, 8, 4, 8)
+        sl.setSpacing(8)
+        expand = QPushButton("»")
+        expand.setCursor(Qt.CursorShape.PointingHandCursor)
+        expand.setToolTip("展开函数编辑器")
+        expand.clicked.connect(lambda: self.set_collapsed(False))
+        sl.addWidget(expand)
+        vlabel = QLabel("函\n数")
+        vlabel.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sl.addWidget(vlabel)
+        sl.addStretch(1)
+
+        self.setWidget(self._editor)
+        self.setMinimumWidth(280)
+
+    def set_collapsed(self, collapsed):
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        mw = self.parent()
+        if collapsed:
+            self.setWidget(self._strip)
+            self.setMinimumWidth(36)
+            if isinstance(mw, QMainWindow):
+                mw.resizeDocks([self], [40], Qt.Orientation.Horizontal)
+        else:
+            self.setWidget(self._editor)
+            self.setMinimumWidth(280)
+            if isinstance(mw, QMainWindow):
+                mw.resizeDocks([self], [300], Qt.Orientation.Horizontal)
+            self._editor.refresh()
 
     def refresh(self):
-        self._widget.refresh()
+        self._editor.refresh()

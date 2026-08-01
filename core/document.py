@@ -6,9 +6,9 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-
+from geo.points import FreePoint
 from core.variables import get_store
-from geo.constraints import ExprSegment, ExprAngle
+from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
 UNDO_LIMIT = 100
 
@@ -29,14 +29,64 @@ class Document(QObject):
         self._mut_before = 0
         self.vars = get_store()
         self.expr_objects = []
+        self._clipboard = None
 
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-        if isinstance(obj, (ExprSegment, ExprAngle)):
+        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
             self.expr_objects.append(obj)
         return obj
+
+    def _collect_with_deps(self, objs):
+        """收集对象及其全部依赖，按拓扑序（id 升序）。"""
+        seen = set()
+        def collect(o):
+            if id(o) in seen:
+                return
+            seen.add(id(o))
+            for p in o.parents:
+                collect(p)
+        for o in objs:
+            collect(o)
+        return sorted((o for o in self.objects if id(o) in seen), key=lambda o: o.id)
+
+    def copy_selection(self):
+        sel = [o for o in self.objects if o.selected]
+        if not sel:
+            return
+        self._clipboard = [
+            {"id": o.id, "type": o.type_name,
+             "parents": [p.id for p in o.parents], "params": o.dump()}
+            for o in self._collect_with_deps(sel)
+        ]
+
+    def cut_selection(self):
+        self.copy_selection()
+        self.remove_selected()
+
+    def paste(self, offset=(1.0, -1.0)):
+        if not self._clipboard:
+            return
+        self.begin_action()
+        id_map, new_objs = {}, []
+        for item in self._clipboard:
+            cls = GEO_REGISTRY[item["type"]]
+            parents = [id_map[pid] for pid in item["parents"]]
+            obj = cls.build(parents, item["params"])
+            if isinstance(obj, FreePoint):        # 只偏移自由点，派生对象自动跟随
+                obj.x += offset[0]
+                obj.y += offset[1]
+            id_map[item["id"]] = obj
+            self._add(obj)
+            new_objs.append(obj)
+        for o in self.objects:
+            o.selected = False
+        for o in new_objs:
+            o.selected = True
+        self.end_action()
+        self.changed.emit()
 
     def add(self, obj):
         self._add(obj)

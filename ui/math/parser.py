@@ -117,7 +117,8 @@ class _Parser:
                 break
             node = self.atom()
             if node is None:
-                self.take(); continue
+                self.take()
+                continue
             node = self.scripts(node)
             while self.peek() == ("OP", "/"):
                 self.take()
@@ -126,23 +127,11 @@ class _Parser:
                     break
                 node = Frac(node, self.scripts(right))
             nodes.append(node)
-            if self._implicit_mult(node):          # 隐式乘法补 ·
-                nodes.append(Bin("·"))
         if in_group and self.peek()[0] == "RB":
             self.take()
         if not nodes:
             return Row([])
         return nodes[0] if len(nodes) == 1 else Row(nodes)
-
-    def _implicit_mult(self, node):
-        ty, v = self.peek()
-        if ty not in ("NUM", "ID", "LB", "CMD"):
-            return False
-        # 函数名后跟 ( 是函数应用，不补乘号
-        if isinstance(node, Ord) and node.kind == "func" and ty == "LB":
-            return False
-        return True
-
     def scripts(self, base):
         sub = sup = None
         while self.peek()[0] in ("SUP", "SUB"):

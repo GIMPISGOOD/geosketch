@@ -26,20 +26,18 @@ class MainWindow(QMainWindow):
 
         self.doc = Document()
         self.canvas = Canvas(self.doc)
+        self.setCentralWidget(self.canvas)        # ← 关键：把画布设为中央部件（之前丢了）
 
         self.function_dock = FunctionEditorDock(self.canvas, self)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.function_dock)
         self.doc.changed.connect(self.function_dock.refresh)
         self.function_dock.refresh()
-        self.setCentralWidget(self.canvas)
 
         self._actions: dict[type, QAction] = {}
         self._create_tool_actions()
         self._build_menubar()
         self._build_statusbar()
-
         self._build_var_menu()
-
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
 
@@ -63,8 +61,15 @@ class MainWindow(QMainWindow):
         self._var_submenu.aboutToShow.connect(self._rebuild_var_submenu)
         func = top.addMenu("函数(&F)")
         new_func = QAction("新建函数…", self)
-        new_func.triggered.connect(self.function_dock._widget.new_function)
+        new_func.triggered.connect(self.function_dock._editor.new_function)
         func.addAction(new_func)
+        from plugins.expr_geo_tools import ExprCircleTool, new_expr_point
+        ec = QAction("表达式圆…", self)
+        ec.triggered.connect(lambda: self.canvas.set_tool(ExprCircleTool()))
+        func.addAction(ec)
+        ep = QAction("表达式点…", self)
+        ep.triggered.connect(lambda: new_expr_point(self, self.doc))
+        func.addAction(ep)
 
     def _rebuild_var_submenu(self):
         m = self._var_submenu
@@ -176,7 +181,15 @@ class MainWindow(QMainWindow):
             tm.addAction(self._actions[spec["cls"]])
         if not plugin_specs:
             e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
-
+        # 度量菜单：panel="measure" 的工具
+        mm = mb.addMenu("度量(&L)")
+        measure_specs = sorted(
+            [s for s in TOOL_REGISTRY if s.get("panel") == "measure"],
+            key=lambda s: s.get("order", 99))
+        for spec in measure_specs:
+            mm.addAction(self._actions[spec["cls"]])
+        if not measure_specs:
+            e = mm.addAction("（暂无度量工具）"); e.setEnabled(False)
                 # 视图菜单：撤销 / 重做
         vm = mb.addMenu("视图(&W)")
         self._undo_act = QAction("撤销(&U)", self)
@@ -189,6 +202,22 @@ class MainWindow(QMainWindow):
         vm.addAction(self._redo_act)
         self.doc.history_changed.connect(self._update_history_actions)
         self._update_history_actions()
+        self._func_editor_act = QAction("函数编辑器", self, checkable=True)
+        self._func_editor_act.setChecked(True)
+        self._func_editor_act.toggled.connect(self.function_dock.setVisible)
+        self.function_dock.visibilityChanged.connect(self._func_editor_act.setChecked)
+        # 加到「视图」菜单
+        vm.addAction(self._func_editor_act)
+        vm.addSeparator()
+        for text, key, slot in (
+            ("剪切(&T)", QKeySequence.StandardKey.Cut, lambda: self.doc.cut_selection()),
+            ("复制(&C)", QKeySequence.StandardKey.Copy, lambda: self.doc.copy_selection()),
+            ("粘贴(&P)", QKeySequence.StandardKey.Paste, lambda: self.doc.paste()),
+        ):
+            a = QAction(text, self)
+            a.setShortcut(key)
+            a.triggered.connect(slot)
+            vm.addAction(a)
 
         # 主题菜单：互斥单选
         thm = mb.addMenu("主题(&M)")

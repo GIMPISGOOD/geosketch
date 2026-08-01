@@ -29,27 +29,52 @@ def is_valid_name(name):
     return (bool(name) and name.isidentifier()
             and not keyword.iskeyword(name) and name not in RESERVED)
 
+_FUNCS = {
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
+    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    "sqrt": math.sqrt, "abs": abs, "ln": math.log, "log": math.log10,
+    "exp": math.exp,
+    "cot": lambda x: 1.0 / math.tan(x),
+    "sec": lambda x: 1.0 / math.cos(x),
+    "csc": lambda x: 1.0 / math.sin(x),
+}
+_FUNC_NAMES = set(_FUNCS)
 
-_FUNCS = ("arcsin", "arccos", "arctan", "sin", "cos", "tan",
-          "sqrt", "abs", "ln", "exp", "log", "cot", "sec", "csc")
+_NUM = r"\d+\.?\d*|\.\d+"
+_IDENT = r"[^\W\d_]\w*"
+_TOKEN_RE = re.compile(rf"{_NUM}|{_IDENT}|\*\*|[+\-*/()=,]|[^\s]")
+
+
+def _is_value_end(tok):
+    """token 能否作为乘法左操作数：数字 / 右括号 / 非函数名标识符。"""
+    if re.fullmatch(_NUM, tok) or tok == ")":
+        return True
+    if re.fullmatch(_IDENT, tok):
+        return tok not in _FUNC_NAMES
+    return False
+
+
+def _is_value_start(tok):
+    """token 能否作为乘法右操作数：数字 / 标识符 / 左括号。"""
+    return bool(re.fullmatch(_NUM, tok) or re.fullmatch(_IDENT, tok) or tok == "(")
 
 
 def _preprocess(expr):
-    s = expr.replace("^", "**").replace(" ", "")   # 去空格：2 x → 2x
-    # 不影响函数名的隐式乘法
-    s = re.sub(r"(\d)([^\W\d_])", r"\1*\2", s)     # 2x / 2π / 2sin → 2*x / 2*π / 2*sin
-    s = re.sub(r"(\d)\(", r"\1*(", s)              # 2( → 2*(
-    s = re.sub(r"\)\(", r")*(", s)                 # )( → )*(
-    s = re.sub(r"\)(\d)", r")*\1", s)              # )2 → )*2
-    s = re.sub(r"\)([^\W\d_])", r")*\1", s)        # )x → )*x
-    # letter-( ：先保护函数名，再插 *（x(x+1)→x*(x+1)，sin(x) 不变）
-    for fn in _FUNCS:
-        s = s.replace(fn, f"\x01{fn}\x01")
-    s = re.sub(r"([^\W\d_])\(", r"\1*(", s)        # x( → x*(
-    for fn in _FUNCS:
-        s = s.replace(f"\x01{fn}\x01", fn)
-    return s
-
+    """词法级隐式乘法补全：2x→2*x、x(x+1)→x*(x+1)、(a)(b)→(a)*(b)，
+    但 sin(x) 保持函数调用不拆。逐 token 判断，杜绝正则子串误伤。"""
+    toks = _TOKEN_RE.findall(expr.replace("^", "**").replace(" ", ""))
+    out = []
+    for i, tok in enumerate(toks):
+        out.append(tok)
+        if i + 1 < len(toks):
+            nxt = toks[i + 1]
+            if tok in _FUNC_NAMES and nxt == "(":
+                continue                        # 函数应用，不补 *
+            if _is_value_end(tok) and _is_value_start(nxt):
+                out.append("*")
+    return "".join(out)
 
 def _eval(node: ast.AST, vars: dict[str, float]) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
