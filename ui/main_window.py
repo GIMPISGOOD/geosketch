@@ -113,7 +113,7 @@ class MainWindow(QMainWindow):
             name, val, lo, hi = wiz.result_data()
             self.doc.vars.define(name, val, lo, hi)
             self.doc.refresh_variables()
-            self.canvas.var_panel.refresh()
+            self.function_dock.refresh()
 
     def _edit_variable_range(self, name):
         var = self.doc.vars.get_var(name)
@@ -124,7 +124,7 @@ class MainWindow(QMainWindow):
             lo, hi = dlg.result_data()
             self.doc.vars.set_range(name, lo, hi)
             self.doc.refresh_variables()
-            self.canvas.var_panel.refresh()      # 滑杆按新范围重建
+            self.function_dock.refresh()      # 滑杆按新范围重建
 
     def _delete_variable(self, name):
         reply = QMessageBox.question(
@@ -134,7 +134,7 @@ class MainWindow(QMainWindow):
         if reply == QMessageBox.StandardButton.Yes:
             self.doc.vars.delete(name)
             self.doc.refresh_variables()
-            self.canvas.var_panel.refresh()
+            self.function_dock.refresh()
 
     def _edit_variable(self, name):
         var = self.doc.vars.get_var(name)
@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
         if ok:
             self.doc.vars.set(name, val)
             self.doc.refresh_variables()
-            self.canvas.var_panel.refresh()
+            self.function_dock.refresh()
 
     def _sync_actions(self, tool) -> None:
         for cls, act in self._actions.items():

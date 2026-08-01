@@ -148,12 +148,14 @@ class Document(QObject):
     # ================= 增量重算 =================
     def recompute_from(self, roots):
         roots = roots if isinstance(roots, (list, tuple)) else [roots]
-        dirty, stack = set(), list(roots)
+        dirty = set()
+        stack = list(roots)
         while stack:
-            for c in stack.pop().children:
-                if c not in dirty:
-                    dirty.add(c)
-                    stack.append(c)
+            o = stack.pop()
+            if o in dirty:
+                continue
+            dirty.add(o)                 # ★ 根节点自己也加入重算集合
+            stack.extend(o.children)
         for o in sorted(dirty, key=lambda o: o.id):
             o.exists = all(p.exists for p in o.parents)
             if o.exists:

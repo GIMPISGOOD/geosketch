@@ -56,6 +56,38 @@ class RegularPolygon(GeoObject):
     def dump(self):
         return {"n": self.n}
 
+    def point_at(self, t):
+        """t ∈ [0,1] 沿多边形周长参数化。"""
+        n = len(self.verts)
+        if n < 2:
+            return self.verts[0] if self.verts else (0.0, 0.0)
+        seg_t = (t % 1.0) * n
+        i = int(seg_t) % n
+        frac = seg_t - int(seg_t)
+        a = self.verts[i]
+        b = self.verts[(i + 1) % n]
+        return (a[0] + (b[0] - a[0]) * frac, a[1] + (b[1] - a[1]) * frac)
+
+    def project(self, x, y):
+        """投影到多边形周长，返回参数 t ∈ [0,1]。"""
+        n = len(self.verts)
+        if n < 2:
+            return 0.0
+        best_t, best_d = 0.0, float("inf")
+        for i in range(n):
+            a = self.verts[i]
+            b = self.verts[(i + 1) % n]
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            denom = dx * dx + dy * dy
+            if denom < 1e-12:
+                continue
+            f = max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / denom))
+            px, py = a[0] + f * dx, a[1] + f * dy
+            d = (px - x) ** 2 + (py - y) ** 2
+            if d < best_d:
+                best_d, best_t = d, (i + f) / n
+        return best_t
+
     @classmethod
     def build(cls, parents, params):
         return cls(parents[0], parents[1], params.get("n", 3))

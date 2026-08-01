@@ -115,6 +115,9 @@ class ExprCircle(GeoObject):
     def distance_to(self, x, y):
         return abs(math.hypot(x - self.center.x, y - self.center.y) - self.r)
 
+    def moved_points(self):
+        return [self]          # 半径变了 → 自身重绘，依赖它的对象随之重算
+
     def dump(self):
         return {"expr": self.expr}
 
@@ -137,6 +140,9 @@ class ExprPoint(AbstractPoint):
         y = eval_expr(self.expr_y)
         self.x = x if x is not None else 0.0
         self.y = y if y is not None else 0.0
+
+    def moved_points(self):
+        return [self]          # 坐标变了 → 自己就是那个点
 
     def dump(self):
         return {"expr_x": self.expr_x, "expr_y": self.expr_y}

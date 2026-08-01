@@ -6,6 +6,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QScrollArea, QFrame, QDockWidget, QMainWindow)
 
 from geo.function_curve import FunctionCurve
+from ui.variable_widgets import VariableSliderPanel
 from ui import theme
 from ui.math import draw_math
 
@@ -87,7 +88,6 @@ class FunctionRow(QWidget):
 
 
 class FunctionEditorWidget(QWidget):
-    """侧栏内容：标题（含折叠钮）+ 新建 + 可滚动函数列表。"""
     collapse_requested = Signal(bool)
 
     def __init__(self, canvas, parent=None):
@@ -97,6 +97,7 @@ class FunctionEditorWidget(QWidget):
         outer.setContentsMargins(10, 9, 8, 9)
         outer.setSpacing(6)
 
+        # 头部：折叠 + 标题 + 新建函数
         head = QHBoxLayout()
         self._collapse_btn = QPushButton("«")
         self._collapse_btn.setFixedWidth(24)
@@ -104,44 +105,58 @@ class FunctionEditorWidget(QWidget):
         self._collapse_btn.setToolTip("折叠侧栏")
         self._collapse_btn.clicked.connect(lambda: self.collapse_requested.emit(True))
         head.addWidget(self._collapse_btn)
-        self._cap = QLabel("函 数")
+        self._cap = QLabel("函数编辑器")
         head.addWidget(self._cap)
         head.addStretch(1)
-        self._add = QPushButton("＋ 新建")
+        self._add = QPushButton("＋ 函数")
         self._add.setCursor(Qt.CursorShape.PointingHandCursor)
         self._add.clicked.connect(self.new_function)
         head.addWidget(self._add)
         outer.addLayout(head)
 
+        # 滚动区：变量区 + 函数区（同一个滚动区，不再各自浮动堆叠）
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._scroll.setStyleSheet("background:transparent;border:none;")
-        self._list = QWidget()
-        self._list.setStyleSheet("background:transparent;")
-        self._rows = QVBoxLayout(self._list)
-        self._rows.setContentsMargins(0, 0, 0, 0)
-        self._rows.setSpacing(2)
-        self._rows.addStretch(1)
-        self._scroll.setWidget(self._list)
+        self._content = QWidget()
+        self._content.setStyleSheet("background:transparent;")
+        cl = QVBoxLayout(self._content)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(10)
+
+        self.var_panel = VariableSliderPanel(canvas, self._content)   # 变量区
+        cl.addWidget(self.var_panel)
+        self._func_cap = QLabel("函数")
+        cl.addWidget(self._func_cap)
+        self._func_rows = QVBoxLayout()
+        self._func_rows.setSpacing(2)
+        cl.addLayout(self._func_rows)
+        cl.addStretch(1)
+        self._scroll.setWidget(self._content)
         outer.addWidget(self._scroll, 1)
 
     def refresh(self):
         self._cap.setStyleSheet(
-            f"font-weight:800;font-size:13px;letter-spacing:3px;color:{theme.INK.name()};")
+            f"font-weight:800;font-size:13px;letter-spacing:2px;color:{theme.INK.name()};")
         self._add.setStyleSheet(
             f"border:none;border-radius:8px;background:{theme.ACCENT.name()};"
-            f"color:#fff;font-weight:700;padding:5px 12px;")
-        while self._rows.count() > 1:
-            item = self._rows.takeAt(0)
-            if item is not None:
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
-        for i, f in enumerate(o for o in self.canvas.doc.objects if isinstance(o, FunctionCurve)):
-            self._rows.insertWidget(i, FunctionRow(f, self))
+            f"color:#fff;font-weight:700;padding:5px 10px;")
+        self._func_cap.setStyleSheet(
+            f"font-weight:800;font-size:12px;color:{theme.INK.name()};")
+        self.var_panel.refresh()
+        while self._func_rows.count():
+            item = self._func_rows.takeAt(0)
+            if item is None:
+                break
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        for i, f in enumerate(o for o in self.canvas.doc.objects
+                              if isinstance(o, FunctionCurve)):
+            self._func_rows.insertWidget(i, FunctionRow(f, self))
 
     def new_function(self):
         from ui.formula_editor import FormulaEditor
@@ -174,7 +189,6 @@ class FunctionEditorWidget(QWidget):
     def delete(self, f):
         self.canvas.doc.remove(f)
         self.refresh()
-
 
 class FunctionEditorDock(QDockWidget):
     """可折叠函数编辑器侧栏：« 收成窄条，» 展开。"""

@@ -94,64 +94,64 @@ class VariableWizard(QWizard):
 
 # ───────────── 左下滑杆面板 ─────────────
 class VariableSliderPanel(QWidget):
-    """画布左下角：每个变量一行滑杆，拖动实时改值并驱动表达式对象。"""
+    """变量滑杆区：嵌入函数面板使用，列出所有变量及其滑杆。"""
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
-        self.setObjectName("varSliderPanel")
         self.canvas = canvas
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(12, 10, 12, 10)
-        self._layout.setSpacing(6)
-        cap = QLabel("变 量")
-        cap.setStyleSheet("font-weight:800;font-size:13px;letter-spacing:3px;")
-        self._cap = cap
-        self._layout.addWidget(cap)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(4)
+        head = QHBoxLayout()
+        self._cap = QLabel("变量")
+        head.addWidget(self._cap)
+        head.addStretch(1)
+        self._add = QPushButton("＋")
+        self._add.setFixedWidth(24)
+        self._add.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._add.setToolTip("新建变量")
+        self._add.clicked.connect(self._new_var)
+        head.addWidget(self._add)
+        layout.addLayout(head)
         self._rows = QVBoxLayout()
-        self._rows.setSpacing(5)
-        self._layout.addLayout(self._rows)
-        self.hide()
+        self._rows.setSpacing(4)
+        layout.addLayout(self._rows)
 
     def refresh(self):
+        self._cap.setStyleSheet(
+            f"font-weight:800;font-size:12px;color:{theme.INK.name()};")
+        self._add.setStyleSheet(
+            f"border:none;border-radius:6px;background:{theme.ACCENT.name()};"
+            f"color:#fff;font-weight:700;")
         while self._rows.count():
             item = self._rows.takeAt(0)
-            if item is None:
-                break
-            w = item.widget()
-            if w is not None:
+            if item is not None:    
+                w = item.widget()
+            if w:
                 w.deleteLater()
-        store = self.canvas.doc.vars
-        names = store.names()
-        if not names:
-            self.hide()
-            return
-        for name in names:
-            self._rows.addWidget(self._make_row(name, store.get_var(name)))
-        self._cap.setStyleSheet(
-            f"font-weight:800;font-size:13px;letter-spacing:3px;color:{theme.INK.name()};")
-        self.adjustSize()
-        self.reposition()
-        self.show()
-        self.raise_()
+        for name in self.canvas.doc.vars.names():
+            var = self.canvas.doc.vars.get_var(name)
+            if var is not None:
+                self._rows.addWidget(self._make_row(name, var))
 
     def _make_row(self, name, var):
         w = QWidget()
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
-        h.setSpacing(8)
+        h.setSpacing(6)
         lbl = QLabel(f"{name} = {var.value:.2f}")
         lbl.setFont(theme.LABEL_FONT)
-        lbl.setMinimumWidth(110)
+        lbl.setMinimumWidth(90)
         slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)                       # 归一化，映射到 [vmin, vmax]
+        slider.setRange(0, 1000)
         span = (var.vmax - var.vmin) or 1.0
         slider.setValue(int((var.value - var.vmin) / span * 1000))
-        slider.setMinimumWidth(150)
+        slider.setMinimumWidth(110)
         slider.valueChanged.connect(
             lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax: self._on_slide(n, v, l, a, b))
         rm = QPushButton("×")
-        rm.setFixedSize(22, 22)
+        rm.setFixedSize(20, 20)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setToolTip(f"删除变量 {name}")
+        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
         rm.clicked.connect(lambda _=False, n=name: self._delete(n))
         h.addWidget(lbl)
         h.addWidget(slider, 1)
@@ -162,15 +162,20 @@ class VariableSliderPanel(QWidget):
         val = vmin + (vmax - vmin) * v / 1000
         lbl.setText(f"{name} = {val:.2f}")
         self.canvas.doc.vars.set(name, val)
-        self.canvas.doc.refresh_variables()           # 驱动表达式线段/角度同步变形
+        self.canvas.doc.refresh_variables()
 
     def _delete(self, name):
         self.canvas.doc.vars.delete(name)
         self.canvas.doc.refresh_variables()
         self.refresh()
 
-    def reposition(self):
-        self.move(14, self.canvas.height() - self.height() - 14)
+    def _new_var(self):
+        wiz = VariableWizard(self.window())
+        if wiz.exec():
+            name, val, lo, hi = wiz.result_data()
+            self.canvas.doc.vars.define(name, val, lo, hi)
+            self.canvas.doc.refresh_variables()
+            self.refresh()
 
 class VariableRangeDialog(QDialog):
     """修改变量的滑杆范围（最小值 / 最大值）。"""
