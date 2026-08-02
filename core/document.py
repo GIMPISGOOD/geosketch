@@ -255,8 +255,7 @@ class Document(QObject):
         self.changed.emit()
 
     def save(self, path):
-        import zipfile
-        import datetime
+        import zipfile, datetime
         from ui import theme as _theme
         self.meta["theme"] = _theme.active_name()
         self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")

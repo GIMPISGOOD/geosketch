@@ -38,28 +38,56 @@ class FunctionCurve(GeoObject):
         self._domain = domain             # 采样时缓存的定义域（供 point_at/project 用）
 
     # ── 求值：代入参数 u 与全部滑杆变量 ──
-    def _eval_at(self, u: float) -> Optional[tuple[float, float]]:
-        """参数 u（定义域内）→ 世界坐标 (x,y)；无效返回 None。"""
+    def _eval_at(self, u):
+        """在参数 u 处求值。
+        - explicit: 返回 y（float）
+        - parametric: 返回 (x, y)（2-tuple）
+        - polar: 返回 r（float）
+        """
+        from core.variables import get_store, evaluate
         vd = get_store().as_dict()
+
         if self.kind == "explicit":
             vd["x"] = u
-            y = evaluate(self.expr, vd)
-            if y is None or not math.isfinite(y):
-                return None
-            return (u, y)
-        if self.kind == "parametric":
+            return evaluate(self.expr, vd)          # ★ 返回 y（float），不是 (x, y)
+
+        elif self.kind == "parametric":
             vd["t"] = u
             x = evaluate(self.expr, vd)
             y = evaluate(self.expr2, vd)
-            if x is None or y is None or not (math.isfinite(x) and math.isfinite(y)):
-                return None
-            return (x, y)
-        if self.kind == "polar":
-            vd["t"] = u; vd["θ"] = u; vd["theta"] = u
-            r = evaluate(self.expr, vd)
-            if r is None or not math.isfinite(r):
-                return None
-            return (r * math.cos(u), r * math.sin(u))
+            return (x, y)                           # ✓ 返回 (x, y)
+
+        elif self.kind == "polar":
+            vd["t"] = u
+            vd["θ"] = u
+            return evaluate(self.expr, vd)          # ★ 返回 r（float），不是 (x, y)
+
+        return None
+
+    def _eval_point(self, u) -> Optional[Tuple[float, float]]:
+        """在参数 u 处求值，统一返回 (x, y) 世界坐标（或 None）。
+        把 _eval_at 的三种返回格式归一化，供 sample/point_at/project 使用。"""
+        val = self._eval_at(u)
+        if val is None:
+            return None
+        if self.kind == "explicit":
+            # val 是 y (float)
+            if isinstance(val, (int, float)) and math.isfinite(val):
+                return (float(u), float(val))
+            return None
+        elif self.kind == "parametric":
+            # val 是 (x, y) tuple
+            if isinstance(val, (tuple, list)) and len(val) == 2:
+                x, y = val
+                if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
+                    return (float(x), float(y))
+            return None
+        elif self.kind == "polar":
+            # val 是 r (float)
+            if isinstance(val, (int, float)) and math.isfinite(val):
+                r = float(val)
+                return (r * math.cos(u), r * math.sin(u))
+            return None
         return None
 
     def get_domain(self, view):
@@ -75,13 +103,12 @@ class FunctionCurve(GeoObject):
     def sample(self, view, n=900) -> list[Optional[tuple[float, float]]]:
         a, b = self.get_domain(view)
         self._domain = (a, b)
+        # ★ 用 _eval_point 统一返回 (x, y) tuple
         raw: list[Optional[tuple[float, float]]] = [
-            self._eval_at(a + (b - a) * i / n) for i in range(n + 1)
+            self._eval_point(a + (b - a) * i / n) for i in range(n + 1)
         ]
-
-        breaks = set()                     # 需要断开的采样位置
+        breaks = set()
         if self.kind == "explicit":
-            # 与缩放无关的局部量级：|y - 中位数| 的中位数（MAD）
             yvals = sorted(p[1] for p in raw if p is not None)
             if yvals:
                 y_med = yvals[len(yvals) // 2]
@@ -92,8 +119,7 @@ class FunctionCurve(GeoObject):
             for i in range(1, len(raw)):
                 p0, p1 = raw[i - 1], raw[i]
                 if p0 is None or p1 is None or p0[1] * p1[1] >= 0:
-                    continue               # 无变号 → 不是竖直渐近线
-                # 数值必须朝断点方向"发散"（区别于连续穿越：那是收敛到 0）
+                    continue
                 prev = raw[i - 2] if i - 2 >= 0 else None
                 next_p = raw[i + 1] if i + 1 < len(raw) else None
                 left_ok = (prev is None) or (abs(p0[1]) >= abs(prev[1]))
@@ -101,7 +127,6 @@ class FunctionCurve(GeoObject):
                 if left_ok and right_ok and (abs(p0[1]) + abs(p1[1])) > y_scale * 4:
                     breaks.add(i)
         else:
-            # 参数/极坐标：仍用视窗对角线阈值（它们没有竖直渐近线问题）
             x0, y0 = view.to_world(QPointF(0, 0))
             x1, y1 = view.to_world(QPointF(view.width(), view.height()))
             diag = math.hypot(x1 - x0, y1 - y0)
@@ -111,8 +136,7 @@ class FunctionCurve(GeoObject):
                     continue
                 if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > diag * 2:
                     breaks.add(i)
-
-        pts = []
+        pts: list[Optional[tuple[float, float]]] = []
         for i, p in enumerate(raw):
             if i in breaks:
                 pts.append(None)
@@ -133,12 +157,12 @@ class FunctionCurve(GeoObject):
         p = self._eval_at(u)
         return p if p else (0.0, 0.0)
 
-    def project(self, x, y):
+    def project(self, x, y) -> float:
         a, b = self._param_domain()
         n = 500
         best_t, best_d = 0.0, float("inf")
         for i in range(n + 1):
-            p = self._eval_at(a + (b - a) * i / n)
+            p = self._eval_point(a + (b - a) * i / n)  # ★ 必须改用 _eval_point
             if p is None:
                 continue
             d = (p[0] - x) ** 2 + (p[1] - y) ** 2
@@ -147,7 +171,7 @@ class FunctionCurve(GeoObject):
         lo, hi = max(0.0, best_t - 1 / n), min(1.0, best_t + 1 / n)
         for i in range(50):
             tt = lo + (hi - lo) * i / 49
-            p = self._eval_at(a + (b - a) * tt)
+            p = self._eval_point(a + (b - a) * tt)  # ★ 必须改用 _eval_point
             if p is None:
                 continue
             d = (p[0] - x) ** 2 + (p[1] - y) ** 2
