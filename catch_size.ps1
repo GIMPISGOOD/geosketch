@@ -51,3 +51,4 @@ elseif ($totalSize -ge 1MB) {
 elseif ($totalSize -ge 1KB) {
     Write-Host ("≈ {0:N2} KB" -f ($totalSize / 1KB)) -ForegroundColor Magenta
 }
+pause

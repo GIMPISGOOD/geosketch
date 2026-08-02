@@ -10,17 +10,16 @@ from ui import theme
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
-    
-    # 设置全局默认字体
     font = QFont()
-    font.setFamilies(["STIX Two Math", "PingFang SC", "Microsoft YaHei", "sans-serif"])
+    font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"])
     font.setPointSize(10)
     app.setFont(font)
-    
-    # 应用主题系统生成的全局样式表（取代以前硬编码的 STYLE 字符串）
     app.setStyleSheet(theme.app_stylesheet())
 
     win = MainWindow()
+    # ★ 命令行第一个参数若为 .json，直接载入（启动器靠这个打开课件草图）
+    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".json"):
+        win.doc.load(sys.argv[1])
     win.show()
     sys.exit(app.exec())
 

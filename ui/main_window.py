@@ -1,3 +1,5 @@
+import datetime
+
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel,
@@ -164,11 +166,17 @@ class MainWindow(QMainWindow):
             act.setShortcut(key)
             act.triggered.connect(slot)
             fm.addAction(act)
+        info_act = QAction("文档信息(&I)…", self)
+        info_act.triggered.connect(self._doc_info)
+        fm.addAction(info_act)
         export_act = QAction("导出图像(&E)…", self)
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self._export_image)
         fm.addAction(export_act)
         fm.addSeparator()
+        export_cw = QAction("导出到课件(&C)…", self)
+        export_cw.triggered.connect(self._export_courseware)
+        fm.addAction(export_cw)        
         quit_act = QAction("退出(&X)", self)
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         quit_act.triggered.connect(self.close)
@@ -244,6 +252,10 @@ class MainWindow(QMainWindow):
         from ui.export_wizard import ExportWizard
         ExportWizard(self.canvas, self).exec()
 
+    def _export_courseware(self) -> None:
+        from ui.export_courseware import export_courseware
+        export_courseware(self.canvas, self)
+
     def _build_statusbar(self) -> None:
         sb = QStatusBar(self)
         self.setStatusBar(sb)
@@ -261,7 +273,7 @@ class MainWindow(QMainWindow):
 
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存", "sketch.json", "GeoSketch 文件 (*.json)")
+            self, "保存", f"sketch_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wgeo", "GeoSketch 文件 (*.wgeo)")
         if path:
             self.doc.save(path)
 
@@ -271,6 +283,21 @@ class MainWindow(QMainWindow):
 
     def _open(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "打开", "", "GeoSketch 文件 (*.json)")
+            self, "打开", "", "GeoSketch 文件 (*.wgeo)")
         if path:
             self.doc.load(path)
+            
+    def _doc_info(self) -> None:
+        title, ok = QInputDialog.getText(
+            self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))
+        if not ok:
+            return
+        author, ok2 = QInputDialog.getText(
+            self, "文档信息", "作者（可留空，不强制署名）：",
+            text=self.doc.meta.get("author", ""))
+        self.doc.meta["title"] = title
+        if ok2:
+            self.doc.meta["author"] = author
+        # 标题显示在窗口标题栏
+        base = "GeoSketch · 几何画板"
+        self.setWindowTitle(f"{title} - {base}" if title else base)

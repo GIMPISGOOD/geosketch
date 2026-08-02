@@ -30,6 +30,7 @@ class Document(QObject):
         self.vars = get_store()
         self.expr_objects = []
         self._clipboard = None
+        self.meta = {"title": "", "author": "", "theme": "纸白", "created": "", "modified": ""}
 
     # ================= 增删 =================
     def _add(self, obj):
@@ -254,8 +255,25 @@ class Document(QObject):
         self.changed.emit()
 
     def save(self, path):
-        Path(path).write_text(
-            json.dumps(self.snapshot(), ensure_ascii=False, indent=1), encoding="utf-8")
+        import zipfile
+        import datetime
+        from ui import theme as _theme
+        self.meta["theme"] = _theme.active_name()
+        self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")
+        if not self.meta.get("created"):
+            self.meta["created"] = self.meta["modified"]
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("sketch.json",
+                        json.dumps(self.snapshot(), ensure_ascii=False, indent=1))
+            zf.writestr("meta.data",
+                        json.dumps(self.meta, ensure_ascii=False, indent=1))
 
     def load(self, path):
-        self._load_state(json.loads(Path(path).read_text(encoding="utf-8")))
+        import zipfile
+        from ui import theme as _theme
+        with zipfile.ZipFile(path, "r") as zf:
+            self._load_state(json.loads(zf.read("sketch.json")))
+            if "meta.data" in zf.namelist():
+                self.meta = json.loads(zf.read("meta.data"))
+                if self.meta.get("theme") in _theme.theme_names():
+                    _theme.set_theme(self.meta["theme"])

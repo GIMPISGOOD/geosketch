@@ -46,6 +46,7 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "diameter":  ("fa5s.circle",           "mdi.circle-diameter"),
     "slope":     ("fa5s.chart-line",       "mdi.slope-downhill"),
     "coord":     ("fa5s.crosshairs",       "mdi.crosshairs-gps"),
+    "ink":  ("fa5s.pen-fancy",  "mdi.fountain-pen-tip"),
 }
 
 

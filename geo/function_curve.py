@@ -187,25 +187,75 @@ class FunctionCurve(GeoObject):
 
 @register_renderer(FunctionCurve)
 def draw_function(p, obj, view):
-    pts = obj.sample(view)
-    pen = theme.pen(obj.color, 2.5 if obj.selected else 2.0)
-    p.setPen(pen)
+    if not obj.exists:
+        return
+    color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
+    p.setPen(theme.pen(color, 2))
+
+    if obj.kind == "explicit":
+        _draw_explicit(p, obj, view)
+    elif obj.kind == "parametric":
+        _draw_parametric(p, obj, view)
+    elif obj.kind == "polar":
+        _draw_polar(p, obj, view)
+
+
+def _draw_explicit(p, obj, view):
+    """显函数：只采样可见 x 范围，按像素密度采样，渐近线处断开。"""
+    x0, _ = view.to_world(QPointF(0, 0))
+    x1, _ = view.to_world(QPointF(view.width(), 0))
+    if x0 > x1:
+        x0, x1 = x1, x0
+    _, yt = view.to_world(QPointF(0, 0))
+    _, yb = view.to_world(QPointF(0, view.height()))
+    y_range = abs(yt - yb) or 1.0
+
+    # 每像素 ~3 个采样点，保证任意缩放都平滑；封顶防卡顿
+    n = min(max(int(view.width() * 3), 600), 12000)
+
     prev = None
-    label_anchor = None
-    cx, cy = view.width() / 2, view.height() / 2
-    best_ld = float("inf")
-    for pt in pts:
-        if pt is None:
+    for i in range(n + 1):
+        x = x0 + (x1 - x0) * i / n
+        y = obj._eval_at(x)
+        if y is None or not math.isfinite(y):
+            prev = None
+            continue
+        # 渐近线检测：相邻 y 跳变超过视窗高度 → 断开，不连线
+        if prev is not None and abs(y - prev[1]) > y_range * 1.5:
+            prev = None
+        sp = view.to_screen(x, y)
+        if prev is not None:
+            p.drawLine(prev, sp)
+        prev = (x, y)
+
+
+def _draw_parametric(p, obj, view):
+    a, b = obj.domain or (0, 2 * math.pi)
+    n = 2000
+    prev = None
+    for i in range(n + 1):
+        t = a + (b - a) * i / n
+        pt = obj._eval_at(t)
+        if pt is None or not (math.isfinite(pt[0]) and math.isfinite(pt[1])):
             prev = None
             continue
         sp = view.to_screen(*pt)
         if prev is not None:
             p.drawLine(prev, sp)
         prev = sp
-        # 记录最靠近视窗中心的采样点，用于放标签
-        ld = (sp.x() - cx) ** 2 + (sp.y() - cy) ** 2
-        if ld < best_ld:
-            best_ld, label_anchor = ld, sp
-    if label_anchor is not None:
-        draw_math(p, label_anchor.x() + 8, label_anchor.y() - 8,
-                  obj.default_label(), 13, obj.color)
+
+
+def _draw_polar(p, obj, view):
+    a, b = obj.domain or (0, 2 * math.pi)
+    n = 2000
+    prev = None
+    for i in range(n + 1):
+        t = a + (b - a) * i / n
+        r = obj._eval_at(t)
+        if r is None or not math.isfinite(r):
+            prev = None
+            continue
+        sp = view.to_screen(r * math.cos(t), r * math.sin(t))
+        if prev is not None:
+            p.drawLine(prev, sp)
+        prev = sp
