@@ -28,40 +28,34 @@ def next_color():
 class FunctionCurve(GeoObject):
     def __init__(self, kind="explicit", expr="x", expr2="",
                  domain=None, color=None, label_text=None):
-        super().__init__(parents=())      # 不依赖几何对象，依赖变量（运行时求值）
-        self.kind = kind                  # explicit / parametric / polar
-        self.expr = expr                  # explicit: y=f(x); parametric: x(t); polar: r(θ)
-        self.expr2 = expr2                # parametric: y(t)
-        self.domain = domain              # None=自动(视窗); 或 (a, b)
+        super().__init__(parents=())
+        self.kind = kind
+        self.expr = expr
+        self.expr2 = expr2
+        self.domain = domain
         self.color = color or next_color()
         self.label_text = label_text
-        self._domain = domain             # 采样时缓存的定义域（供 point_at/project 用）
+        self._domain = domain
 
-    # ── 求值：代入参数 u 与全部滑杆变量 ──
     def _eval_at(self, u):
         """在参数 u 处求值。
         - explicit: 返回 y（float）
         - parametric: 返回 (x, y)（2-tuple）
         - polar: 返回 r（float）
         """
-        from core.variables import get_store, evaluate
         vd = get_store().as_dict()
-
         if self.kind == "explicit":
             vd["x"] = u
-            return evaluate(self.expr, vd)          # ★ 返回 y（float），不是 (x, y)
-
+            return evaluate(self.expr, vd)
         elif self.kind == "parametric":
             vd["t"] = u
             x = evaluate(self.expr, vd)
             y = evaluate(self.expr2, vd)
-            return (x, y)                           # ✓ 返回 (x, y)
-
+            return (x, y)
         elif self.kind == "polar":
             vd["t"] = u
             vd["θ"] = u
-            return evaluate(self.expr, vd)          # ★ 返回 r（float），不是 (x, y)
-
+            return evaluate(self.expr, vd)
         return None
 
     def _eval_point(self, u) -> Optional[Tuple[float, float]]:
@@ -71,19 +65,16 @@ class FunctionCurve(GeoObject):
         if val is None:
             return None
         if self.kind == "explicit":
-            # val 是 y (float)
             if isinstance(val, (int, float)) and math.isfinite(val):
                 return (float(u), float(val))
             return None
         elif self.kind == "parametric":
-            # val 是 (x, y) tuple
             if isinstance(val, (tuple, list)) and len(val) == 2:
                 x, y = val
                 if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
                     return (float(x), float(y))
             return None
         elif self.kind == "polar":
-            # val 是 r (float)
             if isinstance(val, (int, float)) and math.isfinite(val):
                 r = float(val)
                 return (r * math.cos(u), r * math.sin(u))
@@ -97,14 +88,13 @@ class FunctionCurve(GeoObject):
             x0, _ = view.to_world(QPointF(0, 0))
             x1, _ = view.to_world(QPointF(view.width(), 0))
             return (min(x0, x1), max(x0, x1))
-        return (0.0, 2 * math.pi)         # 参数/极坐标默认 [0, 2π]
+        return (0.0, 2 * math.pi)
 
-    # ── 采样（含不连续自动断开）──
-    def sample(self, view, n=900) -> list[Optional[tuple[float, float]]]:
+    def sample(self, view, n=900) -> list[Optional[Tuple[float, float]]]:
         a, b = self.get_domain(view)
         self._domain = (a, b)
-        # ★ 用 _eval_point 统一返回 (x, y) tuple
-        raw: list[Optional[tuple[float, float]]] = [
+        # ★ 必须改用 _eval_point
+        raw: list[Optional[Tuple[float, float]]] = [
             self._eval_point(a + (b - a) * i / n) for i in range(n + 1)
         ]
         breaks = set()
@@ -136,25 +126,24 @@ class FunctionCurve(GeoObject):
                     continue
                 if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) > diag * 2:
                     breaks.add(i)
-        pts: list[Optional[tuple[float, float]]] = []
+        pts: list[Optional[Tuple[float, float]]] = []
         for i, p in enumerate(raw):
             if i in breaks:
                 pts.append(None)
             pts.append(p)
         return pts
-    # ── 参数化接口（取点 / 磁吸 / 未来的交点）──
+
     def _param_domain(self):
-        """点参数化的稳定定义域（不随视窗变化，保证拖动平滑）。"""
         if self.domain:
             return self.domain
         if self.kind == "explicit":
             return (-50.0, 50.0)
         return (0.0, 4 * math.pi)
 
-    def point_at(self, t):
+    def point_at(self, t) -> Tuple[float, float]:
         a, b = self._param_domain()
         u = a + (b - a) * max(0.0, min(1.0, t))
-        p = self._eval_at(u)
+        p = self._eval_point(u)          # ★ 必须改用 _eval_point
         return p if p else (0.0, 0.0)
 
     def project(self, x, y) -> float:
@@ -162,7 +151,7 @@ class FunctionCurve(GeoObject):
         n = 500
         best_t, best_d = 0.0, float("inf")
         for i in range(n + 1):
-            p = self._eval_point(a + (b - a) * i / n)  # ★ 必须改用 _eval_point
+            p = self._eval_point(a + (b - a) * i / n)   # ★ 必须改用 _eval_point
             if p is None:
                 continue
             d = (p[0] - x) ** 2 + (p[1] - y) ** 2
@@ -171,7 +160,7 @@ class FunctionCurve(GeoObject):
         lo, hi = max(0.0, best_t - 1 / n), min(1.0, best_t + 1 / n)
         for i in range(50):
             tt = lo + (hi - lo) * i / 49
-            p = self._eval_point(a + (b - a) * tt)  # ★ 必须改用 _eval_point
+            p = self._eval_point(a + (b - a) * tt)      # ★ 必须改用 _eval_point
             if p is None:
                 continue
             d = (p[0] - x) ** 2 + (p[1] - y) ** 2
@@ -183,7 +172,6 @@ class FunctionCurve(GeoObject):
         p = self.point_at(self.project(x, y))
         return math.hypot(p[0] - x, p[1] - y)
 
-    # ── 标签 ──
     def default_label(self):
         if self.label_text:
             return self.label_text
@@ -195,7 +183,6 @@ class FunctionCurve(GeoObject):
             return f"r = {self.expr}"
         return self.expr
 
-    # ── 序列化 ──
     def dump(self):
         return {"kind": self.kind, "expr": self.expr, "expr2": self.expr2,
                 "domain": list(self.domain) if self.domain else None,
@@ -215,7 +202,6 @@ def draw_function(p, obj, view):
         return
     color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
     p.setPen(theme.pen(color, 2))
-
     if obj.kind == "explicit":
         _draw_explicit(p, obj, view)
     elif obj.kind == "parametric":
@@ -233,23 +219,33 @@ def _draw_explicit(p, obj, view):
     _, yt = view.to_world(QPointF(0, 0))
     _, yb = view.to_world(QPointF(0, view.height()))
     y_range = abs(yt - yb) or 1.0
-
     n = min(max(int(view.width() * 3), 600), 12000)
-
-    prev = None
+    
+    prev_y = None
+    prev_sp = None
     for i in range(n + 1):
         x = x0 + (x1 - x0) * i / n
         y = obj._eval_at(x)
+        
         # ★ 类型保护：只接受实数，tuple/None/复数全部跳过
         if not isinstance(y, (int, float)) or not math.isfinite(y):
-            prev = None
+            prev_y = None
+            prev_sp = None
             continue
-        if prev is not None and abs(y - prev[1]) > y_range * 1.5:
-            prev = None
+            
+        # 渐近线检测：相邻 y 跳变超过视窗高度 1.5 倍则断开
+        is_break = False
+        if prev_y is not None and abs(y - prev_y) > y_range * 1.5:
+            is_break = True
+            
         sp = view.to_screen(x, y)
-        if prev is not None:
-            p.drawLine(prev, sp)
-        prev = (x, y)
+        
+        # ★ 修复：drawLine 必须接收两个 QPointF
+        if prev_sp is not None and not is_break:
+            p.drawLine(prev_sp, sp)
+            
+        prev_y = y
+        prev_sp = sp
 
 
 def _draw_parametric(p, obj, view):
