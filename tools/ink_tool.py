@@ -1,21 +1,22 @@
-"""墨迹注释工具：钢笔/荧光笔/铅笔，可选颜色与透明度，显示在左侧工具栏。"""
-from PySide6.QtCore import Qt
+"""墨迹注释工具：钢笔/荧光笔/铅笔/橡皮擦，可选颜色与透明度，支持撤销单条笔画。"""
 import math
-from PySide6.QtGui import QColor
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainterPath
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
                                QSlider, QLabel, QColorDialog, QGraphicsDropShadowEffect)
 
 from core.registry import register_tool
-from geo.ink import InkStroke
+from geo.ink import InkStroke, InkEraser
 from tools.base import Tool
 from ui import theme
 
-MODES = [("pen", "钢笔"), ("highlighter", "荧光笔"), ("pencil", "铅笔")]
+MODES = [("pen", "钢笔"), ("highlighter", "荧光笔"), ("pencil", "铅笔"), ("eraser", "橡皮擦")]
 PRESET_COLORS = ["#222222", "#e03131", "#1971c2", "#2f9e44", "#f08c00", "#9c36b5", "#ffd43b"]
 
 
 class InkSettingsPanel(QWidget):
-    """墨迹设置浮层：笔型 / 颜色 / 透明度。"""
+    """墨迹设置浮层：笔型 / 颜色 / 透明度 / 撤销笔画。"""
     def __init__(self, tool, parent=None):
         super().__init__(parent)
         self.setObjectName("inkPanel")
@@ -70,6 +71,12 @@ class InkSettingsPanel(QWidget):
         orow.addWidget(self._op_lbl)
         v.addLayout(orow)
 
+        # 撤销笔画
+        undo_btn = QPushButton("↩ 撤销笔画")
+        undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        undo_btn.clicked.connect(self.tool.undo_stroke)
+        v.addWidget(undo_btn)
+
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(20); shadow.setOffset(0, 4)
         shadow.setColor(QColor(0, 0, 0, 50))
@@ -100,7 +107,7 @@ class InkSettingsPanel(QWidget):
 
 
 @register_tool(name="墨迹", shortcut="I", order=11, icon="ink", panel="rail",
-               hint="自由手绘注释：钢笔/荧光笔/铅笔，可选颜色与透明度")
+               hint="自由手绘：钢笔/荧光笔/铅笔/橡皮擦，可选颜色透明度，可撤销笔画")
 class InkTool(Tool):
     def __init__(self):
         self._points = []
@@ -109,10 +116,12 @@ class InkTool(Tool):
         self._color = "#222222"
         self._opacity = 1.0
         self._panel = None
+        self._strokes = []      # 本次会话画的笔画（用于撤销）
 
     def activated(self, canvas):
         self._drawing = False
         self._points = []
+        self._strokes = []
         self._panel = InkSettingsPanel(self, canvas)
         self._panel.adjustSize()
         self._panel.move((canvas.width() - self._panel.width()) // 2, 14)
@@ -131,18 +140,31 @@ class InkTool(Tool):
 
     def move(self, canvas, wpt, hit):
         if self._drawing:
-            # 简单抽稀：与上一点太近就不加
             if self._points and math.hypot(wpt[0]-self._points[-1][0], wpt[1]-self._points[-1][1]) > 2.0/canvas.scale:
                 self._points.append(wpt)
                 canvas.update()
 
     def release(self, canvas, wpt, hit):
         if self._drawing and len(self._points) > 1:
-            width = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
-            canvas.doc.add(InkStroke(self._points, self._color, width, self._opacity, self._mode))
+            if self._mode == "eraser":
+                stroke = InkEraser(self._points, width=18.0)
+            else:
+                width = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
+                stroke = InkStroke(self._points, self._color, width, self._opacity, self._mode)
+            canvas.doc.add(stroke)
+            self._strokes.append(stroke)
         self._drawing = False
         self._points = []
         canvas.update()
+
+    def undo_stroke(self):
+        """撤销最近一条笔画（从文档中删除）。"""
+        if self._strokes:
+            stroke = self._strokes.pop()
+            # 从文档中删除
+            assert self._panel is not None
+            if stroke in self._panel.canvas.doc.objects:
+                self._panel.canvas.doc.remove(stroke)
 
     def cancel(self, canvas):
         self._drawing = False
@@ -151,17 +173,20 @@ class InkTool(Tool):
 
     def draw_overlay(self, p, view):
         if self._drawing and len(self._points) > 1:
-            c = QColor(self._color)
-            c.setAlphaF(self._opacity)
-            w = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
-            if self._mode == "highlighter":
-                w *= 3.5
+            if self._mode == "eraser":
+                c = QColor(theme.BG_TOP)
+                w = 18.0
+            else:
+                c = QColor(self._color)
+                c.setAlphaF(self._opacity)
+                w = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
+                if self._mode == "highlighter":
+                    w *= 3.5
             pen = theme.pen(c, w)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             p.setPen(pen)
             p.setBrush(Qt.BrushStyle.NoBrush)
-            from PySide6.QtGui import QPainterPath
             path = QPainterPath()
             path.moveTo(view.to_screen(*self._points[0]))
             for pt in self._points[1:]:

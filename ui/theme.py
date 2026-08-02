@@ -214,3 +214,28 @@ LABEL_FONT = QFont("Consolas", 9)
 LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
 AXIS_FONT = QFont("Georgia", 11, QFont.Weight.DemiBold)
 AXIS_FONT.setItalic(True)
+
+# ───────────── 自定义主题 ─────────────
+def save_custom_theme(name, colors_dict):
+    """把当前颜色字典保存为自定义主题（写入 THEMES）。"""
+    THEMES[name] = dict(colors_dict)
+
+def delete_custom_theme(name):
+    if name in THEMES and name not in ("纸白", "墨夜", "蓝图", "黑板"):
+        del THEMES[name]
+
+def export_theme(name, path):
+    """把主题导出为 JSON 文件。"""
+    import json
+    from pathlib import Path
+    t = THEMES.get(name, THEMES["纸白"])
+    Path(path).write_text(json.dumps(t, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def import_theme(path):
+    """从 JSON 文件导入主题。"""
+    import json
+    from pathlib import Path
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    name = data.get("_name", "自定义")
+    THEMES[name] = data
+    return name

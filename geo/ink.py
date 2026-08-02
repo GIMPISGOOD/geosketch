@@ -66,3 +66,47 @@ def draw_ink(p, obj, view):
     for pt in obj.points[1:]:
         path.lineTo(view.to_screen(*pt))
     p.drawPath(path)
+
+@register_geo("InkEraser")
+class InkEraser(GeoObject):
+    """橡皮擦笔画：记录擦除路径，渲染时用背景色覆盖（视觉擦除）。"""
+    def __init__(self, points, width=18.0):
+        super().__init__(parents=())
+        self.points = list(points)
+        self.width = width
+
+    def distance_to(self, x, y):
+        best = float("inf")
+        for i in range(len(self.points) - 1):
+            x1, y1 = self.points[i]
+            x2, y2 = self.points[i + 1]
+            dx, dy = x2 - x1, y2 - y1
+            denom = dx * dx + dy * dy
+            t = 0.0 if denom == 0 else max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / denom))
+            best = min(best, math.hypot(x1 + t * dx - x, y1 + t * dy - y))
+        return best
+
+    def dump(self):
+        return {"points": self.points, "width": self.width}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["points"], params.get("width", 18.0))
+
+
+@register_renderer(InkEraser)
+def draw_eraser(p, obj, view):
+    if len(obj.points) < 2:
+        return
+    # 用当前主题背景色覆盖，实现"擦除"视觉
+    p.setPen(theme.pen(theme.BG_TOP, obj.width))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    pen = p.pen()
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    path = QPainterPath()
+    path.moveTo(view.to_screen(*obj.points[0]))
+    for pt in obj.points[1:]:
+        path.lineTo(view.to_screen(*pt))
+    p.drawPath(path)

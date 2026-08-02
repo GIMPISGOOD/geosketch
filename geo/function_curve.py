@@ -210,17 +210,16 @@ def _draw_explicit(p, obj, view):
     _, yb = view.to_world(QPointF(0, view.height()))
     y_range = abs(yt - yb) or 1.0
 
-    # 每像素 ~3 个采样点，保证任意缩放都平滑；封顶防卡顿
     n = min(max(int(view.width() * 3), 600), 12000)
 
     prev = None
     for i in range(n + 1):
         x = x0 + (x1 - x0) * i / n
         y = obj._eval_at(x)
-        if y is None or not math.isfinite(y):
+        # ★ 类型保护：只接受实数，tuple/None/复数全部跳过
+        if not isinstance(y, (int, float)) or not math.isfinite(y):
             prev = None
             continue
-        # 渐近线检测：相邻 y 跳变超过视窗高度 → 断开，不连线
         if prev is not None and abs(y - prev[1]) > y_range * 1.5:
             prev = None
         sp = view.to_screen(x, y)
@@ -236,10 +235,15 @@ def _draw_parametric(p, obj, view):
     for i in range(n + 1):
         t = a + (b - a) * i / n
         pt = obj._eval_at(t)
-        if pt is None or not (math.isfinite(pt[0]) and math.isfinite(pt[1])):
+        if not isinstance(pt, (tuple, list)) or len(pt) != 2:
             prev = None
             continue
-        sp = view.to_screen(*pt)
+        x, y = pt
+        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))
+                and math.isfinite(x) and math.isfinite(y)):
+            prev = None
+            continue
+        sp = view.to_screen(x, y)
         if prev is not None:
             p.drawLine(prev, sp)
         prev = sp
@@ -252,7 +256,7 @@ def _draw_polar(p, obj, view):
     for i in range(n + 1):
         t = a + (b - a) * i / n
         r = obj._eval_at(t)
-        if r is None or not math.isfinite(r):
+        if not isinstance(r, (int, float)) or not math.isfinite(r):
             prev = None
             continue
         sp = view.to_screen(r * math.cos(t), r * math.sin(t))
