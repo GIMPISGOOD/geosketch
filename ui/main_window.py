@@ -238,13 +238,15 @@ class MainWindow(QMainWindow):
             tgroup.addAction(act)
             thm.addAction(act)
         thm.addSeparator()
+        thm.addSeparator()
         custom_act = QAction("自定义主题…", self)
-        custom_act.triggered.connect(self._custom_theme)
+        custom_act.triggered.connect(self._open_theme_editor)
         thm.addAction(custom_act)
-        import_act = QAction("导入主题…", self)
-        import_act.triggered.connect(self._import_theme)
-        thm.addAction(import_act)
 
+    def _open_theme_editor(self):
+        from ui.theme_editor import ThemeEditorDialog
+        ThemeEditorDialog(self).exec()
+        
     def _on_theme_changed(self, name) -> None:
         app = QApplication.instance()
         assert isinstance(app, QApplication)
@@ -259,29 +261,7 @@ class MainWindow(QMainWindow):
         from ui.export_wizard import ExportWizard
         ExportWizard(self.canvas, self).exec()
 
-    def _custom_theme(self):
-        """打开自定义主题对话框（简单版：用 QInputDialog 问名字，然后复制当前主题供用户改）。"""
-        from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self, "自定义主题", "主题名称：", text="我的主题")
-        if not ok or not name.strip():
-            return
-        # 复制当前主题作为起点
-        from ui import theme as _theme
-        _theme.save_custom_theme(name.strip(), _theme.THEMES[_theme.active_name()])
-        # 刷新主题菜单
-        self._build_menubar()
-        QMessageBox.information(self, "自定义主题",
-                                f"已创建主题「{name}」，当前颜色与「{_theme.active_name()}」相同。\n"
-                                f"如需修改具体颜色，请编辑 theme.py 中的 THEMES 字典。")
 
-    def _import_theme(self):
-        from PySide6.QtWidgets import QFileDialog
-        from ui import theme as _theme
-        path, _ = QFileDialog.getOpenFileName(self, "导入主题", "", "JSON 文件 (*.json)")
-        if path:
-            name = _theme.import_theme(path)
-            self._build_menubar()
-            QMessageBox.information(self, "导入主题", f"已导入主题「{name}」。")
 
     def _export_courseware(self) -> None:
         from ui.export_courseware import export_courseware
