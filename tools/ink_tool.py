@@ -116,9 +116,11 @@ class InkTool(Tool):
         self._color = "#222222"
         self._opacity = 1.0
         self._panel = None
-        self._strokes = []      # 本次会话画的笔画（用于撤销）
+        self._strokes = []
+        self._canvas = None       # ★ 修复：保存 canvas 引用，避免用 panel.canvas 报错
 
     def activated(self, canvas):
+        self._canvas = canvas     # ★ 修复：在激活时记录 canvas
         self._drawing = False
         self._points = []
         self._strokes = []
@@ -130,6 +132,7 @@ class InkTool(Tool):
     def deactivated(self, canvas):
         self._drawing = False
         self._points = []
+        self._canvas = None       # ★ 清理引用
         if self._panel is not None:
             self._panel.hide(); self._panel.deleteLater()
             self._panel = None
@@ -159,12 +162,10 @@ class InkTool(Tool):
 
     def undo_stroke(self):
         """撤销最近一条笔画（从文档中删除）。"""
-        if self._strokes:
+        if self._strokes and self._canvas is not None:   # ★ 修复：使用 self._canvas
             stroke = self._strokes.pop()
-            # 从文档中删除
-            assert self._panel is not None
-            if stroke in self._panel.canvas.doc.objects:
-                self._panel.canvas.doc.remove(stroke)
+            if stroke in self._canvas.doc.objects:
+                self._canvas.doc.remove(stroke)
 
     def cancel(self, canvas):
         self._drawing = False
