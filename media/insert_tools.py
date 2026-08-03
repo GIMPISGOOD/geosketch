@@ -1,6 +1,7 @@
 """插入工具：图像 / 表格 / 饼图 / 柱状图。注册到「插入」菜单（panel="insert"）。"""
 from core.registry import register_tool
 from tools.base import Tool
+from tools.select import SelectTool            # ★ 新增：用于插入后切回选择工具
 from media.image_obj import ImageObject
 from media.table_obj import TableObject
 from media.chart_obj import PieChartObject, BarChartObject
@@ -14,7 +15,10 @@ class InsertImageTool(Tool):
         path, _ = QFileDialog.getOpenFileName(
             canvas, "选择图片", "", "图片 (*.png *.jpg *.jpeg *.bmp *.gif)")
         if path:
-            canvas.doc.add(ImageObject(wpt[0], wpt[1], path))
+            obj = ImageObject(wpt[0], wpt[1], path)
+            canvas.doc.add(obj)
+            canvas.doc.set_selection([obj])     # ★ 选中新对象
+            canvas.set_tool(SelectTool())       # ★ 切回选择工具
 
 
 @register_tool(name="插入表格", order=2, panel="insert", icon="insert_table",
@@ -22,25 +26,32 @@ class InsertImageTool(Tool):
 class InsertTableTool(Tool):
     def press(self, canvas, wpt, hit):
         from media.table_wizard import InsertTableWizard
-        from media.table_obj import TableObject
         wiz = InsertTableWizard(canvas)
         if wiz.exec():
             rows, cols, cells, cell_colors = wiz.get_table_data()
             width = max(cols * 1.6, 3.0)
             height = max(rows * 1.1, 2.0)
-            canvas.doc.add(TableObject(wpt[0], wpt[1], rows, cols,
-                                       cells, cell_colors, width, height))
+            obj = TableObject(wpt[0], wpt[1], rows, cols, cells, cell_colors, width, height)
+            canvas.doc.add(obj)
+            canvas.doc.set_selection([obj])     # ★ 选中新对象
+            canvas.set_tool(SelectTool())       # ★ 切回选择工具
 
 
 @register_tool(name="插入饼图", order=3, panel="insert", icon="insert_pie",
-               hint="点击画布插入饼状图（双击编辑数据）")
+               hint="点击画布插入饼状图（点 ✎ 编辑数据）")
 class InsertPieTool(Tool):
     def press(self, canvas, wpt, hit):
-        canvas.doc.add(PieChartObject(wpt[0], wpt[1]))
+        obj = PieChartObject(wpt[0], wpt[1])
+        canvas.doc.add(obj)
+        canvas.doc.set_selection([obj])         # ★ 选中新对象
+        canvas.set_tool(SelectTool())           # ★ 切回选择工具
 
 
 @register_tool(name="插入柱状图", order=4, panel="insert", icon="insert_bar",
-               hint="点击画布插入柱状图（双击编辑数据）")
+               hint="点击画布插入柱状图（点 ✎ 编辑数据）")
 class InsertBarTool(Tool):
     def press(self, canvas, wpt, hit):
-        canvas.doc.add(BarChartObject(wpt[0], wpt[1]))
+        obj = BarChartObject(wpt[0], wpt[1])
+        canvas.doc.add(obj)
+        canvas.doc.set_selection([obj])         # ★ 选中新对象
+        canvas.set_tool(SelectTool())           # ★ 切回选择工具

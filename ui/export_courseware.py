@@ -16,6 +16,10 @@ from PySide6.QtWidgets import (QFileDialog, QMessageBox, QWidget, QWizard, QWiza
                                QCheckBox, QSpinBox, QFormLayout)
 
 from ui import theme
+from PySide6.QtGui import QImage, QPainter
+from PySide6.QtCore import QByteArray, QBuffer, QPointF, Qt
+from core.registry import RENDER_REGISTRY
+from media.base import MediaObject
 
 JSX_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraphcore.js"
 JSX_CSS_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraph.css"
@@ -40,6 +44,52 @@ def render_preview(canvas, w=1280, h=800, add_badge=True) -> QImage:
         p.drawText(x, y, bw, bh, 0x0084, "▶  点击运行")
         p.end()
     return img
+
+def _render_media_to_base64(obj):
+    """把媒体对象渲染成高分辨率 PNG 的 Base64 字符串，供网页版使用。"""
+    view_scale = 60.0  # 1 世界单位 = 60 像素，保证网页里清晰
+    w_px = int(obj.width * view_scale)
+    h_px = int(obj.height * view_scale)
+    if w_px <= 0 or h_px <= 0:
+        return None
+        
+    img = QImage(w_px, h_px, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    
+    # 构造一个模拟的 view，把对象左上角映射到 (0,0)
+    class MockView:
+        def __init__(self, obj, scale):
+            self.scale = scale
+            self.obj = obj
+        def to_screen(self, x, y):
+            return QPointF((x - self.obj.x) * self.scale, (y - self.obj.y) * self.scale)
+            
+    mock_view = MockView(obj, view_scale)
+    
+    # 查找并调用对应的渲染器
+    renderer = None
+    for cls in type(obj).__mro__:
+        if cls in RENDER_REGISTRY:
+            renderer = RENDER_REGISTRY[cls]
+            break
+            
+    if renderer:
+        old_sel = getattr(obj, 'selected', False)
+        obj.selected = False          # 临时取消选中，避免画出 ✎ 按钮和缩放手柄
+        try:
+            renderer(p, obj, mock_view)
+        except Exception:
+            pass
+        obj.selected = old_sel
+    p.end()
+    
+    ba = QByteArray()
+    buf = QBuffer(ba)
+    buf.open(QBuffer.OpenModeFlag.WriteOnly)
+    img.save(buf, "PNG")
+    return ba.toBase64().data().decode('ascii')
 
 
 # ───────────── 表达式转换（Python → JS）─────────────
@@ -247,6 +297,20 @@ def _jsx_export(doc, include_vars=True):
             lines.append(f"var {n} = board.create('curve', [{xs}, {ys}], "
                          f"{{strokeColor: '{obj.color}', strokeWidth: {obj.width}, "
                          f"opacity: {obj.opacity}}});")
+        # ★ 新增：媒体对象（表格/图表/图像）转图片渲染
+        elif isinstance(obj, MediaObject):
+            b64 = _render_media_to_base64(obj)
+            if b64:
+                n = nv(); names[obj.id] = n
+                # JSXGraph 的 image 坐标是左下角，且高度向上延伸
+                x_bl = obj.x
+                y_bl = obj.y + obj.height
+                # 替换 Base64 中的换行符以防 JS 报错
+                b64_clean = b64.replace("\n", "")
+                lines.append(f"var {n} = board.create('image', "
+                             f"['data:image/png;base64,{b64_clean}', "
+                             f"[{x_bl}, {y_bl}], [{obj.width}, {obj.height}]], "
+                             f"{{fixed: false, highlight: false}});")
 
     return "\n".join(lines), bb
 
