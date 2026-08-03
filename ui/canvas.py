@@ -338,6 +338,14 @@ class Canvas(QWidget):
                             self.pick(ev.position()))
             self.doc._commit_undo_if_changed()
 
+    def mouseDoubleClickEvent(self, ev):
+        hit = self.pick(ev.position())
+        if hit is not None and hasattr(hit, "edit"):
+            hit.edit(self)                    # 打开媒体编辑对话框
+            self.doc.changed.emit()
+        else:
+            super().mouseDoubleClickEvent(ev)
+            
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
         self.cursor_info.emit(

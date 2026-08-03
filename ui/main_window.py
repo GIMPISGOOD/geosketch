@@ -11,6 +11,7 @@ from ui.variable_widgets import VariableWizard, VariableRangeDialog
 import geo            # noqa: F401
 import tools          # noqa: F401
 import plugins        # noqa: F401
+import media           # noqa: F401
 from core.document import Document
 from core.registry import TOOL_REGISTRY
 from ui import theme
@@ -189,6 +190,15 @@ class MainWindow(QMainWindow):
             tm.addAction(self._actions[spec["cls"]])
         if not plugin_specs:
             e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
+        # 插入菜单：媒体对象
+        im = mb.addMenu("插入(&I)")
+        insert_specs = sorted(
+            [s for s in TOOL_REGISTRY if s.get("panel") == "insert"],
+            key=lambda s: s.get("order", 99))
+        for spec in insert_specs:
+            im.addAction(self._actions[spec["cls"]])
+        if not insert_specs:
+            e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
         # 度量菜单：panel="measure" 的工具
         mm = mb.addMenu("度量(&L)")
         measure_specs = sorted(

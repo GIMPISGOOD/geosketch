@@ -115,8 +115,11 @@ class VariableSliderPanel(QWidget):
         self._rows = QVBoxLayout()
         self._rows.setSpacing(4)
         layout.addLayout(self._rows)
+        self._dragging = False 
 
     def refresh(self):
+        if self._dragging:              # ★ 新增：拖动时不重建滑杆
+            return
         self._cap.setStyleSheet(
             f"font-weight:800;font-size:12px;color:{theme.INK.name()};")
         self._add.setStyleSheet(
@@ -159,10 +162,12 @@ class VariableSliderPanel(QWidget):
         return w
 
     def _on_slide(self, name, v, lbl, vmin, vmax):
+        self._dragging = True
         val = vmin + (vmax - vmin) * v / 1000
         lbl.setText(f"{name} = {val:.2f}")
         self.canvas.doc.vars.set(name, val)
         self.canvas.doc.refresh_variables()
+        self._dragging = False
 
     def _delete(self, name):
         self.canvas.doc.vars.delete(name)

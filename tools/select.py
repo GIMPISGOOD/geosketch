@@ -29,8 +29,10 @@ class SelectTool(Tool):
         self._reset()
 
     def _reset(self):
-        self.drag_pts = []          # 偏移拖动的自由点（单个或一组）
-        self.drag_poo = None        # 参数拖动的吸附点
+        self.drag_pts = []
+        self.drag_poo = None
+        self.drag_media = None          # ★ 新增
+        self._media_orig = (0.0, 0.0)   # ★ 新增
         self._orig_pos = []
         self._grab_wpt = None
         self._drag_undo_begun = False
@@ -65,6 +67,11 @@ class SelectTool(Tool):
         elif isinstance(target, AbstractPoint):
             # 派生点（中点/交点/等分点/顶点）：只选中，不拖动
             canvas.doc.set_selection([target])
+        elif getattr(target, "media", False):
+        # 媒体对象（图像/表格/图表）：直接拖动
+            canvas.doc.set_selection([target])
+            self.drag_media = target
+            self._media_orig = (target.x, target.y)        
         else:
             # 几何图形：整体平移（移动它的全部自由定义点）
             canvas.doc.set_selection([target])
@@ -75,13 +82,20 @@ class SelectTool(Tool):
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
     def move(self, canvas, wpt, hit):
-        if self.drag_poo is None and not self.drag_pts:
+        if self.drag_poo is None and not self.drag_pts and self.drag_media is None:
             return
         if not self._drag_undo_begun:
-            canvas.doc.begin_action()             # 首次移动才记撤销
+            canvas.doc.begin_action()
             self._drag_undo_begun = True
-        if self.drag_poo is not None:
-            self.drag_poo.drag_to(wpt)            # 投影到宿主 → 沿图形滑动
+        if self.drag_media is not None:
+            # ★ 媒体对象：整体平移
+            dx = wpt[0] - self._grab_wpt[0]
+            dy = wpt[1] - self._grab_wpt[1]
+            self.drag_media.x = self._media_orig[0] + dx
+            self.drag_media.y = self._media_orig[1] + dy
+            canvas.doc.changed.emit()
+        elif self.drag_poo is not None:
+            self.drag_poo.drag_to(wpt)
             canvas.doc.recompute_from(self.drag_poo)
         else:
             dx = wpt[0] - self._grab_wpt[0]

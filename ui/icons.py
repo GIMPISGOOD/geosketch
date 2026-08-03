@@ -47,6 +47,10 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "slope":     ("fa5s.chart-line",       "mdi.slope-downhill"),
     "coord":     ("fa5s.crosshairs",       "mdi.crosshairs-gps"),
     "ink":  ("fa5s.pen-fancy",  "mdi.fountain-pen-tip"),
+    "insert_image":  ("fa5s.image",      "mdi.image"),
+    "insert_table":  ("fa5s.table",      "mdi.table"),
+    "insert_pie":    ("fa5s.chart-pie",  "mdi.chart-pie"),
+    "insert_bar":    ("fa5s.chart-bar",  "mdi.chart-bar"),
 }
 
 
