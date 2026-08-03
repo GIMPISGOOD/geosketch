@@ -17,8 +17,8 @@ def main() -> None:
     app.setStyleSheet(theme.app_stylesheet())
 
     win = MainWindow()
-    # ★ 命令行第一个参数若为 .json，直接载入（启动器靠这个打开课件草图）
-    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".json"):
+    # ★ 命令行第一个参数若为 .wgeo，直接载入（启动器靠这个打开课件草图）
+    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo"):
         win.doc.load(sys.argv[1])
     win.show()
     sys.exit(app.exec())

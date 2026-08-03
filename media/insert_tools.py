@@ -18,10 +18,18 @@ class InsertImageTool(Tool):
 
 
 @register_tool(name="插入表格", order=2, panel="insert", icon="insert_table",
-               hint="点击画布插入 3×3 表格（双击编辑）")
+               hint="点击画布插入表格（向导设置行列/数值/颜色）")
 class InsertTableTool(Tool):
     def press(self, canvas, wpt, hit):
-        canvas.doc.add(TableObject(wpt[0], wpt[1]))
+        from media.table_wizard import InsertTableWizard
+        from media.table_obj import TableObject
+        wiz = InsertTableWizard(canvas)
+        if wiz.exec():
+            rows, cols, cells, cell_colors = wiz.get_table_data()
+            width = max(cols * 1.6, 3.0)
+            height = max(rows * 1.1, 2.0)
+            canvas.doc.add(TableObject(wpt[0], wpt[1], rows, cols,
+                                       cells, cell_colors, width, height))
 
 
 @register_tool(name="插入饼图", order=3, panel="insert", icon="insert_pie",
