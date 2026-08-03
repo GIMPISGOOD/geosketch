@@ -6,6 +6,7 @@ from core.registry import register_geo, register_renderer
 from core.variables import eval_expr
 from media.base import MediaObject
 from ui import theme
+from media.base import MediaObject, draw_media_decorations
 
 
 @register_geo("TableObject")
@@ -83,7 +84,4 @@ def draw_table(p, obj, view):
                 txt = obj._eval_cell(obj.cells[r][c])
             p.setPen(theme.pen(theme.INK, 1))
             p.drawText(cell_rect, Qt.AlignmentFlag.AlignCenter, txt)
-    if obj.selected:
-        p.setPen(theme.pen(theme.SELECTED, 2))
-        p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRect(rect)
+    draw_media_decorations(p, obj, view)

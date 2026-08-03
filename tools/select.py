@@ -1,14 +1,12 @@
-"""选择工具：点选对象；拖点移动单点；点图形整体平移；多选后拖动整组移动。
-吸附点（PointOnObject）优先级最高：点它就直接沿宿主图形滑动。
-框选功能已独立为「框选」工具。"""
+"""选择工具：点选/拖动点与图形；媒体对象支持拖动/右下角缩放/✎编辑按钮。"""
+from PySide6.QtCore import QPointF
+
 from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject
 from tools.base import Tool, snap_target
 
 
 def _free_points_of(obj, acc, seen):
-    """收集对象依赖闭包中的全部自由点（整体拖动用）。
-    派生点（中点/交点等）不收——它们由父对象决定，父对象移动后自动跟随。"""
     if id(obj) in seen:
         return
     seen.add(id(obj))
@@ -20,7 +18,7 @@ def _free_points_of(obj, acc, seen):
 
 
 @register_tool(name="选择", shortcut="V", order=0, icon="select",
-               hint="点选对象；拖点移动，点图形整体移动；框选请用「框选」工具")
+               hint="点选对象；拖点移动，点图形整体移动；媒体对象可缩放/编辑")
 class SelectTool(Tool):
     def __init__(self):
         self._reset()
@@ -31,8 +29,9 @@ class SelectTool(Tool):
     def _reset(self):
         self.drag_pts = []
         self.drag_poo = None
-        self.drag_media = None          # ★ 新增
-        self._media_orig = (0.0, 0.0)   # ★ 新增
+        self.drag_media = None          # 移动中的媒体对象
+        self.resize_media = None        # 缩放中的媒体对象
+        self._media_orig = (0.0, 0.0)
         self._orig_pos = []
         self._grab_wpt = None
         self._drag_undo_begun = False
@@ -41,39 +40,44 @@ class SelectTool(Tool):
         self._reset()
         target = snap_target(canvas, wpt, hit)
         if target is None:
-            canvas.doc.set_selection([])          # 空白处点击 = 取消选择
+            canvas.doc.set_selection([])
             return
 
-        # ★ 吸附点优先级最高：无论是否处于多选，点它就直接沿宿主图形滑动
-        if isinstance(target, PointOnObject):
+        # ── 媒体对象：编辑按钮 / 缩放手柄 / 移动 ──
+        if getattr(target, "media", False):
+            was_selected = target.selected
             canvas.doc.set_selection([target])
-            self.drag_poo = target
+            if was_selected:
+                sp = canvas.to_screen(wpt[0], wpt[1])
+                if target.edit_button_rect(canvas).contains(sp):
+                    target.edit(canvas)          # 打开编辑对话框
+                    self._reset()
+                    return
+                if target.resize_handle_rect(canvas).contains(sp):
+                    self.resize_media = target
+                    return
+            self.drag_media = target
+            self._media_orig = (target.x, target.y)
             self._grab_wpt = wpt
-            self._orig_pos = []
             return
 
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
         if multi:
-            # 已框选多个对象：整体拖动其中全部自由点
             canvas.doc.set_selection(selected)
             pts, seen = [], set()
             for o in selected:
                 _free_points_of(o, pts, seen)
             self.drag_pts = pts
+        elif isinstance(target, PointOnObject):
+            canvas.doc.set_selection([target])
+            self.drag_poo = target
         elif isinstance(target, FreePoint):
             canvas.doc.set_selection([target])
             self.drag_pts = [target]
         elif isinstance(target, AbstractPoint):
-            # 派生点（中点/交点/等分点/顶点）：只选中，不拖动
             canvas.doc.set_selection([target])
-        elif getattr(target, "media", False):
-        # 媒体对象（图像/表格/图表）：直接拖动
-            canvas.doc.set_selection([target])
-            self.drag_media = target
-            self._media_orig = (target.x, target.y)        
         else:
-            # 几何图形：整体平移（移动它的全部自由定义点）
             canvas.doc.set_selection([target])
             pts, seen = [], set()
             _free_points_of(target, pts, seen)
@@ -82,13 +86,17 @@ class SelectTool(Tool):
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
     def move(self, canvas, wpt, hit):
-        if self.drag_poo is None and not self.drag_pts and self.drag_media is None:
+        if (self.drag_poo is None and not self.drag_pts
+                and self.drag_media is None and self.resize_media is None):
             return
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
-        if self.drag_media is not None:
-            # ★ 媒体对象：整体平移
+
+        if self.resize_media is not None:
+            self.resize_media.resize_to(wpt)
+            canvas.doc.changed.emit()
+        elif self.drag_media is not None:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
             self.drag_media.x = self._media_orig[0] + dx

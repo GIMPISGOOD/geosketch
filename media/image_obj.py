@@ -4,6 +4,7 @@ from PySide6.QtGui import QPixmap
 from core.registry import register_geo, register_renderer
 from media.base import MediaObject
 from ui import theme
+from media.base import MediaObject, draw_media_decorations
 
 
 @register_geo("ImageObject")
@@ -37,7 +38,4 @@ def draw_image(p, obj, view):
     if not obj.pixmap.isNull():
         p.drawPixmap(rect.toRect(), obj.pixmap)
     # 选中时画边框
-    if obj.selected:
-        p.setPen(theme.pen(theme.SELECTED, 2))
-        p.setBrush(theme.brush("transparent"))
-        p.drawRect(rect)
+    draw_media_decorations(p, obj, view)
