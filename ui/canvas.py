@@ -398,62 +398,102 @@ class Canvas(QWidget):
         self.update()
 
 def content_bbox(doc):
-    """所有可见对象的包围盒。函数曲线可能无限延伸，不参与包围盒计算，
-    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。"""
+    """所有可见对象的包围盒。
+    函数曲线可能无限延伸，不参与普通包围盒计算，
+    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。
+    """
     xs, ys = [], []
     funcs = []
+
     for o in doc.objects:
         if not (o.visible and o.exists):
             continue
+
         if isinstance(o, FunctionCurve):
             funcs.append(o)
             continue
-        if isinstance(o, AbstractPoint):
-            xs.append(o.x); ys.append(o.y)
-            continue
-        if hasattr(o, "world_pos"):
+
+        # 媒体对象：左上角世界坐标 + 宽高
+        # 注意：MediaObject 修复后 y 向下增长，即底边是 o.y - o.height
+        if getattr(o, "media", False):
             try:
-                wx, wy = o.world_pos()
-                xs.append(wx); ys.append(wy)
+                xs.append(o.x)
+                xs.append(o.x + o.width)
+                ys.append(o.y)
+                ys.append(o.y - o.height)
                 continue
             except Exception:
                 pass
+
+        if isinstance(o, AbstractPoint):
+            xs.append(o.x)
+            ys.append(o.y)
+            continue
+
+        if hasattr(o, "world_pos"):
+            try:
+                wx, wy = o.world_pos()
+                xs.append(wx)
+                ys.append(wy)
+                continue
+            except Exception:
+                pass
+
         if isinstance(getattr(o, "anchor", None), tuple):
-            xs.append(o.anchor[0]); ys.append(o.anchor[1]); continue
+            xs.append(o.anchor[0])
+            ys.append(o.anchor[1])
+            continue
+
         if isinstance(getattr(o, "label_pos", None), tuple):
-            xs.append(o.label_pos[0]); ys.append(o.label_pos[1]); continue
+            xs.append(o.label_pos[0])
+            ys.append(o.label_pos[1])
+            continue
+
         try:
             for i in range(37):
                 px, py = o.point_at(i / 36)
-                xs.append(px); ys.append(py)
-        except (NotImplementedError, Exception):
+                xs.append(px)
+                ys.append(py)
+        except Exception:
             pass
 
     # 用非函数对象的包围盒（加边距）裁剪函数
     if funcs:
         if xs:
-            x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
             m = max(x_max - x_min, y_max - y_min) * 0.3 + 2.0
-            cx0, cx1, cy0, cy1 = x_min - m, x_max + m, y_min - m, y_max + m
+            cx0, cx1 = x_min - m, x_max + m
+            cy0, cy1 = y_min - m, y_max + m
         else:
             cx0, cx1, cy0, cy1 = -10.0, 10.0, -10.0, 10.0
+
         for f in funcs:
+            a, b = f._param_domain()
+
             if f.kind == "explicit":
-                a, b = f._param_domain()
-                a, b = max(a, cx0), min(b, cx1)
+                a = max(a, cx0)
+                b = min(b, cx1)
                 if a >= b:
                     a, b = cx0, cx1
-                for i in range(200):
-                    p = f._eval_at(a + (b - a) * i / 199)
+
+                n = 199
+                for i in range(n + 1):
+                    u = a + (b - a) * i / n
+                    p = f._eval_point(u)
                     if p is not None and cy0 <= p[1] <= cy1:
-                        xs.append(p[0]); ys.append(p[1])
+                        xs.append(p[0])
+                        ys.append(p[1])
             else:
-                a, b = f._param_domain()
-                for i in range(300):
-                    p = f._eval_at(a + (b - a) * i / 299)
+                n = 299
+                for i in range(n + 1):
+                    u = a + (b - a) * i / n
+                    p = f._eval_point(u)
                     if p is not None and cx0 <= p[0] <= cx1 and cy0 <= p[1] <= cy1:
-                        xs.append(p[0]); ys.append(p[1])
+                        xs.append(p[0])
+                        ys.append(p[1])
 
     if not xs:
         return None
+
     return min(xs), min(ys), max(xs), max(ys)

@@ -1,10 +1,12 @@
 """变量 UI：两步创建向导 + 画布左下角的滑杆面板。"""
+from typing import Any, Optional
+
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
                                QLineEdit, QDoubleSpinBox, QPushButton, QSlider,
                                QWidget, QWizard, QWizardPage, QDialog,
-                               QDialogButtonBox, QGraphicsDropShadowEffect)
+                               QDialogButtonBox, QGraphicsDropShadowEffect, QCheckBox)
 
 from core.variables import is_valid_name
 from ui import theme
@@ -49,19 +51,38 @@ class _ValuePage(QWizardPage):
         self.setTitle("② 初始值与滑杆范围")
         self.setSubTitle("创建后可在画布左下角用滑杆实时调整")
         form = QFormLayout(self)
+        
+        self.is_dependent = QCheckBox("作为从动变量（由表达式决定，不可手动拖动）")
+        self.is_dependent.toggled.connect(self._on_dependent_toggled)
+        form.addRow(self.is_dependent)
+        
+        self.expr_edit = QLineEdit()
+        self.expr_edit.setPlaceholderText("如: a * 2 + 1 (可引用其他变量)")
+        self.expr_edit.setVisible(False)
+        form.addRow("表达式:", self.expr_edit)
+        
         self.value = QDoubleSpinBox(); self.value.setRange(-1e6, 1e6)
         self.value.setValue(3.0); self.value.setDecimals(3)
         self.vmin = QDoubleSpinBox(); self.vmin.setRange(-1e6, 1e6)
         self.vmin.setValue(0.0); self.vmin.setDecimals(3)
         self.vmax = QDoubleSpinBox(); self.vmax.setRange(-1e6, 1e6)
         self.vmax.setValue(10.0); self.vmax.setDecimals(3)
+        
         form.addRow("初始值", self.value)
         form.addRow("滑杆最小值", self.vmin)
         form.addRow("滑杆最大值", self.vmax)
 
+    def _on_dependent_toggled(self, checked):
+        self.expr_edit.setVisible(checked)
+        self.value.setEnabled(not checked)
+        self.vmin.setEnabled(not checked)
+        self.vmax.setEnabled(not checked)
+
     def validatePage(self):
+        if self.is_dependent.isChecked():
+            return True
         lo, hi = self.vmin.value(), self.vmax.value()
-        if lo > hi:                                   # 自动纠正上下界
+        if lo > hi:
             self.vmin.setValue(hi); self.vmax.setValue(lo); lo, hi = hi, lo
         self.value.setValue(min(max(self.value.value(), lo), hi))
         return True
@@ -85,11 +106,13 @@ class VariableWizard(QWizard):
     def result_data(self):
         name = self._name_page.edit.text().strip()
         vp = self._value_page
+        if vp.is_dependent.isChecked():
+            return name, 0.0, 0.0, 10.0, vp.expr_edit.text().strip()
         lo, hi = vp.vmin.value(), vp.vmax.value()
         if lo > hi:
             lo, hi = hi, lo
         val = min(max(vp.value.value(), lo), hi)
-        return name, val, lo, hi
+        return name, val, lo, hi, ""
 
 
 # ───────────── 左下滑杆面板 ─────────────
@@ -177,8 +200,8 @@ class VariableSliderPanel(QWidget):
     def _new_var(self):
         wiz = VariableWizard(self.window())
         if wiz.exec():
-            name, val, lo, hi = wiz.result_data()
-            self.canvas.doc.vars.define(name, val, lo, hi)
+            name, val, lo, hi, expr = wiz.result_data()
+            self.canvas.doc.vars.define(name, val, lo, hi, expr)
             self.canvas.doc.refresh_variables()
             self.refresh()
 
@@ -193,6 +216,8 @@ class VariableRangeDialog(QDialog):
         self.vmin.setRange(-1e6, 1e6); self.vmin.setDecimals(3); self.vmin.setValue(vmin)
         self.vmax = QDoubleSpinBox()
         self.vmax.setRange(-1e6, 1e6); self.vmax.setDecimals(3); self.vmax.setValue(vmax)
+        self._name_page: Optional[Any] = None
+        self._value_page: Optional[Any] = None
         form.addRow("最小值", self.vmin)
         form.addRow("最大值", self.vmax)
         btns = QDialogButtonBox(
@@ -202,7 +227,8 @@ class VariableRangeDialog(QDialog):
         form.addRow(btns)
 
     def result_data(self):
-        lo, hi = self.vmin.value(), self.vmax.value()
+        lo = self.vmin.value()
+        hi = self.vmax.value()
         if lo > hi:
             lo, hi = hi, lo
         return lo, hi

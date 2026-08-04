@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor
 from core.registry import register_tool
 from geo.points import AbstractPoint
 from tools.base import Tool
+from media.base import MediaObject
 from ui import theme
 
 
@@ -21,11 +22,19 @@ def _collect_defining_points(obj, acc, seen):
 
 
 def _object_in_rect(obj, x0, y0, x1, y1):
-    """对象是否落入选框：点看坐标；其他对象看其定义点是否落入。"""
+    """对象是否落入选框：点看坐标；媒体看矩形；其他对象看其定义点是否落入。"""
     if not (obj.visible and obj.exists):
         return False
+
+    # 媒体对象：左上角 (x, y)，底边 y - height
+    if isinstance(obj, MediaObject):
+        rx0, rx1 = obj.x, obj.x + obj.width
+        ry0, ry1 = obj.y - obj.height, obj.y
+        return not (rx1 < x0 or rx0 > x1 or ry1 < y0 or ry0 > y1)
+
     if isinstance(obj, AbstractPoint):
         return x0 <= obj.x <= x1 and y0 <= obj.y <= y1
+
     pts = []
     _collect_defining_points(obj, pts, set())
     return any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for p in pts)

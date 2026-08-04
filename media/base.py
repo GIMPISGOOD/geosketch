@@ -18,17 +18,20 @@ class MediaObject(GeoObject):
         self.height = float(height)
 
     def distance_to(self, x, y):
-        if self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height:
+        # self.x, self.y 是左上角；
+        # 高度向世界坐标下方延伸，所以底边是 self.y - self.height
+        if self.x <= x <= self.x + self.width and self.y - self.height <= y <= self.y:
             return 0.0
+
         dx = max(self.x - x, 0.0, x - (self.x + self.width))
-        dy = max(self.y - y, 0.0, y - (self.y + self.height))
+        dy = max((self.y - self.height) - y, 0.0, y - self.y)
         return math.hypot(dx, dy)
 
     def screen_rect(self, view):
         tl = view.to_screen(self.x, self.y)
-        br = view.to_screen(self.x + self.width, self.y + self.height)
+        br = view.to_screen(self.x + self.width, self.y - self.height)
         return QRectF(tl, br).normalized()
-
+    
     def edit_button_rect(self, view):
         """编辑按钮屏幕矩形（右上角）。"""
         rect = self.screen_rect(view)
@@ -42,9 +45,11 @@ class MediaObject(GeoObject):
         return QRectF(rect.right() - s / 2 - 1, rect.bottom() - s / 2 - 1, s, s)
 
     def resize_to(self, wpt):
-        """拖动右下角手柄到世界坐标 wpt，调整宽高。"""
+        """拖动右下角手柄到世界坐标 wpt，调整宽高。
+        左上角 self.x, self.y 保持不动。
+        """
         self.width = max(wpt[0] - self.x, 0.5)
-        self.height = max(wpt[1] - self.y, 0.5)
+        self.height = max(self.y - wpt[1], 0.5)
 
     def dump(self):
         return {"x": self.x, "y": self.y,

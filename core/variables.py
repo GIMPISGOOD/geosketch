@@ -16,9 +16,31 @@ _OPS = {
     ast.Pow: operator.pow, ast.Mod: operator.mod,
     ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
-FUNCS = {"sqrt": math.sqrt, "abs": abs, "sin": math.sin,
-         "cos": math.cos, "tan": math.tan}
-CONSTS = {"pi": math.pi, "e": math.e}
+_FUNCS = {
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "arcsin": math.asin,
+    "arccos": math.acos,
+    "arctan": math.atan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tanh": math.tanh,
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "ln": math.log,
+    "log": math.log10,
+    "exp": math.exp,
+    "cot": lambda x: 1.0 / math.tan(x),
+    "sec": lambda x: 1.0 / math.cos(x),
+    "csc": lambda x: 1.0 / math.sin(x),
+}
+
+FUNCS = dict(_FUNCS)
+CONSTS = {"pi": math.pi, "π": math.pi, "e": math.e}
 RESERVED = set(FUNCS) | set(CONSTS)
 
 
@@ -103,15 +125,16 @@ def evaluate(expr: str, variables: dict[str, float]) -> Optional[float]:
         return None
 
 
-class Variable:
-    __slots__ = ("name", "value", "vmin", "vmax")
 
-    def __init__(self, name, value=1.0, vmin=0.0, vmax=10.0):
+class Variable:
+    __slots__ = ("name", "value", "vmin", "vmax", "expr")
+
+    def __init__(self, name, value=1.0, vmin=0.0, vmax=10.0, expr=""):
         self.name = name
         self.value = float(value)
         self.vmin = float(vmin)
         self.vmax = float(vmax)
-
+        self.expr = expr          # ★ 从动表达式（非空则为从动变量）
 
 class VariableStore(QObject):
     changed = Signal()
@@ -127,27 +150,24 @@ class VariableStore(QObject):
     def get_var(self, name):
         return self._vars.get(name)
 
-    def define(self, name, value, vmin, vmax):
-        self._vars[name] = Variable(name, value, vmin, vmax)
+    def define(self, name, value, vmin, vmax, expr=""):
+        self._vars[name] = Variable(name, value, vmin, vmax, expr)
         self.version += 1
         self.changed.emit()
 
     def set(self, name, value):
         v = self._vars.get(name)
-        if v and v.value != float(value):
+        if v and not v.expr and v.value != float(value):  # 从动变量不可手动改值
             v.value = float(value)
             self.version += 1
             self.changed.emit()
 
-    def set_range(self, name, vmin, vmax):
-        """修改变量的滑杆范围，并把当前值收敛回新范围。"""
+    def set_expr(self, name, expr):
         v = self._vars.get(name)
-        if v is None:
-            return
-        v.vmin, v.vmax = float(vmin), float(vmax)
-        v.value = min(max(v.value, v.vmin), v.vmax)   # 防止当前值越界
-        self.version += 1
-        self.changed.emit()
+        if v:
+            v.expr = expr
+            self.version += 1
+            self.changed.emit()
 
     def delete(self, name):
         if name in self._vars:
@@ -155,11 +175,76 @@ class VariableStore(QObject):
             self.version += 1
             self.changed.emit()
 
-    def as_dict(self) -> dict[str, float]:
-        return {n: v.value for n, v in self._vars.items()}
+    def as_dict(self):
+        """返回所有变量的当前值（自动计算从动变量）。"""
+        d = {}
+        # 1. 先收集独立变量
+        for n, v in self._vars.items():
+            if not v.expr:
+                d[n] = v.value
+        
+        # 2. 迭代计算从动变量（支持多级依赖，如 c=b*2, b=a+1）
+        changed = True
+        max_iter = 10
+        while changed and max_iter > 0:
+            changed = False
+            max_iter -= 1
+            for n, v in self._vars.items():
+                if v.expr:
+                    val = evaluate(v.expr, d)
+                    if val is not None and d.get(n) != val:
+                        d[n] = val
+                        changed = True
+        return d
 
-    def evaluate(self, expr: str) -> Optional[float]:
+    def evaluate(self, expr):
         return evaluate(expr, self.as_dict())
+    
+    def set_range(self, name, vmin, vmax):
+        """修改变量滑杆范围，并把当前值夹回合法区间。"""
+        v = self._vars.get(name)
+        if not v:
+            return
+
+        vmin = float(vmin)
+        vmax = float(vmax)
+        if vmin > vmax:
+            vmin, vmax = vmax, vmin
+
+        v.vmin = vmin
+        v.vmax = vmax
+        v.value = min(max(v.value, v.vmin), v.vmax)
+
+        self.version += 1
+        self.changed.emit()
+
+    def to_dict(self):
+        """序列化变量，便于保存到 .wgeo 文件。"""
+        return {
+            name: {
+                "value": v.value,
+                "vmin": v.vmin,
+                "vmax": v.vmax,
+                "expr": v.expr,
+            }
+            for name, v in self._vars.items()
+        }
+
+    def load_dict(self, data):
+        """从字典恢复变量。会清空当前变量。"""
+        self._vars.clear()
+
+        for name, d in data.items():
+            self._vars[name] = Variable(
+                name,
+                d.get("value", 0.0),
+                d.get("vmin", 0.0),
+                d.get("vmax", 10.0),
+                d.get("expr", ""),
+            )
+
+        self.version += 1
+        self.changed.emit()
 
 
 _STORE = VariableStore()          # 模块级单例，避免跨层传递

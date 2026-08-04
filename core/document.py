@@ -255,24 +255,51 @@ class Document(QObject):
         self.changed.emit()
 
     def save(self, path):
-        import zipfile, datetime
+        import zipfile
+        import datetime
         from ui import theme as _theme
+
         self.meta["theme"] = _theme.active_name()
         self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")
+
         if not self.meta.get("created"):
             self.meta["created"] = self.meta["modified"]
+
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("sketch.json",
-                        json.dumps(self.snapshot(), ensure_ascii=False, indent=1))
-            zf.writestr("meta.data",
-                        json.dumps(self.meta, ensure_ascii=False, indent=1))
+            zf.writestr(
+                "sketch.json",
+                json.dumps(self.snapshot(), ensure_ascii=False, indent=1)
+            )
+            zf.writestr(
+                "meta.data",
+                json.dumps(self.meta, ensure_ascii=False, indent=1)
+            )
+            zf.writestr(
+                "variables.json",
+                json.dumps(self.vars.to_dict(), ensure_ascii=False, indent=1)
+            )
 
     def load(self, path):
         import zipfile
         from ui import theme as _theme
+
         with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+
+            # ★ 先恢复变量，再重建对象，避免表达式对象初始化时变量缺失
+            if "variables.json" in names:
+                self.vars.load_dict(json.loads(zf.read("variables.json")))
+            else:
+                # 旧文件没有变量时，清空当前变量，避免文档间污染
+                self.vars.load_dict({})
+
             self._load_state(json.loads(zf.read("sketch.json")))
-            if "meta.data" in zf.namelist():
+
+            if "meta.data" in names:
                 self.meta = json.loads(zf.read("meta.data"))
-                if self.meta.get("theme") in _theme.theme_names():
-                    _theme.set_theme(self.meta["theme"])
+
+            if self.meta.get("theme") in _theme.theme_names():
+                _theme.set_theme(self.meta["theme"])
+
+        # 载入后统一刷新表达式约束与依赖对象
+        self.refresh_variables()

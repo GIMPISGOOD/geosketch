@@ -63,8 +63,12 @@ def _render_media_to_base64(obj):
         def __init__(self, obj, scale):
             self.scale = scale
             self.obj = obj
+
         def to_screen(self, x, y):
-            return QPointF((x - self.obj.x) * self.scale, (y - self.obj.y) * self.scale)
+            # 对象左上角映射到 (0, 0)
+            # 世界 y 向上，媒体局部屏幕 y 向下，因此用 obj.y - y
+            return QPointF((x - self.obj.x) * self.scale,
+                           (self.obj.y - y) * self.scale)
             
     mock_view = MockView(obj, view_scale)
     
@@ -94,25 +98,57 @@ def _render_media_to_base64(obj):
 
 # ───────────── 表达式转换（Python → JS）─────────────
 def _py_expr_to_js(expr, var_names):
+    """把 GeoSketch 表达式转换成 JSXGraph / JS 表达式。"""
     s = expr.replace("^", "**")
-    s = s.replace("sin(", "Math.sin(")
-    s = s.replace("cos(", "Math.cos(")
-    s = s.replace("tan(", "Math.tan(")
-    s = s.replace("sqrt(", "Math.sqrt(")
-    s = s.replace("abs(", "Math.abs(")
-    s = s.replace("ln(", "Math.log(")
-    s = s.replace("log(", "Math.log10(")
-    s = s.replace("exp(", "Math.exp(")
-    s = re.sub(r'\bpi\b', 'Math.PI', s)
-    s = re.sub(r'\be\b', 'Math.E', s)
-    for v in var_names:
-        s = re.sub(r'\b' + re.escape(v) + r'\b', f'{v}.Value()', s)
+
+    # 长函数名优先，避免 asin 被 sin 误伤
+    funcs = [
+        ("arcsin", "Math.asin"),
+        ("arccos", "Math.acos"),
+        ("arctan", "Math.atan"),
+        ("asin", "Math.asin"),
+        ("acos", "Math.acos"),
+        ("atan", "Math.atan"),
+        ("sinh", "Math.sinh"),
+        ("cosh", "Math.cosh"),
+        ("tanh", "Math.tanh"),
+        ("sqrt", "Math.sqrt"),
+        ("abs", "Math.abs"),
+        ("ln", "Math.log"),
+        ("log", "Math.log10"),
+        ("exp", "Math.exp"),
+        ("sin", "Math.sin"),
+        ("cos", "Math.cos"),
+        ("tan", "Math.tan"),
+
+        # 这三个依赖 _jsx_export 里定义的辅助函数
+        ("cot", "cot"),
+        ("sec", "sec"),
+        ("csc", "csc"),
+    ]
+
+    for py_name, js_name in funcs:
+        s = re.sub(rf"(?<![\w$.]){py_name}\s*\(", js_name + "(", s)
+
+    # 常量
+    s = re.sub(r"(?<![\w$.])pi(?![\w])", "Math.PI", s)
+    s = re.sub(r"(?<![\w$.])π(?![\w])", "Math.PI", s)
+    s = re.sub(r"(?<![\w$.])e(?![\w])", "Math.E", s)
+
+    # 变量滑杆：长变量名优先，避免短名误替换长名
+    for v in sorted(var_names, key=len, reverse=True):
+        s = re.sub(rf"(?<![\w$.]){re.escape(v)}(?![\w])", f"{v}.Value()", s)
+
     return s
 
 
 # ───────────── 交互网页（JSXGraph）─────────────
 def _jsx_export(doc, include_vars=True):
-    lines = []
+    lines = [
+        "function cot(x) { return 1 / Math.tan(x); }",
+        "function sec(x) { return 1 / Math.cos(x); }",
+        "function csc(x) { return 1 / Math.sin(x); }",
+    ]
     names = {}
     counter = [0]
     all_var_names = doc.vars.names()
@@ -267,27 +303,45 @@ def _jsx_export(doc, include_vars=True):
                              f"{{strokeColor: '#e8590c', strokeWidth: 2}});")
 
         elif tn == "FunctionCurve":
-            n = nv(); names[obj.id] = n
-            js_expr = _py_expr_to_js(obj.expr, var_names)
+            n = nv()
+            names[obj.id] = n
+
             if obj.kind == "explicit":
-                lines.append(f"var {n} = board.create('functiongraph', "
-                             f"[function(x) {{ return {js_expr}; }}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                # x 是函数自变量，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v != "x"]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
+                lines.append(
+                    f"var {n} = board.create('functiongraph', "
+                    f"[function(x) {{ return {js_expr}; }}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
+
             elif obj.kind == "parametric":
-                js_expr2 = _py_expr_to_js(obj.expr2, var_names)
+                # t 是参数，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v != "t"]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
+                js_expr2 = _py_expr_to_js(obj.expr2, safe_vars)
                 domain = obj.domain or (0, 2 * math.pi)
-                lines.append(f"var {n} = board.create('curve', ["
-                             f"function(t) {{ return {js_expr}; }}, "
-                             f"function(t) {{ return {js_expr2}; }}, "
-                             f"{domain[0]}, {domain[1]}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                lines.append(
+                    f"var {n} = board.create('curve', ["
+                    f"function(t) {{ return {js_expr}; }}, "
+                    f"function(t) {{ return {js_expr2}; }}, "
+                    f"{domain[0]}, {domain[1]}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
+
             elif obj.kind == "polar":
+                # t / θ 都是极坐标参数，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v not in ("t", "θ")]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
                 domain = obj.domain or (0, 2 * math.pi)
-                lines.append(f"var {n} = board.create('curve', ["
-                             f"function(t) {{ return {js_expr} * Math.cos(t); }}, "
-                             f"function(t) {{ return {js_expr} * Math.sin(t); }}, "
-                             f"{domain[0]}, {domain[1]}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                lines.append(
+                    f"var {n} = board.create('curve', ["
+                    f"function(t) {{ return {js_expr} * Math.cos(t); }}, "
+                    f"function(t) {{ return {js_expr} * Math.sin(t); }}, "
+                    f"{domain[0]}, {domain[1]}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
 
         # ★ 新增：墨迹笔画
         elif tn == "InkStroke":

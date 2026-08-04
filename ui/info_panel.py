@@ -55,7 +55,10 @@ def describe(obj):
     elif n == "RatioMeasure":
         rows.append(("长度₁", f"{obj.l1:.3f}"))
         rows.append(("长度₂", f"{obj.l2:.3f}"))
-        rows.append(("比值", f"{obj.ratio:.3f}"))
+        if obj.den:
+            rows.append(("比值", f"{obj.num / obj.den:.3f}"))
+        else:
+            rows.append(("比值", "∞"))
     elif n == "Ray":
         rows.append(("端点", f"({obj.origin.x:.2f}, {obj.origin.y:.2f})"))
     elif n == "TextObject":

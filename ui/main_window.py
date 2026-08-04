@@ -113,10 +113,10 @@ class MainWindow(QMainWindow):
     def _new_variable(self):
         wiz = VariableWizard(self)
         if wiz.exec():
-            name, val, lo, hi = wiz.result_data()
-            self.doc.vars.define(name, val, lo, hi)
+            name, val, lo, hi, expr = wiz.result_data()
+            self.doc.vars.define(name, val, lo, hi, expr)
             self.doc.refresh_variables()
-            self.function_dock.refresh()
+            self.function_dock.refresh()   # 或 self.canvas.var_panel.refresh()
 
     def _edit_variable_range(self, name):
         var = self.doc.vars.get_var(name)
