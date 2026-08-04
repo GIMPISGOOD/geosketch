@@ -256,3 +256,38 @@ def get_store():
 
 def eval_expr(expr):
     return _STORE.evaluate(expr)
+
+def render_template(text: str) -> str:
+    """把文本中的 {表达式} 替换为表达式求值结果。
+
+    例如：
+        "(a的值为{a})"
+
+    如果 a = 3，则返回：
+        "(a的值为3)"
+
+    求值失败时保留原样。
+    """
+    if not isinstance(text, str):
+        return str(text)
+
+    if "{" not in text or "}" not in text:
+        return text
+
+    def _fmt(v: float) -> str:
+        if abs(v - round(v)) < 1e-9:
+            return str(int(round(v)))
+        return f"{v:.3f}"
+
+    def _replace(m):
+        expr = m.group(1).strip()
+        if not expr:
+            return m.group(0)
+
+        val = eval_expr(expr)
+        if val is None:
+            return m.group(0)
+
+        return _fmt(val)
+
+    return re.sub(r"\{([^{}]+)\}", _replace, text)

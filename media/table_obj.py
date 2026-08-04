@@ -3,7 +3,7 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor
 
 from core.registry import register_geo, register_renderer
-from core.variables import eval_expr
+from core.variables import render_template
 from media.base import MediaObject
 from ui import theme
 from media.base import MediaObject, draw_media_decorations
@@ -20,19 +20,20 @@ class TableObject(MediaObject):
         self.cell_colors = cell_colors or [[None for _ in range(cols)] for _ in range(rows)]
 
     def _eval_cell(self, text):
-        """若 text 形如 {表达式}，求值并返回格式化结果；否则原样返回。"""
+        """支持普通文本、{表达式}、以及混合文本。
+
+        例如：
+            {a}
+            a的值为{a}
+            (a的值为{a})
+        """
+        if text is None:
+            return ""
+
         if not isinstance(text, str):
             return str(text)
-        text = text.strip()
-        if text.startswith("{") and text.endswith("}") and len(text) > 2:
-            expr = text[1:-1].strip()
-            val = eval_expr(expr)
-            if val is not None:
-                if abs(val - round(val)) < 1e-9:
-                    return str(int(round(val)))
-                return f"{val:.2f}"
-            return text          # 求值失败 → 显示原文
-        return text
+
+        return render_template(text)
 
     def dump(self):
         d = super().dump()

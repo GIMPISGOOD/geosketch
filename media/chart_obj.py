@@ -4,7 +4,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QFormLayout, QDoubleSpinBox
 
 from core.registry import register_geo, register_renderer
-from core.variables import eval_expr
+from core.variables import eval_expr, render_template
 from media.base import MediaObject, draw_media_decorations
 from ui import theme
 
@@ -93,7 +93,7 @@ def draw_pie(p, obj, view):
         p.setBrush(theme.brush(QColor(color)))
         p.setPen(theme.pen(theme.LABEL, 1))
         p.drawRect(QRectF(legend_x, y + (line_h - box) / 2, box, box))
-        label = obj.labels[i] if i < len(obj.labels) else f"项{i+1}"
+        label = render_template(obj.labels[i]) if i < len(obj.labels) else f"项{i+1}"
         pct = abs(values[i]) / total * 100
         txt = f"{label}: {values[i]:.1f} ({pct:.0f}%)"
         p.setPen(theme.pen(theme.INK, 1))
@@ -155,7 +155,7 @@ def draw_bar(p, obj, view):
         p.setPen(theme.pen(theme.BG_TOP, 1))
         p.drawRect(QRectF(x, plot.bottom() - h, bar_w, h))
         # 底部标签
-        label = obj.labels[i] if i < len(obj.labels) else f"项{i+1}"
+        label = render_template(obj.labels[i]) if i < len(obj.labels) else f"项{i+1}"
         p.setPen(theme.pen(theme.INK, 1))
         fh = max(int(rect.height() * 0.06), 8)
         f = p.font(); f.setPixelSize(fh); p.setFont(f)

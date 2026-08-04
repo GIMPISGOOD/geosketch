@@ -13,6 +13,7 @@ from geo.base import GeoObject
 from geo.points import nearest_point
 from tools.base import Tool
 from ui import theme
+from core.variables import render_template
 
 TEXT_SIZES = [12, 14, 16, 20, 24, 32, 48]
 SWATCHES = ["#1f2937", "#e03131", "#1971c2", "#2f9e44",
@@ -51,17 +52,24 @@ class TextObject(GeoObject):
 
 
 @register_renderer(TextObject)
+@register_renderer(TextObject)
 def draw_text(p, obj, view):
     wx, wy = obj.world_pos()
     sp = view.to_screen(wx, wy) + QPointF(12, 24)     # 显示在锚点右上方
+
     font = QFont()
     font.setPixelSize(obj.size)
     p.setFont(font)
+
     color = QColor(obj.color)
     if obj.selected:
         color = QColor(theme.SELECTED)
+
     p.setPen(theme.pen(color))
-    p.drawText(sp, obj.text)
+
+    # ★ 支持 {变量} / {表达式}
+    display_text = render_template(obj.text)
+    p.drawText(sp, display_text)
 
 
 class TextEditor(QWidget):
@@ -77,7 +85,7 @@ class TextEditor(QWidget):
         layout.setSpacing(8)
 
         self._edit = QLineEdit(self)
-        self._edit.setPlaceholderText("输入文本…")
+        self._edit.setPlaceholderText("输入文本，支持 {变量}，如 (a的值为{a})")
         self._edit.setFixedWidth(220)
         layout.addWidget(self._edit)
 

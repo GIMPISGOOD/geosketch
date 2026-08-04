@@ -1,8 +1,9 @@
 import math
 import os
+import random
 
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget, QToolButton
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
@@ -60,7 +61,15 @@ class Canvas(QWidget):
 
         self.info_panel = InfoPanel(self, self)
 
+        # ================= 雪花彩蛋 =================
+        self._snow_active = False
+        self._snowflakes = []
+        self._snow_timer = QTimer(self)
+        self._snow_timer.setInterval(33)
+        self._snow_timer.timeout.connect(self._tick_snow)
+
         self.refresh_theme()
+        self.update_snow_state()
 
     # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:
@@ -112,11 +121,16 @@ class Canvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
             self.render_scene(p)                 # 几何场景（屏幕/导出共用）
+
             # —— 以下仅屏幕显示，不导出 ——
+
+            # ★ snow 彩蛋：标题为 snow 时飘雪花
+            if self._snow_active:
+                self._draw_snow(p)
+
             self._draw_snap_indicator(p)
-            if self.tool is not None:
-                self.tool.draw_overlay(p, self)
         finally:
             p.end()
         self._place_trash()
@@ -319,10 +333,16 @@ class Canvas(QWidget):
 
     def resizeEvent(self, ev) -> None:
         self.rail.move(14, 14)
+
         zb = self.zoom_bar
         zb.move(self.width() - zb.width() - 16,
                 self.height() - zb.height() - 16)
+
         self.info_panel.reposition()
+
+        # snow 彩蛋：如果当前没有雪花，但标题仍是 snow，则重新生成
+        if self._snow_active and not self._snowflakes:
+            self._init_snow()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
@@ -396,6 +416,65 @@ class Canvas(QWidget):
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
         self.update()
+    # ================= snow 彩蛋 =================
+
+    def update_snow_state(self):
+        """根据文档标题决定是否开启雪花。"""
+        title = (self.doc.meta.get("title") or "").strip().lower()
+        active = (title == "snow")
+
+        if active and not self._snow_active:
+            self._init_snow()
+            self._snow_timer.start()
+        elif not active and self._snow_active:
+            self._snow_timer.stop()
+            self._snowflakes.clear()
+
+        self._snow_active = active
+        self.update()
+
+    def _init_snow(self):
+        w = max(self.width(), 800)
+        h = max(self.height(), 600)
+
+        self._snowflakes = []
+        for _ in range(140):
+            self._snowflakes.append({
+                "x": random.uniform(0.0, float(w)),
+                "y": random.uniform(0.0, float(h)),
+                "r": random.uniform(1.2, 3.4),
+                "v": random.uniform(0.6, 1.9),
+                "amp": random.uniform(0.2, 0.9),
+                "phase": random.uniform(0.0, 2.0 * math.pi),
+            })
+
+    def _tick_snow(self):
+        if not self._snow_active:
+            return
+
+        w = max(self.width(), 1)
+        h = max(self.height(), 1)
+
+        for f in self._snowflakes:
+            f["y"] += f["v"]
+            f["phase"] += 0.02
+            f["x"] += math.sin(f["phase"]) * f["amp"]
+
+            if f["y"] > h + 6.0:
+                f["y"] = -6.0
+                f["x"] = random.uniform(0.0, float(w))
+
+        self.update()
+
+    def _draw_snow(self, p: QPainter) -> None:
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 190))
+
+        for f in self._snowflakes:
+            p.drawEllipse(QPointF(f["x"], f["y"]), f["r"], f["r"])
+
+        p.restore()
 
 def content_bbox(doc):
     """所有可见对象的包围盒。

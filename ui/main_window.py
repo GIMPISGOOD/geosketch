@@ -43,6 +43,7 @@ class MainWindow(QMainWindow):
         self._build_var_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
+        self.canvas.update_snow_state()
 
     def _create_tool_actions(self) -> None:
         for spec in TOOL_REGISTRY:
@@ -307,18 +308,25 @@ class MainWindow(QMainWindow):
             self, "打开", "", "GeoSketch 文件 (*.wgeo)")
         if path:
             self.doc.load(path)
+            self.canvas.update_snow_state()
             
     def _doc_info(self) -> None:
         title, ok = QInputDialog.getText(
             self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))
         if not ok:
             return
+
         author, ok2 = QInputDialog.getText(
             self, "文档信息", "作者（可留空，不强制署名）：",
             text=self.doc.meta.get("author", ""))
+
         self.doc.meta["title"] = title
         if ok2:
             self.doc.meta["author"] = author
+
         # 标题显示在窗口标题栏
         base = "GeoSketch · 几何画板"
         self.setWindowTitle(f"{title} - {base}" if title else base)
+
+        # ★ snow 彩蛋：标题变化后检查是否下雪
+        self.canvas.update_snow_state()
