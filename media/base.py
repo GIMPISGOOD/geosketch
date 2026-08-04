@@ -1,14 +1,16 @@
 """媒体对象基类：位置/尺寸/拾取/拖动/缩放/编辑按钮。"""
 import math
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 
 from geo.base import GeoObject
 
 
 class MediaObject(GeoObject):
     """媒体对象基类。x,y 为左上角世界坐标，width/height 为世界尺寸。"""
+
     media = True
+    rotatable = False
 
     def __init__(self, x=0.0, y=0.0, width=6.0, height=4.0):
         super().__init__(parents=())
@@ -16,6 +18,7 @@ class MediaObject(GeoObject):
         self.y = float(y)
         self.width = float(width)
         self.height = float(height)
+        self.rotation = 0.0
 
     def distance_to(self, x, y):
         # self.x, self.y 是左上角；
@@ -36,13 +39,61 @@ class MediaObject(GeoObject):
         """编辑按钮屏幕矩形（右上角）。"""
         rect = self.screen_rect(view)
         s = 22
+
+        if getattr(self, "rotatable", False):
+            center = self._rotated_screen_point(
+                view,
+                rect.width() / 2 - s / 2 - 3,
+                -rect.height() / 2 + s / 2 + 3
+            )
+            return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
         return QRectF(rect.right() - s - 3, rect.top() + 3, s, s)
 
     def resize_handle_rect(self, view):
         """缩放手柄屏幕矩形（右下角）。"""
         rect = self.screen_rect(view)
         s = 12
+
+        if getattr(self, "rotatable", False):
+            center = self._rotated_screen_point(
+                view,
+                rect.width() / 2,
+                rect.height() / 2
+            )
+            return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
         return QRectF(rect.right() - s / 2 - 1, rect.bottom() - s / 2 - 1, s, s)
+    
+    def rotate_handle_rect(self, view):
+        """旋转手柄屏幕矩形（对象上方）。"""
+        if not getattr(self, "rotatable", False):
+            return QRectF()
+
+        rect = self.screen_rect(view)
+        s = 16
+
+        center = self._rotated_screen_point(
+            view,
+            0.0,
+            -rect.height() / 2 - 24.0
+        )
+
+        return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
+    def _rotated_screen_point(self, view, dx, dy):
+        """以对象屏幕中心为原点，把局部偏移 (dx, dy) 旋转后转成屏幕坐标。
+
+        dx 向右为正，dy 向下为正。
+        """
+        rect = self.screen_rect(view)
+        c = rect.center()
+        ang = math.radians(getattr(self, "rotation", 0.0))
+
+        x = c.x() + dx * math.cos(ang) - dy * math.sin(ang)
+        y = c.y() + dx * math.sin(ang) + dy * math.cos(ang)
+
+        return QPointF(x, y)
 
     def resize_to(self, wpt):
         """拖动右下角手柄到世界坐标 wpt，调整宽高。
@@ -52,8 +103,13 @@ class MediaObject(GeoObject):
         self.height = max(self.y - wpt[1], 0.5)
 
     def dump(self):
-        return {"x": self.x, "y": self.y,
-                "width": self.width, "height": self.height}
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "rotation": getattr(self, "rotation", 0.0),
+        }
 
     def edit(self, canvas):
         """编辑（子类覆盖，由编辑按钮触发）。"""
@@ -61,25 +117,68 @@ class MediaObject(GeoObject):
 
 
 def draw_media_decorations(p, obj, view):
-    """选中时统一绘制：边框 + ✎编辑按钮 + 缩放手柄。"""
+    """选中时统一绘制：边框 + ✎编辑按钮 + 缩放手柄 + 旋转手柄。"""
     if not obj.selected:
         return
+
     from ui import theme
+
     rect = obj.screen_rect(view)
+
     # 选中边框
     p.setPen(theme.pen(theme.SELECTED, 1.5))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRect(rect)
+
+    rotatable = getattr(obj, "rotatable", False)
+    rotation = getattr(obj, "rotation", 0.0)
+
+    if rotatable and abs(rotation) > 1e-6:
+        p.save()
+        p.translate(rect.center())
+        p.rotate(rotation)
+
+        centered = QRectF(
+            -rect.width() / 2,
+            -rect.height() / 2,
+            rect.width(),
+            rect.height()
+        )
+        p.drawRect(centered)
+        p.restore()
+    else:
+        p.drawRect(rect)
+
     # 编辑按钮（右上角）
     eb = obj.edit_button_rect(view)
     p.setBrush(theme.brush(theme.PANEL_BG))
     p.setPen(theme.pen(theme.ACCENT, 1.5))
     p.drawRoundedRect(eb, 4, 4)
+
     p.setPen(theme.pen(theme.INK, 1))
-    f = p.font(); f.setPixelSize(13); p.setFont(f)
+    f = p.font()
+    f.setPixelSize(13)
+    p.setFont(f)
     p.drawText(eb, Qt.AlignmentFlag.AlignCenter, "✎")
+
     # 缩放手柄（右下角）
     rh = obj.resize_handle_rect(view)
     p.setBrush(theme.brush(theme.ACCENT))
     p.setPen(theme.pen(theme.SELECTED, 1))
     p.drawRect(rh)
+
+    # 旋转手柄（上方）
+    if rotatable:
+        rot_rect = obj.rotate_handle_rect(view)
+        if rot_rect.width() > 0:
+            top_pt = obj._rotated_screen_point(
+                view,
+                0.0,
+                -rect.height() / 2
+            )
+
+            p.setPen(theme.pen(theme.SUBINK, 1.2))
+            p.drawLine(top_pt, rot_rect.center())
+
+            p.setBrush(theme.brush(theme.PANEL_BG))
+            p.setPen(theme.pen(theme.ACCENT, 1.5))
+            p.drawEllipse(rot_rect.center(), 7.0, 7.0)

@@ -8,6 +8,8 @@ from media.base import MediaObject
 from tools.base import Tool, snap_target
 from ui import theme
 
+import math
+
 
 def _free_points_of(obj, acc, seen):
     if id(obj) in seen:
@@ -34,6 +36,8 @@ class SelectTool(Tool):
         self.drag_poo: Optional[PointOnObject] = None
         self.drag_media: Optional[MediaObject] = None
         self.resize_media: Optional[MediaObject] = None
+        self.rotate_media: Optional[MediaObject] = None
+
         self._media_orig: Tuple[float, float] = (0.0, 0.0)
         self._orig_pos: list[Tuple[FreePoint, float, float]] = []
         self._grab_wpt: Optional[Tuple[float, float]] = None
@@ -92,18 +96,24 @@ class SelectTool(Tool):
             canvas.doc.set_selection([target])
             if was_selected:
                 sp = canvas.to_screen(wpt[0], wpt[1])
+
+                # ★ 旋转手柄
+                if getattr(target, "rotatable", False):
+                    rr = target.rotate_handle_rect(canvas)
+                    if rr.width() > 0 and rr.contains(sp):
+                        self.rotate_media = target
+                        self._grab_wpt = wpt
+                        return
+
                 if target.edit_button_rect(canvas).contains(sp):
                     target.edit(canvas)
                     self._reset()
                     return
+
                 if target.resize_handle_rect(canvas).contains(sp):
                     self.resize_media = target
                     self._grab_wpt = wpt
                     return
-            self.drag_media = target
-            self._media_orig = (target.x, target.y)
-            self._grab_wpt = wpt
-            return
 
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
@@ -134,13 +144,30 @@ class SelectTool(Tool):
 
     def move(self, canvas, wpt, hit):
         if (self.drag_poo is None and not self.drag_pts
-                and self.drag_media is None and self.resize_media is None):
+                and self.drag_media is None and self.resize_media is None
+                and self.rotate_media is None):
             return
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
 
         self._guides = []  # 每次移动清空参考线
+
+        # ★ 旋转媒体对象
+        if self.rotate_media is not None:
+            center = self.rotate_media.screen_rect(canvas).center()
+            cur = canvas.to_screen(wpt[0], wpt[1])
+
+            ang = math.degrees(
+                math.atan2(cur.y() - center.y(), cur.x() - center.x())
+            )
+
+            # 旋转手柄默认在对象正上方，所以 +90°
+            ang += 90.0
+
+            self.rotate_media.rotation = (ang + 360.0) % 360.0
+            canvas.doc.changed.emit()
+            return
 
         if self.resize_media is not None:
             self.resize_media.resize_to(wpt)
