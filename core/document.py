@@ -36,8 +36,15 @@ class Document(QObject):
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
-            self.expr_objects.append(obj)
+
+        # ★ 修复：表达式约束对象 + 所有 expr_driver 对象都纳入变量刷新系统
+        if (
+            isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint))
+            or getattr(obj, "expr_driver", False)
+        ):
+            if obj not in self.expr_objects:
+                self.expr_objects.append(obj)
+
         return obj
 
     def _collect_with_deps(self, objs):
@@ -249,15 +256,20 @@ class Document(QObject):
     # ================= 序列化 =================
     def _load_state(self, data):
         self.objects.clear()
+        self.expr_objects.clear()   # ★ 修复：防止 undo/load 后残留旧表达式对象
+
         pool = {}
+
         for item in data:
             cls = GEO_REGISTRY[item["type"]]
             parents = [pool[pid] for pid in item["parents"]]
             obj = cls.build(parents, item["params"])
-            obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+            obj.id = item["id"]
             pool[item["id"]] = self._add(obj)
+
         if data:
             GeoObject.bump_ids(max(item["id"] for item in data))
+
         self.changed.emit()
 
     def save(self, path):

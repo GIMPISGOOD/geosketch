@@ -495,7 +495,7 @@ class IterPoint(AbstractPoint):
         self.exists = True
 
     def moved_points(self):
-        return []
+        return [self]
 
     def dump(self):
         return {

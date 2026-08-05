@@ -85,62 +85,90 @@ class SelectTool(Tool):
                 guides)
 
     def press(self, canvas, wpt, hit):
-        self._reset()
-        target = snap_target(canvas, wpt, hit)
-        if target is None:
-            canvas.doc.set_selection([])
+     self._reset()
+
+     # ★ 修复：先检查已选中媒体对象的手柄。
+     # 旋转手柄在对象世界包围盒外面，不能依赖 pick()/snap_target() 先命中 MediaObject。
+     sp = canvas.to_screen(wpt[0], wpt[1])
+
+     selected_media = [
+        o for o in canvas.doc.objects
+        if o.selected and isinstance(o, MediaObject)
+     ]
+
+     if len(selected_media) == 1:
+        m = selected_media[0]
+
+        # 旋转手柄
+        if getattr(m, "rotatable", False):
+            rr = m.rotate_handle_rect(canvas)
+            if rr.width() > 0 and rr.contains(sp):
+                self.rotate_media = m
+                self._grab_wpt = wpt
+                return
+
+        # 编辑按钮
+        if m.edit_button_rect(canvas).contains(sp):
+            m.edit(canvas)
+            self._reset()
             return
 
-        if isinstance(target, MediaObject):
-            was_selected = target.selected
-            canvas.doc.set_selection([target])
-            if was_selected:
-                sp = canvas.to_screen(wpt[0], wpt[1])
+        # 缩放手柄
+        if m.resize_handle_rect(canvas).contains(sp):
+            self.resize_media = m
+            self._grab_wpt = wpt
+            return
 
-                # ★ 旋转手柄
-                if getattr(target, "rotatable", False):
-                    rr = target.rotate_handle_rect(canvas)
-                    if rr.width() > 0 and rr.contains(sp):
-                        self.rotate_media = target
-                        self._grab_wpt = wpt
-                        return
+     target = snap_target(canvas, wpt, hit)
 
-                if target.edit_button_rect(canvas).contains(sp):
-                    target.edit(canvas)
-                    self._reset()
-                    return
+     if target is None:
+        canvas.doc.set_selection([])
+        return
 
-                if target.resize_handle_rect(canvas).contains(sp):
-                    self.resize_media = target
-                    self._grab_wpt = wpt
-                    return
+    # ★ 修复：媒体对象本体可拖动
+     if isinstance(target, MediaObject):
+        canvas.doc.set_selection([target])
 
-        selected = [o for o in canvas.doc.objects if o.selected]
-        multi = (len(selected) > 1) and (target in selected)
-        if multi:
-            canvas.doc.set_selection(selected)
-            pts: list[FreePoint] = []
-            seen = set()
-            for o in selected:
-                _free_points_of(o, pts, seen)
-            self.drag_pts = pts
-        elif isinstance(target, PointOnObject):
-            canvas.doc.set_selection([target])
-            self.drag_poo = target
-        elif isinstance(target, FreePoint):
-            canvas.doc.set_selection([target])
-            self.drag_pts = [target]
-        elif isinstance(target, AbstractPoint):
-            canvas.doc.set_selection([target])
-        else:
-            canvas.doc.set_selection([target])
-            pts = []
-            seen = set()
-            _free_points_of(target, pts, seen)
-            self.drag_pts = pts
-            
+        self.drag_media = target
+        self._media_orig = (target.x, target.y)
         self._grab_wpt = wpt
-        self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
+        return
+
+     selected = [o for o in canvas.doc.objects if o.selected]
+     multi = (len(selected) > 1) and (target in selected)
+
+     if multi:
+        canvas.doc.set_selection(selected)
+
+        pts: list[FreePoint] = []
+        seen = set()
+
+        for o in selected:
+            _free_points_of(o, pts, seen)
+
+        self.drag_pts = pts
+
+     elif isinstance(target, PointOnObject):
+        canvas.doc.set_selection([target])
+        self.drag_poo = target
+
+     elif isinstance(target, FreePoint):
+        canvas.doc.set_selection([target])
+        self.drag_pts = [target]
+
+     elif isinstance(target, AbstractPoint):
+        canvas.doc.set_selection([target])
+
+     else:
+        canvas.doc.set_selection([target])
+
+        pts = []
+        seen = set()
+        _free_points_of(target, pts, seen)
+        self.drag_pts = pts
+
+     self._grab_wpt = wpt
+     self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
     def move(self, canvas, wpt, hit):
         if (self.drag_poo is None and not self.drag_pts

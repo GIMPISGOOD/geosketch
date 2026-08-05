@@ -358,7 +358,7 @@ def _jsx_export(doc, include_vars=True):
                 n = nv(); names[obj.id] = n
                 # JSXGraph 的 image 坐标是左下角，且高度向上延伸
                 x_bl = obj.x
-                y_bl = obj.y + obj.height
+                y_bl = obj.y - obj.height
                 # 替换 Base64 中的换行符以防 JS 报错
                 b64_clean = b64.replace("\n", "")
                 lines.append(f"var {n} = board.create('image', "

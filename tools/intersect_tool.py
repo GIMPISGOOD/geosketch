@@ -39,5 +39,4 @@ class IntersectTool(Tool):
         canvas.update()
 
     def draw_overlay(self, p, view):
-        if self.first is not None:
-            view.doc.set_selection([self.first])         # 保持高亮
+        return     # 保持高亮

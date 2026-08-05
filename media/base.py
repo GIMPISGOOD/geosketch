@@ -21,14 +21,34 @@ class MediaObject(GeoObject):
         self.rotation = 0.0
 
     def distance_to(self, x, y):
-        # self.x, self.y 是左上角；
-        # 高度向世界坐标下方延伸，所以底边是 self.y - self.height
-        if self.x <= x <= self.x + self.width and self.y - self.height <= y <= self.y:
-            return 0.0
+     """
+     支持 rotation 的媒体对象拾取。
+      把世界点转换到媒体对象的局部坐标系，再判断是否在矩形内。
+     """
+     cx = self.x + self.width / 2.0
+     cy = self.y - self.height / 2.0
 
-        dx = max(self.x - x, 0.0, x - (self.x + self.width))
-        dy = max((self.y - self.height) - y, 0.0, y - self.y)
-        return math.hypot(dx, dy)
+     ang = math.radians(getattr(self, "rotation", 0.0))
+     c = math.cos(ang)
+     s = math.sin(ang)
+
+     dx = x - cx
+     dy = y - cy
+
+    # 逆变换到局部坐标
+     lx = dx * c - dy * s
+     ly = dx * s + dy * c
+
+     hw = self.width / 2.0
+     hh = self.height / 2.0
+
+     if -hw <= lx <= hw and -hh <= ly <= hh:
+        return 0.0
+
+     ox = max(abs(lx) - hw, 0.0)
+     oy = max(abs(ly) - hh, 0.0)
+
+     return math.hypot(ox, oy)
 
     def screen_rect(self, view):
         tl = view.to_screen(self.x, self.y)
