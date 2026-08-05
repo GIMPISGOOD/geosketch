@@ -4,7 +4,7 @@
 import math
 from typing import Optional, Tuple
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QPainterPath
 
 from core.registry import register_geo, register_renderer
@@ -259,24 +259,26 @@ class FunctionCurve(GeoObject):
 def draw_function(p, obj, view):
     if not obj.exists:
         return
-    color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
-    p.setPen(theme.pen(color, 2))
 
-    # ★ 尝试使用缓存
-    cached, fresh = obj.get_cached_or_request(view)
+    p.save()
+    try:
+        color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
+        p.setPen(theme.pen(color, 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)   # ★ 关键：函数曲线绝不应该填充
 
-    if fresh and cached:
-        # 缓存有效：直接绘制缓存点（极快）
-        _draw_cached(p, obj, view, cached)
-    else:
-        # 缓存无效：同步采样作为 fallback（首次加载/极端情况）
-        if obj.kind == "explicit":
-            _draw_explicit(p, obj, view)
-        elif obj.kind == "parametric":
-            _draw_parametric(p, obj, view)
-        elif obj.kind == "polar":
-            _draw_polar(p, obj, view)
+        cached, fresh = obj.get_cached_or_request(view)
 
+        if fresh and cached:
+            _draw_cached(p, obj, view, cached)
+        else:
+            if obj.kind == "explicit":
+                _draw_explicit(p, obj, view)
+            elif obj.kind == "parametric":
+                _draw_parametric(p, obj, view)
+            elif obj.kind == "polar":
+                _draw_polar(p, obj, view)
+    finally:
+        p.restore()
 
 
 def _draw_explicit(p, obj, view):

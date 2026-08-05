@@ -42,7 +42,7 @@ if __name__ == "__main__":
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\document.py
 鏂囦欢鍚?   document.py
-淇敼鏃堕棿: 08/04/2026 20:23:51
+淇敼鏃堕棿: 08/05/2026 14:17:46
 ============================================================
 
 import json
@@ -234,6 +234,12 @@ class Document(QObject):
 
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
+        # ★ 新增：标记所有函数曲线缓存失效
+        from geo.function_curve import FunctionCurve
+        for obj in self.objects:
+            if isinstance(obj, FunctionCurve):
+                obj.invalidate_cache()
+
         moved = []
         for eo in sorted(self.expr_objects, key=lambda o: o.id):
             if eo.exists:
@@ -1390,7 +1396,7 @@ class DivisionPoint(AbstractPoint):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\function_curve.py
 鏂囦欢鍚?   function_curve.py
-淇敼鏃堕棿: 08/02/2026 18:20:31
+淇敼鏃堕棿: 08/05/2026 14:36:54
 ============================================================
 
 """函数曲线：支持 显函数 y=f(x) / 参数方程 x=f(t),y=g(t) / 极坐标 r=f(θ)。
@@ -1399,7 +1405,8 @@ class DivisionPoint(AbstractPoint):
 import math
 from typing import Optional, Tuple
 
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QPainterPath
 
 from core.registry import register_geo, register_renderer
 from core.variables import evaluate, get_store
@@ -1431,6 +1438,12 @@ class FunctionCurve(GeoObject):
         self.color = color or next_color()
         self.label_text = label_text
         self._domain = domain
+
+        # ★ 渲染缓存
+        self._cached_points: list = []       # 采样点缓存
+        self._cache_version: int = -1        # 缓存对应的变量版本号
+        self._cache_domain: tuple = (None, None)     # 缓存对应的视窗域
+        self._cache_dirty: bool = True       # 是否需要重新采样
 
     def _eval_at(self, u):
         """在参数 u 处求值。
@@ -1484,7 +1497,55 @@ class FunctionCurve(GeoObject):
             x1, _ = view.to_world(QPointF(view.width(), 0))
             return (min(x0, x1), max(x0, x1))
         return (0.0, 2 * math.pi)
+    
+    def invalidate_cache(self):
+        """表达式或变量变化时调用，标记缓存失效。"""
+        self._cache_dirty = True
 
+    def _cache_valid(self, var_version, domain):
+        """检查缓存是否仍然有效。"""
+        return (not self._cache_dirty
+                and self._cache_version == var_version
+                and self._cache_domain == domain
+                and len(self._cached_points) > 0)
+
+    def update_cache(self, points, var_version, domain):
+        """子线程采样完成后更新缓存（由信号槽调用）。"""
+        self._cached_points = points
+        self._cache_version = var_version
+        self._cache_domain = domain
+        self._cache_dirty = False
+
+    def get_cached_or_request(self, view):
+        """获取缓存点列表；若失效则提交异步采样任务。
+
+        返回 (points, is_fresh)：
+        - is_fresh=True  → 缓存有效，直接使用
+        - is_fresh=False → 缓存失效，已提交采样，当前返回旧缓存或空列表
+        """
+        domain = self.get_domain(view)
+        store = get_store()
+        var_version = store.version
+
+        if self._cache_valid(var_version, domain):
+            return self._cached_points, True
+
+        # 缓存失效 → 提交异步采样
+        n = min(max(int(view.width()), 400), 4000)
+        from geo.function_sampler import get_sampler
+        get_sampler().submit(
+            curve_id=self.id,
+            kind=self.kind,
+            expr=self.expr,
+            expr2=self.expr2,
+            domain=domain,
+            n=n,
+            var_snapshot=store.as_dict()
+        )
+
+        # 返回旧缓存（可能为空），主线程先用旧数据绘制
+        return self._cached_points, False
+    
     def sample(self, view, n=900) -> list[Optional[Tuple[float, float]]]:
         a, b = self.get_domain(view)
         self._domain = (a, b)
@@ -1591,93 +1652,347 @@ class FunctionCurve(GeoObject):
                    params.get("color"), params.get("label_text"))
 
 
+# ============================================================
+# 渲染器（性能优化版）
+# ============================================================
+
 @register_renderer(FunctionCurve)
 def draw_function(p, obj, view):
     if not obj.exists:
         return
-    color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
-    p.setPen(theme.pen(color, 2))
-    if obj.kind == "explicit":
-        _draw_explicit(p, obj, view)
-    elif obj.kind == "parametric":
-        _draw_parametric(p, obj, view)
-    elif obj.kind == "polar":
-        _draw_polar(p, obj, view)
+
+    p.save()
+    try:
+        color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
+        p.setPen(theme.pen(color, 2))
+        p.setBrush(Qt.BrushStyle.NoBrush)   # ★ 关键：函数曲线绝不应该填充
+
+        cached, fresh = obj.get_cached_or_request(view)
+
+        if fresh and cached:
+            _draw_cached(p, obj, view, cached)
+        else:
+            if obj.kind == "explicit":
+                _draw_explicit(p, obj, view)
+            elif obj.kind == "parametric":
+                _draw_parametric(p, obj, view)
+            elif obj.kind == "polar":
+                _draw_polar(p, obj, view)
+    finally:
+        p.restore()
 
 
 def _draw_explicit(p, obj, view):
-    """显函数：只采样可见 x 范围，按像素密度采样，渐近线处断开。"""
+    """显函数：变量字典只获取一次 + QPainterPath + 合理采样密度。"""
     x0, _ = view.to_world(QPointF(0, 0))
     x1, _ = view.to_world(QPointF(view.width(), 0))
     if x0 > x1:
         x0, x1 = x1, x0
+
     _, yt = view.to_world(QPointF(0, 0))
     _, yb = view.to_world(QPointF(0, view.height()))
     y_range = abs(yt - yb) or 1.0
-    n = min(max(int(view.width() * 3), 600), 12000)
-    
+
+    # ★ 优化 1：采样点数 = 屏幕像素宽度（不再 ×3，上限 4000）
+    n = min(max(int(view.width()), 400), 4000)
+
+    # ★ 优化 2：变量字典只获取一次
+    vd = get_store().as_dict()
+
+    path = QPainterPath()
+    has_path = False
     prev_y = None
-    prev_sp = None
+
     for i in range(n + 1):
         x = x0 + (x1 - x0) * i / n
-        y = obj._eval_at(x)
-        
-        # ★ 类型保护：只接受实数，tuple/None/复数全部跳过
-        if not isinstance(y, (int, float)) or not math.isfinite(y):
+        vd["x"] = x
+
+        try:
+            y = evaluate(obj.expr, vd)
+        except Exception:
+            y = None
+
+        if y is None or not isinstance(y, (int, float)) or not math.isfinite(y):
+            has_path = False
             prev_y = None
-            prev_sp = None
             continue
-            
-        # 渐近线检测：相邻 y 跳变超过视窗高度 1.5 倍则断开
-        is_break = False
+
+        # 渐近线检测
         if prev_y is not None and abs(y - prev_y) > y_range * 1.5:
-            is_break = True
-            
+            has_path = False
+
         sp = view.to_screen(x, y)
-        
-        # ★ 修复：drawLine 必须接收两个 QPointF
-        if prev_sp is not None and not is_break:
-            p.drawLine(prev_sp, sp)
-            
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
         prev_y = y
-        prev_sp = sp
+
+    # ★ 优化 3：一次性绘制整个路径
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
 
 
 def _draw_parametric(p, obj, view):
+    """参数方程：变量字典只获取一次 + QPainterPath。"""
     a, b = obj.domain or (0, 2 * math.pi)
-    n = 2000
-    prev = None
+    n = 800  # ★ 参数曲线 800 点足够平滑
+
+    vd = get_store().as_dict()
+    vd["t"] = 0.0
+
+    path = QPainterPath()
+    has_path = False
+
     for i in range(n + 1):
         t = a + (b - a) * i / n
-        pt = obj._eval_at(t)
-        if not isinstance(pt, (tuple, list)) or len(pt) != 2:
-            prev = None
+        vd["t"] = t
+
+        try:
+            x = evaluate(obj.expr, vd)
+            y = evaluate(obj.expr2, vd)
+        except Exception:
+            x = y = None
+
+        if (x is None or y is None
+                or not isinstance(x, (int, float)) or not math.isfinite(x)
+                or not isinstance(y, (int, float)) or not math.isfinite(y)):
+            has_path = False
             continue
-        x, y = pt
-        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))
-                and math.isfinite(x) and math.isfinite(y)):
-            prev = None
-            continue
+
         sp = view.to_screen(x, y)
-        if prev is not None:
-            p.drawLine(prev, sp)
-        prev = sp
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
 
 
 def _draw_polar(p, obj, view):
+    """极坐标：变量字典只获取一次 + QPainterPath。"""
     a, b = obj.domain or (0, 2 * math.pi)
-    n = 2000
-    prev = None
+    n = 800
+
+    vd = get_store().as_dict()
+    vd["t"] = 0.0
+    vd["θ"] = 0.0
+
+    path = QPainterPath()
+    has_path = False
+
     for i in range(n + 1):
         t = a + (b - a) * i / n
-        r = obj._eval_at(t)
-        if not isinstance(r, (int, float)) or not math.isfinite(r):
-            prev = None
+        vd["t"] = t
+        vd["θ"] = t
+
+        try:
+            r = evaluate(obj.expr, vd)
+        except Exception:
+            r = None
+
+        if r is None or not isinstance(r, (int, float)) or not math.isfinite(r):
+            has_path = False
             continue
+
         sp = view.to_screen(r * math.cos(t), r * math.sin(t))
-        if prev is not None:
-            p.drawLine(prev, sp)
-        prev = sp
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
+
+def _draw_cached(p, obj, view, points):
+    """从缓存点列表绘制（主线程零计算）。"""
+    path = QPainterPath()
+    has_path = False
+
+    for pt in points:
+        if pt is None:
+            has_path = False
+            continue
+
+        sp = view.to_screen(pt[0], pt[1])
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if path.elementCount() > 0:
+        p.drawPath(path)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\function_sampler.py
+鏂囦欢鍚?   function_sampler.py
+淇敼鏃堕棿: 08/05/2026 14:42:45
+============================================================
+
+"""函数曲线子线程采样引擎。
+
+设计：
+- 采样在后台线程执行，主线程只绘制缓存点
+- 变量变化/表达式变化/视窗变化时触发重新采样
+- 任务去重：同一曲线只保留最新任务，避免滑杆拖动时任务堆积
+- 双缓冲：采样完成后原子替换缓存列表，主线程无锁读取
+"""
+
+import math
+import time
+from collections import defaultdict
+from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition
+
+from core.variables import get_store, evaluate
+
+
+class _SampleTask:
+    """一次采样任务的描述。"""
+    __slots__ = ("curve_id", "kind", "expr", "expr2", "domain",
+                 "n", "var_snapshot", "timestamp")
+
+    def __init__(self, curve_id, kind, expr, expr2, domain, n, var_snapshot):
+        self.curve_id = curve_id
+        self.kind = kind
+        self.expr = expr
+        self.expr2 = expr2
+        self.domain = domain
+        self.n = n
+        self.var_snapshot = var_snapshot
+        self.timestamp = time.monotonic()
+
+
+class FunctionSamplerThread(QThread):
+    """后台采样线程。
+
+    信号：
+        sampled(curve_id, points)  采样完成，points 为 [(x,y)|None, ...]
+    """
+    sampled = Signal(int, list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._tasks: dict[int, _SampleTask] = {}   # curve_id → 最新任务（去重）
+        self._queue: list[int] = []                 # 待处理 id 队列
+        self._mutex = QMutex()
+        self._cond = QWaitCondition()
+        self._running = True
+
+    def submit(self, curve_id, kind, expr, expr2, domain, n, var_snapshot):
+        """提交采样任务。同一 curve_id 只保留最新任务。"""
+        task = _SampleTask(curve_id, kind, expr, expr2, domain, n, var_snapshot)
+        self._mutex.lock()
+        self._tasks[curve_id] = task
+        if curve_id not in self._queue:
+            self._queue.append(curve_id)
+        self._cond.wakeOne()
+        self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._cond.wakeOne()
+        self._mutex.unlock()
+        self.wait(2000)
+
+    def run(self):
+        while True:
+            self._mutex.lock()
+            while self._running and not self._queue:
+                self._cond.wait(self._mutex)
+
+            if not self._running:
+                self._mutex.unlock()
+                break
+
+            curve_id = self._queue.pop(0)
+            task = self._tasks.pop(curve_id, None)
+            self._mutex.unlock()
+
+            if task is None:
+                continue
+
+            # 执行采样（纯计算，不接触任何 GUI 对象）
+            points = self._sample(task)
+
+            # 发射结果到主线程
+            self.sampled.emit(curve_id, points)
+
+    def _sample(self, task) -> list:
+        """根据任务描述执行采样，返回点列表。"""
+        vd = dict(task.var_snapshot)  # 快照副本，线程安全
+        n = task.n
+        a, b = task.domain
+
+        points = []
+
+        if task.kind == "explicit":
+            for i in range(n + 1):
+                x = a + (b - a) * i / n
+                vd["x"] = x
+                try:
+                    y = evaluate(task.expr, vd)
+                except Exception:
+                    y = None
+                if (y is not None and isinstance(y, (int, float))
+                        and math.isfinite(y)):
+                    points.append((x, float(y)))
+                else:
+                    points.append(None)
+
+        elif task.kind == "parametric":
+            for i in range(n + 1):
+                t = a + (b - a) * i / n
+                vd["t"] = t
+                try:
+                    x = evaluate(task.expr, vd)
+                    y = evaluate(task.expr2, vd)
+                except Exception:
+                    x = y = None
+                if (x is not None and y is not None
+                        and isinstance(x, (int, float)) and math.isfinite(x)
+                        and isinstance(y, (int, float)) and math.isfinite(y)):
+                    points.append((float(x), float(y)))
+                else:
+                    points.append(None)
+
+        elif task.kind == "polar":
+            for i in range(n + 1):
+                t = a + (b - a) * i / n
+                vd["t"] = t
+                vd["θ"] = t
+                try:
+                    r = evaluate(task.expr, vd)
+                except Exception:
+                    r = None
+                if (r is not None and isinstance(r, (int, float))
+                        and math.isfinite(r)):
+                    points.append((float(r) * math.cos(t),
+                                   float(r) * math.sin(t)))
+                else:
+                    points.append(None)
+
+        return points
+
+
+# ───────────── 全局采样器单例 ─────────────
+
+_sampler: FunctionSamplerThread | None = None
+
+
+def get_sampler() -> FunctionSamplerThread:
+    global _sampler
+    if _sampler is None:
+        _sampler = FunctionSamplerThread()
+        _sampler.start()
+    return _sampler
 
 
 ============================================================
@@ -8827,7 +9142,7 @@ for _m in pkgutil.iter_modules(__path__):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
 鏂囦欢鍚?   canvas.py
-淇敼鏃堕棿: 08/05/2026 13:44:46
+淇敼鏃堕棿: 08/05/2026 14:38:09
 ============================================================
 
 import math
@@ -8842,6 +9157,7 @@ from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
 from geo.function_curve import FunctionCurve
+from core.variables import get_store
 from tools.select import SelectTool
 from ui import theme
 from ui.icons import trash_icon
@@ -8902,6 +9218,21 @@ class Canvas(QWidget):
 
         self.refresh_theme()
         self.update_snow_state()
+
+        from geo.function_sampler import get_sampler
+        self._sampler = get_sampler()
+        self._sampler.sampled.connect(self._on_function_sampled)
+
+    def _on_function_sampled(self, curve_id, points):
+        """子线程采样完成 → 更新对应曲线的缓存 → 触发重绘。"""
+        from geo.function_curve import FunctionCurve
+        store = get_store()
+        for obj in self.doc.objects:
+            if isinstance(obj, FunctionCurve) and obj.id == curve_id:
+                domain = obj.get_domain(self)
+                obj.update_cache(points, store.version, domain)
+                self.update()
+                break
 
     # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:
