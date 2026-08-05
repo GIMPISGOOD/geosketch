@@ -20,6 +20,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtCore import QByteArray, QBuffer, QPointF, Qt
 from core.registry import RENDER_REGISTRY
 from media.base import MediaObject
+from core.variables import render_template
 
 JSX_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraphcore.js"
 JSX_CSS_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraph.css"
@@ -156,6 +157,17 @@ def _jsx_export(doc, include_vars=True):
     def nv():
         counter[0] += 1
         return f"o{counter[0]}"
+    
+    def add_static_point(o, fixed=True):
+        n = nv()
+        names[o.id] = n
+        fixed_js = "true" if fixed else "false"
+        lines.append(
+            f"var {n} = board.create('point', "
+            f"[{o.x:.4f}, {o.y:.4f}], "
+            f"{{name: '', size: 2, fixed: {fixed_js}}});"
+        )
+        return n    
 
     # 导出变量为 slider
     for vname in all_var_names:
@@ -207,7 +219,33 @@ def _jsx_export(doc, include_vars=True):
                 lines.append(f"var {n} = board.create('glider', "
                              f"[{obj.x:.4f}, {obj.y:.4f}, {host_name}], "
                              f"{{name: 'P{obj.id}', size: 2}});")
+                
+        elif tn == "DivisionPoint":
+            a = names.get(obj.a.id)
+            b = names.get(obj.b.id)
 
+            n = nv()
+            names[obj.id] = n
+
+            if a and b:
+                t = float(obj.t)
+
+                lines.append(
+                    f"var {n} = board.create('point', ["
+                    f"function() {{ return {a}.X() + {t} * ({b}.X() - {a}.X()); }},"
+                    f"function() {{ return {a}.Y() + {t} * ({b}.Y() - {a}.Y()); }}"
+                    f"], {{name: '', size: 2}});"
+                )
+            else:
+                lines.append(
+                    f"var {n} = board.create('point', "
+                    f"[{obj.x:.4f}, {obj.y:.4f}], "
+                    f"{{name: '', size: 2, fixed: true}});"
+                )
+
+        elif tn in ("PolygonVertex", "TransformPoint", "IterPoint"):
+            add_static_point(obj, fixed=True)
+            
         elif tn == "Segment":
             a, b = names.get(obj.a.id), names.get(obj.b.id)
             if a and b:
@@ -259,7 +297,33 @@ def _jsx_export(doc, include_vars=True):
                 n = nv(); names[obj.id] = n
                 lines.append(f"var {n} = board.create('intersection', [{a}, {b}, {obj.branch}], "
                              f"{{name: '', size: 2}});")
+                
+        elif tn in (
+            "PerpLine",
+            "ParallelLine",
+            "AngleBisector",
+            "AngleDivLine",
+            "DirectedLine"
+        ):
+            if hasattr(obj, "point") and hasattr(obj, "dx") and hasattr(obj, "dy"):
+                x0, y0 = obj.point.x, obj.point.y
+                dx, dy = obj.dx, obj.dy
 
+                L = math.hypot(dx, dy)
+                if L > 1e-12:
+                    dx /= L
+                    dy /= L
+
+                    x1 = x0 + dx * 50.0
+                    y1 = y0 + dy * 50.0
+
+                    lines.append(
+                        f"board.create('line', "
+                        f"[[{x0:.4f}, {y0:.4f}], [{x1:.4f}, {y1:.4f}]], "
+                        f"{{strokeColor: '#495057', strokeWidth: 2, "
+                        f"straightFirst: true, straightLast: true}});"
+                    )
+                    
         elif tn == "Ellipse":
             c_name = names.get(obj.center.id)
             a_name = names.get(obj.axis_a.id)
@@ -275,7 +339,23 @@ def _jsx_export(doc, include_vars=True):
                     f"0, 2 * Math.PI], {{strokeColor: '#862e9c', strokeWidth: 2}});"
                 )
                 lines.append(code)
+                
+        elif tn == "TextObject":
+            wx, wy = obj.world_pos()
 
+            txt = render_template(obj.text)
+            txt_js = (
+                txt.replace("\\", "\\\\")
+                   .replace("'", "\\'")
+                   .replace("\n", "\\n")
+            )
+
+            lines.append(
+                f"board.create('text', "
+                f"[{wx:.4f}, {wy:.4f}, '{txt_js}'], "
+                f"{{fontSize: {obj.size}, cssStyle: 'color:{obj.color};'}});"
+            )
+            
         elif tn == "CubicBezier":
             p0 = names.get(obj.p0.id)
             p1 = names.get(obj.p1.id)
@@ -354,17 +434,23 @@ def _jsx_export(doc, include_vars=True):
         # ★ 新增：媒体对象（表格/图表/图像）转图片渲染
         elif isinstance(obj, MediaObject):
             b64 = _render_media_to_base64(obj)
+
             if b64:
-                n = nv(); names[obj.id] = n
-                # JSXGraph 的 image 坐标是左下角，且高度向上延伸
+                n = nv()
+                names[obj.id] = n
+
+                # ★ 修复：MediaObject 的底边是 y - height
                 x_bl = obj.x
                 y_bl = obj.y - obj.height
-                # 替换 Base64 中的换行符以防 JS 报错
+
                 b64_clean = b64.replace("\n", "")
-                lines.append(f"var {n} = board.create('image', "
-                             f"['data:image/png;base64,{b64_clean}', "
-                             f"[{x_bl}, {y_bl}], [{obj.width}, {obj.height}]], "
-                             f"{{fixed: false, highlight: false}});")
+
+                lines.append(
+                    f"var {n} = board.create('image', "
+                    f"['data:image/png;base64,{b64_clean}', "
+                    f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
+                    f"{{fixed: false, highlight: false}});"
+                )
 
     return "\n".join(lines), bb
 
