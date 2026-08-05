@@ -122,17 +122,51 @@ class Canvas(QWidget):
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            self.render_scene(p)                 # 几何场景（屏幕/导出共用）
+            # 1. 几何场景（保存状态，防止某个对象污染画笔）
+            p.save()
+            try:
+                self.render_scene(p)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            finally:
+                p.restore()
 
             # —— 以下仅屏幕显示，不导出 ——
 
-            # ★ snow 彩蛋：标题为 snow 时飘雪花
-            if self._snow_active:
-                self._draw_snow(p)
+            # 2. snow 彩蛋：标题为 snow 时飘雪花
+            if getattr(self, "_snow_active", False):
+                p.save()
+                try:
+                    self._draw_snow(p)
+                except Exception:
+                    pass
+                finally:
+                    p.restore()
 
-            self._draw_snap_indicator(p)
+            # 3. 磁吸指示器
+            p.save()
+            try:
+                self._draw_snap_indicator(p)
+            except Exception:
+                pass
+            finally:
+                p.restore()
+
+            # 4. ★ 工具覆盖层（画圆预览、框选框、红色参考线等）
+            if self.tool is not None:
+                p.save()
+                try:
+                    self.tool.draw_overlay(p, self)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    p.restore()
+
         finally:
             p.end()
+
         self._place_trash()
 
     def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:

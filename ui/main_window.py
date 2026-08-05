@@ -12,6 +12,7 @@ import geo            # noqa: F401
 import tools          # noqa: F401
 import plugins        # noqa: F401
 import media           # noqa: F401
+import transforms     # noqa: F401
 from core.document import Document
 from core.registry import TOOL_REGISTRY
 from ui import theme
@@ -191,6 +192,20 @@ class MainWindow(QMainWindow):
             tm.addAction(self._actions[spec["cls"]])
         if not plugin_specs:
             e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
+        # ================= 变换菜单 =================
+        gm = mb.addMenu("变换(&G)")
+
+        transform_specs = sorted(
+            [s for s in TOOL_REGISTRY if s.get("panel") == "transform"],
+            key=lambda s: s.get("order", 99)
+        )
+
+        for spec in transform_specs:
+            gm.addAction(self._actions[spec["cls"]])
+
+        if not transform_specs:
+            e = gm.addAction("（暂无变换工具）")
+            e.setEnabled(False)
         # 插入菜单：媒体对象
         im = mb.addMenu("插入(&I)")
         insert_specs = sorted(

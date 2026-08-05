@@ -36,9 +36,20 @@ class CircleTool(Tool):
     def draw_overlay(self, p, view):
         if self.center is None:
             return
+
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        c = view.to_screen(self.center.x, self.center.y)
-        r = (math.hypot(view.cursor_wpt[0] - self.center.x,
-                        view.cursor_wpt[1] - self.center.y) * view.scale)
-        p.drawEllipse(c, r, r)
+
+        center_sp = view.to_screen(self.center.x, self.center.y)
+        cursor_sp = view.to_screen(*view.cursor_wpt)
+
+        r = math.hypot(
+            view.cursor_wpt[0] - self.center.x,
+            view.cursor_wpt[1] - self.center.y
+        ) * view.scale
+
+        # 预览圆
+        p.drawEllipse(center_sp, r, r)
+
+        # ★ 半径预览线：圆心 → 当前光标
+        p.drawLine(center_sp, cursor_sp)

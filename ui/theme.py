@@ -201,8 +201,18 @@ def pen(color, width=1.0):
 
 
 def dashed_pen(color, width=1.0):
-    p = QPen(QColor(color), float(width), Qt.PenStyle.DashLine)
-    p.setDashPattern([6, 4])
+    """虚线画笔：显式 CustomDashLine + 浮点 dash pattern。"""
+    if isinstance(color, QColor):
+        c = QColor(color)
+    else:
+        c = _c(color)
+
+    p = QPen(c, float(width))
+    p.setStyle(Qt.PenStyle.CustomDashLine)
+    p.setDashPattern([6.0, 4.0])
+    p.setCapStyle(Qt.PenCapStyle.FlatCap)
+    p.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+
     return p
 
 

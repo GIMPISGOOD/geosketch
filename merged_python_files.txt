@@ -1,10 +1,11 @@
 ﻿============================================================
-文件路径: C:\PythonProjects\geosketch\main.py
-文件名:   main.py
-修改时间: 08/03/2026 11:51:44
+鏂囦欢璺緞: C:\PythonProjects\geosketch\main.py
+鏂囦欢鍚?   main.py
+淇敼鏃堕棿: 08/04/2026 20:29:10
 ============================================================
 
 import sys
+import os
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
@@ -16,16 +17,20 @@ from ui import theme
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
+
     font = QFont()
     font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"])
     font.setPointSize(10)
     app.setFont(font)
+
     app.setStyleSheet(theme.app_stylesheet())
 
     win = MainWindow()
+
     # ★ 命令行第一个参数若为 .wgeo，直接载入（启动器靠这个打开课件草图）
-    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo"):
+    if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo") and os.path.exists(sys.argv[1]):
         win.doc.load(sys.argv[1])
+
     win.show()
     sys.exit(app.exec())
 
@@ -35,9 +40,9 @@ if __name__ == "__main__":
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\core\document.py
-文件名:   document.py
-修改时间: 08/03/2026 10:26:39
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\document.py
+鏂囦欢鍚?   document.py
+淇敼鏃堕棿: 08/04/2026 20:23:51
 ============================================================
 
 import json
@@ -297,33 +302,60 @@ class Document(QObject):
         self.changed.emit()
 
     def save(self, path):
-        import zipfile, datetime
+        import zipfile
+        import datetime
         from ui import theme as _theme
+
         self.meta["theme"] = _theme.active_name()
         self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")
+
         if not self.meta.get("created"):
             self.meta["created"] = self.meta["modified"]
+
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("sketch.json",
-                        json.dumps(self.snapshot(), ensure_ascii=False, indent=1))
-            zf.writestr("meta.data",
-                        json.dumps(self.meta, ensure_ascii=False, indent=1))
+            zf.writestr(
+                "sketch.json",
+                json.dumps(self.snapshot(), ensure_ascii=False, indent=1)
+            )
+            zf.writestr(
+                "meta.data",
+                json.dumps(self.meta, ensure_ascii=False, indent=1)
+            )
+            zf.writestr(
+                "variables.json",
+                json.dumps(self.vars.to_dict(), ensure_ascii=False, indent=1)
+            )
 
     def load(self, path):
         import zipfile
         from ui import theme as _theme
+
         with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+
+            # ★ 先恢复变量，再重建对象，避免表达式对象初始化时变量缺失
+            if "variables.json" in names:
+                self.vars.load_dict(json.loads(zf.read("variables.json")))
+            else:
+                # 旧文件没有变量时，清空当前变量，避免文档间污染
+                self.vars.load_dict({})
+
             self._load_state(json.loads(zf.read("sketch.json")))
-            if "meta.data" in zf.namelist():
+
+            if "meta.data" in names:
                 self.meta = json.loads(zf.read("meta.data"))
-                if self.meta.get("theme") in _theme.theme_names():
-                    _theme.set_theme(self.meta["theme"])
+
+            if self.meta.get("theme") in _theme.theme_names():
+                _theme.set_theme(self.meta["theme"])
+
+        # 载入后统一刷新表达式约束与依赖对象
+        self.refresh_variables()
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\core\registry.py
-文件名:   registry.py
-修改时间: 08/03/2026 10:26:41
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\registry.py
+鏂囦欢鍚?   registry.py
+淇敼鏃堕棿: 08/03/2026 10:26:41
 ============================================================
 
 """三个注册表 + 工具面板归属。所有扩展都经过这里。"""
@@ -376,9 +408,9 @@ def register_tool(name: str, shortcut: Optional[str] = None, order: int = 100,
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\core\variables.py
-文件名:   variables.py
-修改时间: 08/03/2026 20:16:26
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\variables.py
+鏂囦欢鍚?   variables.py
+淇敼鏃堕棿: 08/04/2026 20:40:16
 ============================================================
 
 """变量系统（抽离为独立模块）：安全表达式求值 + 变量存储。
@@ -399,9 +431,31 @@ _OPS = {
     ast.Pow: operator.pow, ast.Mod: operator.mod,
     ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
-FUNCS = {"sqrt": math.sqrt, "abs": abs, "sin": math.sin,
-         "cos": math.cos, "tan": math.tan}
-CONSTS = {"pi": math.pi, "e": math.e}
+_FUNCS = {
+    "sin": math.sin,
+    "cos": math.cos,
+    "tan": math.tan,
+    "arcsin": math.asin,
+    "arccos": math.acos,
+    "arctan": math.atan,
+    "asin": math.asin,
+    "acos": math.acos,
+    "atan": math.atan,
+    "sinh": math.sinh,
+    "cosh": math.cosh,
+    "tanh": math.tanh,
+    "sqrt": math.sqrt,
+    "abs": abs,
+    "ln": math.log,
+    "log": math.log10,
+    "exp": math.exp,
+    "cot": lambda x: 1.0 / math.tan(x),
+    "sec": lambda x: 1.0 / math.cos(x),
+    "csc": lambda x: 1.0 / math.sin(x),
+}
+
+FUNCS = dict(_FUNCS)
+CONSTS = {"pi": math.pi, "π": math.pi, "e": math.e}
 RESERVED = set(FUNCS) | set(CONSTS)
 
 
@@ -486,6 +540,7 @@ def evaluate(expr: str, variables: dict[str, float]) -> Optional[float]:
         return None
 
 
+
 class Variable:
     __slots__ = ("name", "value", "vmin", "vmax", "expr")
 
@@ -559,6 +614,52 @@ class VariableStore(QObject):
 
     def evaluate(self, expr):
         return evaluate(expr, self.as_dict())
+    
+    def set_range(self, name, vmin, vmax):
+        """修改变量滑杆范围，并把当前值夹回合法区间。"""
+        v = self._vars.get(name)
+        if not v:
+            return
+
+        vmin = float(vmin)
+        vmax = float(vmax)
+        if vmin > vmax:
+            vmin, vmax = vmax, vmin
+
+        v.vmin = vmin
+        v.vmax = vmax
+        v.value = min(max(v.value, v.vmin), v.vmax)
+
+        self.version += 1
+        self.changed.emit()
+
+    def to_dict(self):
+        """序列化变量，便于保存到 .wgeo 文件。"""
+        return {
+            name: {
+                "value": v.value,
+                "vmin": v.vmin,
+                "vmax": v.vmax,
+                "expr": v.expr,
+            }
+            for name, v in self._vars.items()
+        }
+
+    def load_dict(self, data):
+        """从字典恢复变量。会清空当前变量。"""
+        self._vars.clear()
+
+        for name, d in data.items():
+            self._vars[name] = Variable(
+                name,
+                d.get("value", 0.0),
+                d.get("vmin", 0.0),
+                d.get("vmax", 10.0),
+                d.get("expr", ""),
+            )
+
+        self.version += 1
+        self.changed.emit()
 
 
 _STORE = VariableStore()          # 模块级单例，避免跨层传递
@@ -571,19 +672,54 @@ def get_store():
 def eval_expr(expr):
     return _STORE.evaluate(expr)
 
+def render_template(text: str) -> str:
+    """把文本中的 {表达式} 替换为表达式求值结果。
+
+    例如：
+        "(a的值为{a})"
+
+    如果 a = 3，则返回：
+        "(a的值为3)"
+
+    求值失败时保留原样。
+    """
+    if not isinstance(text, str):
+        return str(text)
+
+    if "{" not in text or "}" not in text:
+        return text
+
+    def _fmt(v: float) -> str:
+        if abs(v - round(v)) < 1e-9:
+            return str(int(round(v)))
+        return f"{v:.3f}"
+
+    def _replace(m):
+        expr = m.group(1).strip()
+        if not expr:
+            return m.group(0)
+
+        val = eval_expr(expr)
+        if val is None:
+            return m.group(0)
+
+        return _fmt(val)
+
+    return re.sub(r"\{([^{}]+)\}", _replace, text)
+
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\core\__init__.py
-文件名:   __init__.py
-修改时间: 08/03/2026 10:26:36
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/03/2026 10:26:36
 ============================================================
 
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\base.py
-文件名:   base.py
-修改时间: 07/26/2026 23:37:08
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\base.py
+鏂囦欢鍚?   base.py
+淇敼鏃堕棿: 07/26/2026 23:37:08
 ============================================================
 
 # geo/base.py
@@ -650,9 +786,9 @@ class GeoObject:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\chain_fill.py
-文件名:   chain_fill.py
-修改时间: 07/27/2026 19:18:26
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\chain_fill.py
+鏂囦欢鍚?   chain_fill.py
+淇敼鏃堕棿: 07/27/2026 19:18:26
 ============================================================
 
 """链式填充：由"点+曲线"有序链围成的闭合区域。
@@ -893,9 +1029,9 @@ def draw_chain_fill(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\circles.py
-文件名:   circles.py
-修改时间: 07/25/2026 23:05:31
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\circles.py
+鏂囦欢鍚?   circles.py
+淇敼鏃堕棿: 07/25/2026 23:05:31
 ============================================================
 
 import math
@@ -948,9 +1084,9 @@ def draw_circle(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\constraints.py
-文件名:   constraints.py
-修改时间: 08/01/2026 23:28:24
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\constraints.py
+鏂囦欢鍚?   constraints.py
+淇敼鏃堕棿: 08/01/2026 23:28:24
 ============================================================
 
 """表达式约束：把线段长度 / 角度度数锁定为变量的代数式。
@@ -1118,9 +1254,9 @@ def draw_expr_circle(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\curves.py
-文件名:   curves.py
-修改时间: 07/26/2026 23:44:44
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\curves.py
+鏂囦欢鍚?   curves.py
+淇敼鏃堕棿: 07/26/2026 23:44:44
 ============================================================
 
 """参数曲线基类：椭圆、贝塞尔等参数化曲线的公共基础设施。
@@ -1168,9 +1304,9 @@ class ParamCurve(GeoObject):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\directed_line.py
-文件名:   directed_line.py
-修改时间: 07/26/2026 23:18:18
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\directed_line.py
+鏂囦欢鍚?   directed_line.py
+淇敼鏃堕棿: 07/26/2026 23:18:18
 ============================================================
 
 """方向直线基类：过某点、沿某方向的无限长直线。
@@ -1221,9 +1357,9 @@ def draw_directed_line(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\division.py
-文件名:   division.py
-修改时间: 07/26/2026 20:10:25
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\division.py
+鏂囦欢鍚?   division.py
+淇敼鏃堕棿: 07/26/2026 20:10:25
 ============================================================
 
 """等分点：由两个端点 + 固定比例 t 确定的从动点。
@@ -1252,9 +1388,9 @@ class DivisionPoint(AbstractPoint):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\function_curve.py
-文件名:   function_curve.py
-修改时间: 08/02/2026 18:20:31
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\function_curve.py
+鏂囦欢鍚?   function_curve.py
+淇敼鏃堕棿: 08/02/2026 18:20:31
 ============================================================
 
 """函数曲线：支持 显函数 y=f(x) / 参数方程 x=f(t),y=g(t) / 极坐标 r=f(θ)。
@@ -1545,9 +1681,9 @@ def _draw_polar(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\ink.py
-文件名:   ink.py
-修改时间: 08/02/2026 14:41:37
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\ink.py
+鏂囦欢鍚?   ink.py
+淇敼鏃堕棿: 08/02/2026 14:41:37
 ============================================================
 
 """墨迹注释：自由手绘笔画，支持钢笔/荧光笔/铅笔。"""
@@ -1665,9 +1801,9 @@ def draw_eraser(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\intersects.py
-文件名:   intersects.py
-修改时间: 07/26/2026 17:54:14
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\intersects.py
+鏂囦欢鍚?   intersects.py
+淇敼鏃堕棿: 07/26/2026 17:54:14
 ============================================================
 
 """通用交点框架：任意两个几何图形的交点。
@@ -1851,9 +1987,9 @@ def draw_intersect(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\points.py
-文件名:   points.py
-修改时间: 07/29/2026 14:19:43
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\points.py
+鏂囦欢鍚?   points.py
+淇敼鏃堕棿: 07/29/2026 14:19:43
 ============================================================
 
 """几何点对象库：自由点、吸附点，以及磁吸查询。
@@ -2004,9 +2140,9 @@ def nearest_point(doc, scale, wpt):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\segments.py
-文件名:   segments.py
-修改时间: 07/29/2026 14:20:11
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\segments.py
+鏂囦欢鍚?   segments.py
+淇敼鏃堕棿: 07/29/2026 14:20:11
 ============================================================
 
 import math
@@ -2077,9 +2213,9 @@ def draw_segment(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\geo\__init__.py
-文件名:   __init__.py
-修改时间: 07/25/2026 22:51:08
+鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 07/25/2026 22:51:08
 ============================================================
 
 # geo/__init__.py
@@ -2098,22 +2234,24 @@ for _m in pkgutil.iter_modules(__path__):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\base.py
-文件名:   base.py
-修改时间: 08/03/2026 11:56:58
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\base.py
+鏂囦欢鍚?   base.py
+淇敼鏃堕棿: 08/04/2026 22:50:48
 ============================================================
 
 """媒体对象基类：位置/尺寸/拾取/拖动/缩放/编辑按钮。"""
 import math
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 
 from geo.base import GeoObject
 
 
 class MediaObject(GeoObject):
     """媒体对象基类。x,y 为左上角世界坐标，width/height 为世界尺寸。"""
+
     media = True
+    rotatable = False
 
     def __init__(self, x=0.0, y=0.0, width=6.0, height=4.0):
         super().__init__(parents=())
@@ -2121,39 +2259,98 @@ class MediaObject(GeoObject):
         self.y = float(y)
         self.width = float(width)
         self.height = float(height)
+        self.rotation = 0.0
 
     def distance_to(self, x, y):
-        if self.x <= x <= self.x + self.width and self.y <= y <= self.y + self.height:
+        # self.x, self.y 是左上角；
+        # 高度向世界坐标下方延伸，所以底边是 self.y - self.height
+        if self.x <= x <= self.x + self.width and self.y - self.height <= y <= self.y:
             return 0.0
+
         dx = max(self.x - x, 0.0, x - (self.x + self.width))
-        dy = max(self.y - y, 0.0, y - (self.y + self.height))
+        dy = max((self.y - self.height) - y, 0.0, y - self.y)
         return math.hypot(dx, dy)
 
     def screen_rect(self, view):
         tl = view.to_screen(self.x, self.y)
-        br = view.to_screen(self.x + self.width, self.y + self.height)
+        br = view.to_screen(self.x + self.width, self.y - self.height)
         return QRectF(tl, br).normalized()
-
+    
     def edit_button_rect(self, view):
         """编辑按钮屏幕矩形（右上角）。"""
         rect = self.screen_rect(view)
         s = 22
+
+        if getattr(self, "rotatable", False):
+            center = self._rotated_screen_point(
+                view,
+                rect.width() / 2 - s / 2 - 3,
+                -rect.height() / 2 + s / 2 + 3
+            )
+            return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
         return QRectF(rect.right() - s - 3, rect.top() + 3, s, s)
 
     def resize_handle_rect(self, view):
         """缩放手柄屏幕矩形（右下角）。"""
         rect = self.screen_rect(view)
         s = 12
+
+        if getattr(self, "rotatable", False):
+            center = self._rotated_screen_point(
+                view,
+                rect.width() / 2,
+                rect.height() / 2
+            )
+            return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
         return QRectF(rect.right() - s / 2 - 1, rect.bottom() - s / 2 - 1, s, s)
+    
+    def rotate_handle_rect(self, view):
+        """旋转手柄屏幕矩形（对象上方）。"""
+        if not getattr(self, "rotatable", False):
+            return QRectF()
+
+        rect = self.screen_rect(view)
+        s = 16
+
+        center = self._rotated_screen_point(
+            view,
+            0.0,
+            -rect.height() / 2 - 24.0
+        )
+
+        return QRectF(center.x() - s / 2, center.y() - s / 2, s, s)
+
+    def _rotated_screen_point(self, view, dx, dy):
+        """以对象屏幕中心为原点，把局部偏移 (dx, dy) 旋转后转成屏幕坐标。
+
+        dx 向右为正，dy 向下为正。
+        """
+        rect = self.screen_rect(view)
+        c = rect.center()
+        ang = math.radians(getattr(self, "rotation", 0.0))
+
+        x = c.x() + dx * math.cos(ang) - dy * math.sin(ang)
+        y = c.y() + dx * math.sin(ang) + dy * math.cos(ang)
+
+        return QPointF(x, y)
 
     def resize_to(self, wpt):
-        """拖动右下角手柄到世界坐标 wpt，调整宽高。"""
+        """拖动右下角手柄到世界坐标 wpt，调整宽高。
+        左上角 self.x, self.y 保持不动。
+        """
         self.width = max(wpt[0] - self.x, 0.5)
-        self.height = max(wpt[1] - self.y, 0.5)
+        self.height = max(self.y - wpt[1], 0.5)
 
     def dump(self):
-        return {"x": self.x, "y": self.y,
-                "width": self.width, "height": self.height}
+        return {
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "rotation": getattr(self, "rotation", 0.0),
+        }
 
     def edit(self, canvas):
         """编辑（子类覆盖，由编辑按钮触发）。"""
@@ -2161,34 +2358,77 @@ class MediaObject(GeoObject):
 
 
 def draw_media_decorations(p, obj, view):
-    """选中时统一绘制：边框 + ✎编辑按钮 + 缩放手柄。"""
+    """选中时统一绘制：边框 + ✎编辑按钮 + 缩放手柄 + 旋转手柄。"""
     if not obj.selected:
         return
+
     from ui import theme
+
     rect = obj.screen_rect(view)
+
     # 选中边框
     p.setPen(theme.pen(theme.SELECTED, 1.5))
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.drawRect(rect)
+
+    rotatable = getattr(obj, "rotatable", False)
+    rotation = getattr(obj, "rotation", 0.0)
+
+    if rotatable and abs(rotation) > 1e-6:
+        p.save()
+        p.translate(rect.center())
+        p.rotate(rotation)
+
+        centered = QRectF(
+            -rect.width() / 2,
+            -rect.height() / 2,
+            rect.width(),
+            rect.height()
+        )
+        p.drawRect(centered)
+        p.restore()
+    else:
+        p.drawRect(rect)
+
     # 编辑按钮（右上角）
     eb = obj.edit_button_rect(view)
     p.setBrush(theme.brush(theme.PANEL_BG))
     p.setPen(theme.pen(theme.ACCENT, 1.5))
     p.drawRoundedRect(eb, 4, 4)
+
     p.setPen(theme.pen(theme.INK, 1))
-    f = p.font(); f.setPixelSize(13); p.setFont(f)
+    f = p.font()
+    f.setPixelSize(13)
+    p.setFont(f)
     p.drawText(eb, Qt.AlignmentFlag.AlignCenter, "✎")
+
     # 缩放手柄（右下角）
     rh = obj.resize_handle_rect(view)
     p.setBrush(theme.brush(theme.ACCENT))
     p.setPen(theme.pen(theme.SELECTED, 1))
     p.drawRect(rh)
 
+    # 旋转手柄（上方）
+    if rotatable:
+        rot_rect = obj.rotate_handle_rect(view)
+        if rot_rect.width() > 0:
+            top_pt = obj._rotated_screen_point(
+                view,
+                0.0,
+                -rect.height() / 2
+            )
+
+            p.setPen(theme.pen(theme.SUBINK, 1.2))
+            p.drawLine(top_pt, rot_rect.center())
+
+            p.setBrush(theme.brush(theme.PANEL_BG))
+            p.setPen(theme.pen(theme.ACCENT, 1.5))
+            p.drawEllipse(rot_rect.center(), 7.0, 7.0)
+
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\chart_obj.py
-文件名:   chart_obj.py
-修改时间: 08/03/2026 11:57:58
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\chart_obj.py
+鏂囦欢鍚?   chart_obj.py
+淇敼鏃堕棿: 08/04/2026 22:43:07
 ============================================================
 
 """图表对象：饼状图（图例+变量占比）/ 柱状图，数据支持 {表达式}。"""
@@ -2197,7 +2437,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QFormLayout, QDoubleSpinBox
 
 from core.registry import register_geo, register_renderer
-from core.variables import eval_expr
+from core.variables import eval_expr, render_template
 from media.base import MediaObject, draw_media_decorations
 from ui import theme
 
@@ -2286,7 +2526,7 @@ def draw_pie(p, obj, view):
         p.setBrush(theme.brush(QColor(color)))
         p.setPen(theme.pen(theme.LABEL, 1))
         p.drawRect(QRectF(legend_x, y + (line_h - box) / 2, box, box))
-        label = obj.labels[i] if i < len(obj.labels) else f"项{i+1}"
+        label = render_template(obj.labels[i]) if i < len(obj.labels) else f"项{i+1}"
         pct = abs(values[i]) / total * 100
         txt = f"{label}: {values[i]:.1f} ({pct:.0f}%)"
         p.setPen(theme.pen(theme.INK, 1))
@@ -2348,7 +2588,7 @@ def draw_bar(p, obj, view):
         p.setPen(theme.pen(theme.BG_TOP, 1))
         p.drawRect(QRectF(x, plot.bottom() - h, bar_w, h))
         # 底部标签
-        label = obj.labels[i] if i < len(obj.labels) else f"项{i+1}"
+        label = render_template(obj.labels[i]) if i < len(obj.labels) else f"项{i+1}"
         p.setPen(theme.pen(theme.INK, 1))
         fh = max(int(rect.height() * 0.06), 8)
         f = p.font(); f.setPixelSize(fh); p.setFont(f)
@@ -2358,33 +2598,52 @@ def draw_bar(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\image_obj.py
-文件名:   image_obj.py
-修改时间: 08/03/2026 11:59:51
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\image_obj.py
+鏂囦欢鍚?   image_obj.py
+淇敼鏃堕棿: 08/04/2026 22:51:01
 ============================================================
 
-"""图像对象：插入图片文件，随画布缩放。"""
-from PySide6.QtGui import QPixmap
+"""图像对象：插入图片文件，随画布缩放。
+支持：
+- 拖动右下角手柄等比放大/缩小
+- 拖动上方圆形手柄旋转
+"""
+
+from PySide6.QtCore import QRectF
+from PySide6.QtGui import QPixmap, QPainter
 
 from core.registry import register_geo, register_renderer
-from media.base import MediaObject
-from ui import theme
 from media.base import MediaObject, draw_media_decorations
 
 
 @register_geo("ImageObject")
 class ImageObject(MediaObject):
+    rotatable = True
+
     def __init__(self, x, y, path, width=None, height=None):
         self.path = path
         self.pixmap = QPixmap(path)
+
         if width is None:
             if self.pixmap.width() > 0:
                 aspect = self.pixmap.height() / self.pixmap.width()
             else:
                 aspect = 0.75
+
             width = 8.0
             height = width * aspect
+
         super().__init__(x, y, width, height)
+
+        # 记录宽高比，用于等比缩放
+        self.aspect = self.height / self.width if self.width > 0 else 1.0
+
+    def resize_to(self, wpt):
+        """图片默认等比缩放。"""
+        new_width = max(wpt[0] - self.x, 0.5)
+
+        self.width = new_width
+        self.height = max(new_width * self.aspect, 0.5)
 
     def dump(self):
         d = super().dump()
@@ -2393,46 +2652,88 @@ class ImageObject(MediaObject):
 
     @classmethod
     def build(cls, parents, params):
-        return cls(params["x"], params["y"], params["path"],
-                   params.get("width"), params.get("height"))
+        obj = cls(
+            params["x"],
+            params["y"],
+            params["path"],
+            params.get("width"),
+            params.get("height")
+        )
+
+        obj.rotation = params.get("rotation", 0.0)
+
+        if obj.width > 0:
+            obj.aspect = obj.height / obj.width
+
+        return obj
 
 
 @register_renderer(ImageObject)
 def draw_image(p, obj, view):
     rect = obj.screen_rect(view)
+
     if not obj.pixmap.isNull():
-        p.drawPixmap(rect.toRect(), obj.pixmap)
-    # 选中时画边框
+        p.save()
+
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+
+        # 以图片中心为旋转中心
+        p.translate(rect.center())
+        p.rotate(getattr(obj, "rotation", 0.0))
+
+        target = QRectF(
+            -rect.width() / 2,
+            -rect.height() / 2,
+            rect.width(),
+            rect.height()
+        )
+
+        p.drawPixmap(target.toRect(), obj.pixmap)
+
+        p.restore()
+
+    # 选中边框、编辑按钮、缩放手柄、旋转手柄
     draw_media_decorations(p, obj, view)
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\insert_tools.py
-文件名:   insert_tools.py
-修改时间: 08/03/2026 20:06:46
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\insert_tools.py
+鏂囦欢鍚?   insert_tools.py
+淇敼鏃堕棿: 08/04/2026 20:16:32
 ============================================================
 
 """插入工具：图像 / 表格 / 饼图 / 柱状图。注册到「插入」菜单（panel="insert"）。"""
+
+from PySide6.QtWidgets import QFileDialog
+
 from core.registry import register_tool
 from tools.base import Tool
-from tools.select import SelectTool            # ★ 新增：用于插入后切回选择工具
+
 from media.image_obj import ImageObject
 from media.table_obj import TableObject
 from media.chart_obj import PieChartObject, BarChartObject
+
+
+def _finish_insert(canvas, obj):
+    """统一完成插入：加入文档、选中、切回选择工具。"""
+    canvas.doc.add(obj)
+    canvas.doc.set_selection([obj])
+
+    # ★ 延迟导入，避免 media.insert_tools ↔ tools.select 循环导入
+    from tools.select import SelectTool
+    canvas.set_tool(SelectTool())
 
 
 @register_tool(name="插入图像", order=1, panel="insert", icon="insert_image",
                hint="点击画布插入图片")
 class InsertImageTool(Tool):
     def press(self, canvas, wpt, hit):
-        from PySide6.QtWidgets import QFileDialog
         path, _ = QFileDialog.getOpenFileName(
             canvas, "选择图片", "", "图片 (*.png *.jpg *.jpeg *.bmp *.gif)")
         if path:
             obj = ImageObject(wpt[0], wpt[1], path)
-            canvas.doc.add(obj)
-            canvas.doc.set_selection([obj])     # ★ 选中新对象
-            canvas.set_tool(SelectTool())       # ★ 切回选择工具
+            _finish_insert(canvas, obj)
 
 
 @register_tool(name="插入表格", order=2, panel="insert", icon="insert_table",
@@ -2440,15 +2741,15 @@ class InsertImageTool(Tool):
 class InsertTableTool(Tool):
     def press(self, canvas, wpt, hit):
         from media.table_wizard import InsertTableWizard
+
         wiz = InsertTableWizard(canvas)
         if wiz.exec():
             rows, cols, cells, cell_colors = wiz.get_table_data()
             width = max(cols * 1.6, 3.0)
             height = max(rows * 1.1, 2.0)
-            obj = TableObject(wpt[0], wpt[1], rows, cols, cells, cell_colors, width, height)
-            canvas.doc.add(obj)
-            canvas.doc.set_selection([obj])     # ★ 选中新对象
-            canvas.set_tool(SelectTool())       # ★ 切回选择工具
+            obj = TableObject(wpt[0], wpt[1], rows, cols, cells, cell_colors,
+                              width, height)
+            _finish_insert(canvas, obj)
 
 
 @register_tool(name="插入饼图", order=3, panel="insert", icon="insert_pie",
@@ -2456,9 +2757,7 @@ class InsertTableTool(Tool):
 class InsertPieTool(Tool):
     def press(self, canvas, wpt, hit):
         obj = PieChartObject(wpt[0], wpt[1])
-        canvas.doc.add(obj)
-        canvas.doc.set_selection([obj])         # ★ 选中新对象
-        canvas.set_tool(SelectTool())           # ★ 切回选择工具
+        _finish_insert(canvas, obj)
 
 
 @register_tool(name="插入柱状图", order=4, panel="insert", icon="insert_bar",
@@ -2466,15 +2765,13 @@ class InsertPieTool(Tool):
 class InsertBarTool(Tool):
     def press(self, canvas, wpt, hit):
         obj = BarChartObject(wpt[0], wpt[1])
-        canvas.doc.add(obj)
-        canvas.doc.set_selection([obj])         # ★ 选中新对象
-        canvas.set_tool(SelectTool())           # ★ 切回选择工具
+        _finish_insert(canvas, obj)
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\pie_wizard.py
-文件名:   pie_wizard.py
-修改时间: 08/03/2026 11:58:20
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\pie_wizard.py
+鏂囦欢鍚?   pie_wizard.py
+淇敼鏃堕棿: 08/03/2026 11:58:20
 ============================================================
 
 """图表数据向导：设置每项的标签 / 数值（支持 {表达式}）/ 颜色。"""
@@ -2616,9 +2913,9 @@ class PieChartWizard(QWizard):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\table_obj.py
-文件名:   table_obj.py
-修改时间: 08/03/2026 11:59:26
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\table_obj.py
+鏂囦欢鍚?   table_obj.py
+淇敼鏃堕棿: 08/04/2026 20:42:24
 ============================================================
 
 """表格对象：可编辑的行列网格，支持每格颜色与 {表达式} 求值。"""
@@ -2626,7 +2923,7 @@ from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor
 
 from core.registry import register_geo, register_renderer
-from core.variables import eval_expr
+from core.variables import render_template
 from media.base import MediaObject
 from ui import theme
 from media.base import MediaObject, draw_media_decorations
@@ -2643,19 +2940,20 @@ class TableObject(MediaObject):
         self.cell_colors = cell_colors or [[None for _ in range(cols)] for _ in range(rows)]
 
     def _eval_cell(self, text):
-        """若 text 形如 {表达式}，求值并返回格式化结果；否则原样返回。"""
+        """支持普通文本、{表达式}、以及混合文本。
+
+        例如：
+            {a}
+            a的值为{a}
+            (a的值为{a})
+        """
+        if text is None:
+            return ""
+
         if not isinstance(text, str):
             return str(text)
-        text = text.strip()
-        if text.startswith("{") and text.endswith("}") and len(text) > 2:
-            expr = text[1:-1].strip()
-            val = eval_expr(expr)
-            if val is not None:
-                if abs(val - round(val)) < 1e-9:
-                    return str(int(round(val)))
-                return f"{val:.2f}"
-            return text          # 求值失败 → 显示原文
-        return text
+
+        return render_template(text)
 
     def dump(self):
         d = super().dump()
@@ -2711,9 +3009,9 @@ def draw_table(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\table_wizard.py
-文件名:   table_wizard.py
-修改时间: 08/03/2026 11:45:44
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\table_wizard.py
+鏂囦欢鍚?   table_wizard.py
+淇敼鏃堕棿: 08/03/2026 11:45:44
 ============================================================
 
 """插入表格向导：指定行列、每格数值与颜色；单元格支持 {表达式}。"""
@@ -2856,9 +3154,9 @@ class InsertTableWizard(QWizard):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\media\__init__.py
-文件名:   __init__.py
-修改时间: 08/02/2026 18:39:03
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/02/2026 18:39:03
 ============================================================
 
 """媒体对象包：图像 / 表格 / 图表。自动扫描子模块触发注册。"""
@@ -2871,9 +3169,9 @@ for _info in pkgutil.iter_modules([_pkg_dir]):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\angle_divide_tool.py
-文件名:   angle_divide_tool.py
-修改时间: 07/26/2026 23:19:32
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\angle_divide_tool.py
+鏂囦欢鍚?   angle_divide_tool.py
+淇敼鏃堕棿: 07/26/2026 23:19:32
 ============================================================
 
 # plugins/angle_divide_tool.py —— n 等分角线
@@ -2984,9 +3282,9 @@ class AngleDivideTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\angle_tool.py
-文件名:   angle_tool.py
-修改时间: 07/30/2026 21:52:32
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\angle_tool.py
+鏂囦欢鍚?   angle_tool.py
+淇敼鏃堕棿: 07/30/2026 21:52:32
 ============================================================
 
 """角度插件：先点顶点再点两侧点，测量夹角（度）。拖动任一点实时刷新。"""
@@ -3110,9 +3408,9 @@ class AngleTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\bezier_tool.py
-文件名:   bezier_tool.py
-修改时间: 07/26/2026 23:45:26
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\bezier_tool.py
+鏂囦欢鍚?   bezier_tool.py
+淇敼鏃堕棿: 07/26/2026 23:45:26
 ============================================================
 
 """贝塞尔曲线插件：4 个控制点确定一条三次贝塞尔曲线。"""
@@ -3201,9 +3499,9 @@ class BezierTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\bisector_tool.py
-文件名:   bisector_tool.py
-修改时间: 07/26/2026 23:19:16
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\bisector_tool.py
+鏂囦欢鍚?   bisector_tool.py
+淇敼鏃堕棿: 07/26/2026 23:19:16
 ============================================================
 
 # plugins/bisector_tool.py —— 角平分线
@@ -3263,9 +3561,9 @@ class BisectorTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\divide_tool.py
-文件名:   divide_tool.py
-修改时间: 07/26/2026 20:10:57
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\divide_tool.py
+鏂囦欢鍚?   divide_tool.py
+淇敼鏃堕棿: 07/26/2026 20:10:57
 ============================================================
 
 """N 等分插件：依次点两个点，把它们的连线段 N 等分（从动，始终保持等分）。"""
@@ -3352,9 +3650,9 @@ class DivideTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\ellipse_tool.py
-文件名:   ellipse_tool.py
-修改时间: 07/26/2026 23:45:03
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\ellipse_tool.py
+鏂囦欢鍚?   ellipse_tool.py
+淇敼鏃堕棿: 07/26/2026 23:45:03
 ============================================================
 
 """椭圆插件：中心 + 两个轴端点确定一个椭圆。点可吸附到椭圆上。"""
@@ -3446,9 +3744,9 @@ class EllipseTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\expr_geo_tools.py
-文件名:   expr_geo_tools.py
-修改时间: 07/30/2026 21:44:37
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\expr_geo_tools.py
+鏂囦欢鍚?   expr_geo_tools.py
+淇敼鏃堕棿: 07/30/2026 21:44:37
 ============================================================
 
 """表达式几何创建入口：表达式圆（点圆心+输入半径表达式）、表达式点（输入 x/y 表达式）。"""
@@ -3497,9 +3795,9 @@ def new_expr_point(parent, doc):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\expr_tools.py
-文件名:   expr_tools.py
-修改时间: 07/29/2026 13:37:35
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\expr_tools.py
+鏂囦欢鍚?   expr_tools.py
+淇敼鏃堕棿: 07/29/2026 13:37:35
 ============================================================
 
 """表达式工具：用变量的代数式创建线段 / 角度（从「变量与函数」菜单启动，不进工具栏）。"""
@@ -3681,9 +3979,9 @@ class ExprAngleTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\line_tool.py
-文件名:   line_tool.py
-修改时间: 07/26/2026 18:20:17
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\line_tool.py
+鏂囦欢鍚?   line_tool.py
+淇敼鏃堕棿: 07/26/2026 18:20:17
 ============================================================
 
 # plugins/line_tool.py
@@ -3771,9 +4069,9 @@ class LineTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\measure_tools.py
-文件名:   measure_tools.py
-修改时间: 08/01/2026 22:47:37
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\measure_tools.py
+鏂囦欢鍚?   measure_tools.py
+淇敼鏃堕棿: 08/01/2026 22:47:37
 ============================================================
 
 """度量工具集：长度、距离、角度、比值、面积、周长、半径、直径、斜率、坐标。
@@ -4111,9 +4409,9 @@ register_tool(name="坐标", order=10, panel="measure", icon="coord",
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\midpoint_tool.py
-文件名:   midpoint_tool.py
-修改时间: 07/26/2026 20:10:42
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\midpoint_tool.py
+鏂囦欢鍚?   midpoint_tool.py
+淇敼鏃堕棿: 07/26/2026 20:10:42
 ============================================================
 
 """中点插件：依次点两个点，得到它们连线段的中点（从动，拖动端点中点跟随）。"""
@@ -4152,9 +4450,9 @@ class MidpointTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\parallel_tool.py
-文件名:   parallel_tool.py
-修改时间: 07/26/2026 23:18:54
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\parallel_tool.py
+鏂囦欢鍚?   parallel_tool.py
+淇敼鏃堕棿: 07/26/2026 23:18:54
 ============================================================
 
 # plugins/parallel_tool.py —— 平行线
@@ -4213,9 +4511,9 @@ class ParallelTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\perp_tool.py
-文件名:   perp_tool.py
-修改时间: 07/26/2026 23:18:38
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\perp_tool.py
+鏂囦欢鍚?   perp_tool.py
+淇敼鏃堕棿: 07/26/2026 23:18:38
 ============================================================
 
 # plugins/perp_tool.py —— 垂线
@@ -4274,9 +4572,9 @@ class PerpTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\polygon.py
-文件名:   polygon.py
-修改时间: 08/01/2026 23:29:05
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\polygon.py
+鏂囦欢鍚?   polygon.py
+淇敼鏃堕棿: 08/01/2026 23:29:05
 ============================================================
 
 """正多边形插件：一个文件即一个完整功能。
@@ -4557,9 +4855,9 @@ def draw_poly_vertex(p, obj, view):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\ratio_tool.py
-文件名:   ratio_tool.py
-修改时间: 07/30/2026 21:52:29
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\ratio_tool.py
+鏂囦欢鍚?   ratio_tool.py
+淇敼鏃堕棿: 07/30/2026 21:52:29
 ============================================================
 
 """比例插件：点两条线段，在左上角以文本显示长度比（最简分数形式）。"""
@@ -4650,9 +4948,9 @@ class RatioTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\ray_tool.py
-文件名:   ray_tool.py
-修改时间: 07/26/2026 18:20:32
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\ray_tool.py
+鏂囦欢鍚?   ray_tool.py
+淇敼鏃堕棿: 07/26/2026 18:20:32
 ============================================================
 
 # plugins/ray_tool.py
@@ -4738,9 +5036,9 @@ class RayTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\text_tool.py
-文件名:   text_tool.py
-修改时间: 07/26/2026 20:11:58
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\text_tool.py
+鏂囦欢鍚?   text_tool.py
+淇敼鏃堕棿: 08/04/2026 20:41:20
 ============================================================
 
 """文本插件：可指定文字、颜色、字号、是否锚定到点。
@@ -4758,6 +5056,7 @@ from geo.base import GeoObject
 from geo.points import nearest_point
 from tools.base import Tool
 from ui import theme
+from core.variables import render_template
 
 TEXT_SIZES = [12, 14, 16, 20, 24, 32, 48]
 SWATCHES = ["#1f2937", "#e03131", "#1971c2", "#2f9e44",
@@ -4796,17 +5095,24 @@ class TextObject(GeoObject):
 
 
 @register_renderer(TextObject)
+@register_renderer(TextObject)
 def draw_text(p, obj, view):
     wx, wy = obj.world_pos()
     sp = view.to_screen(wx, wy) + QPointF(12, 24)     # 显示在锚点右上方
+
     font = QFont()
     font.setPixelSize(obj.size)
     p.setFont(font)
+
     color = QColor(obj.color)
     if obj.selected:
         color = QColor(theme.SELECTED)
+
     p.setPen(theme.pen(color))
-    p.drawText(sp, obj.text)
+
+    # ★ 支持 {变量} / {表达式}
+    display_text = render_template(obj.text)
+    p.drawText(sp, display_text)
 
 
 class TextEditor(QWidget):
@@ -4822,7 +5128,7 @@ class TextEditor(QWidget):
         layout.setSpacing(8)
 
         self._edit = QLineEdit(self)
-        self._edit.setPlaceholderText("输入文本…")
+        self._edit.setPlaceholderText("输入文本，支持 {变量}，如 (a的值为{a})")
         self._edit.setFixedWidth(220)
         layout.addWidget(self._edit)
 
@@ -4939,9 +5245,9 @@ class TextTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\plugins\__init__.py
-文件名:   __init__.py
-修改时间: 07/26/2026 17:55:09
+鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 07/26/2026 17:55:09
 ============================================================
 
 """扩展插件库：把新功能写成本目录下的一个 .py 文件即可。
@@ -4957,9 +5263,9 @@ for _m in pkgutil.iter_modules(__path__):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tests\conftest.py
-文件名:   conftest.py
-修改时间: 08/01/2026 22:30:34
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tests\conftest.py
+鏂囦欢鍚?   conftest.py
+淇敼鏃堕棿: 08/01/2026 22:30:34
 ============================================================
 
 import pytest
@@ -4974,9 +5280,9 @@ def qapp():
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tests\test_attached_point.py
-文件名:   test_attached_point.py
-修改时间: 08/01/2026 22:30:51
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tests\test_attached_point.py
+鏂囦欢鍚?   test_attached_point.py
+淇敼鏃堕棿: 08/01/2026 22:30:51
 ============================================================
 
 """吸附点（PointOnObject）功能测试。
@@ -5123,9 +5429,9 @@ class TestRecomputePropagation:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tests\test_function_curve.py
-文件名:   test_function_curve.py
-修改时间: 08/02/2026 15:13:05
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tests\test_function_curve.py
+鏂囦欢鍚?   test_function_curve.py
+淇敼鏃堕棿: 08/02/2026 15:13:05
 ============================================================
 
 """FunctionCurve 函数绘制功能的单元测试。
@@ -5396,9 +5702,9 @@ class TestObjectState:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\base.py
-文件名:   base.py
-修改时间: 08/01/2026 23:29:52
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\base.py
+鏂囦欢鍚?   base.py
+淇敼鏃堕棿: 08/01/2026 23:29:52
 ============================================================
 
 from __future__ import annotations
@@ -5455,9 +5761,9 @@ class Tool:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\box_select.py
-文件名:   box_select.py
-修改时间: 07/27/2026 14:45:04
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\box_select.py
+鏂囦欢鍚?   box_select.py
+淇敼鏃堕棿: 08/04/2026 20:28:56
 ============================================================
 
 """框选工具：拖拽矩形框批量选择对象（从选择工具中独立出来）。"""
@@ -5467,6 +5773,7 @@ from PySide6.QtGui import QColor
 from core.registry import register_tool
 from geo.points import AbstractPoint
 from tools.base import Tool
+from media.base import MediaObject
 from ui import theme
 
 
@@ -5483,11 +5790,19 @@ def _collect_defining_points(obj, acc, seen):
 
 
 def _object_in_rect(obj, x0, y0, x1, y1):
-    """对象是否落入选框：点看坐标；其他对象看其定义点是否落入。"""
+    """对象是否落入选框：点看坐标；媒体看矩形；其他对象看其定义点是否落入。"""
     if not (obj.visible and obj.exists):
         return False
+
+    # 媒体对象：左上角 (x, y)，底边 y - height
+    if isinstance(obj, MediaObject):
+        rx0, rx1 = obj.x, obj.x + obj.width
+        ry0, ry1 = obj.y - obj.height, obj.y
+        return not (rx1 < x0 or rx0 > x1 or ry1 < y0 or ry0 > y1)
+
     if isinstance(obj, AbstractPoint):
         return x0 <= obj.x <= x1 and y0 <= obj.y <= y1
+
     pts = []
     _collect_defining_points(obj, pts, set())
     return any(x0 <= p.x <= x1 and y0 <= p.y <= y1 for p in pts)
@@ -5540,9 +5855,9 @@ class BoxSelectTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\chain_fill_tool.py
-文件名:   chain_fill_tool.py
-修改时间: 07/28/2026 14:21:00
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\chain_fill_tool.py
+鏂囦欢鍚?   chain_fill_tool.py
+淇敼鏃堕棿: 07/28/2026 14:21:00
 ============================================================
 
 """自由填充工具：点→线段→点→线段… 描出闭合区域并填充。
@@ -5924,9 +6239,9 @@ class ChainFillTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\circle_tool.py
-文件名:   circle_tool.py
-修改时间: 07/25/2026 23:26:09
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\circle_tool.py
+鏂囦欢鍚?   circle_tool.py
+淇敼鏃堕棿: 07/25/2026 23:26:09
 ============================================================
 
 import math
@@ -5976,9 +6291,9 @@ class CircleTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\fixed_angle_tool.py
-文件名:   fixed_angle_tool.py
-修改时间: 07/27/2026 14:46:31
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\fixed_angle_tool.py
+鏂囦欢鍚?   fixed_angle_tool.py
+淇敼鏃堕棿: 07/27/2026 14:46:31
 ============================================================
 
 """定角工具：指定角度，生成一个精确度数的角（顶点 + 两边点 + 角度标注）。"""
@@ -6083,9 +6398,9 @@ class FixedAngleTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\ink_tool.py
-文件名:   ink_tool.py
-修改时间: 08/02/2026 14:52:55
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\ink_tool.py
+鏂囦欢鍚?   ink_tool.py
+淇敼鏃堕棿: 08/02/2026 14:52:55
 ============================================================
 
 """墨迹注释工具：钢笔/荧光笔/铅笔/橡皮擦，可选颜色与透明度，支持撤销单条笔画。"""
@@ -6286,9 +6601,9 @@ class InkTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\intersect_tool.py
-文件名:   intersect_tool.py
-修改时间: 07/26/2026 17:54:32
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\intersect_tool.py
+鏂囦欢鍚?   intersect_tool.py
+淇敼鏃堕棿: 07/26/2026 17:54:32
 ============================================================
 
 """交点工具：依次点两个几何图形 → 生成它们的全部交点。
@@ -6337,9 +6652,9 @@ class IntersectTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\length_seg_tool.py
-文件名:   length_seg_tool.py
-修改时间: 07/27/2026 14:46:05
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\length_seg_tool.py
+鏂囦欢鍚?   length_seg_tool.py
+淇敼鏃堕棿: 07/27/2026 14:46:05
 ============================================================
 
 """定长线段工具：指定长度，沿光标方向生成精确长度的线段。"""
@@ -6437,9 +6752,9 @@ class LengthSegTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\point_tool.py
-文件名:   point_tool.py
-修改时间: 07/25/2026 23:25:47
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\point_tool.py
+鏂囦欢鍚?   point_tool.py
+淇敼鏃堕棿: 07/25/2026 23:25:47
 ============================================================
 
 from core.registry import register_tool
@@ -6454,9 +6769,9 @@ class PointTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\segment_tool.py
-文件名:   segment_tool.py
-修改时间: 07/25/2026 23:25:58
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\segment_tool.py
+鏂囦欢鍚?   segment_tool.py
+淇敼鏃堕棿: 07/25/2026 23:25:58
 ============================================================
 
 from core.registry import register_tool
@@ -6499,9 +6814,9 @@ class SegmentTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\select.py
-文件名:   select.py
-修改时间: 08/03/2026 20:15:34
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\select.py
+鏂囦欢鍚?   select.py
+淇敼鏃堕棿: 08/04/2026 22:53:01
 ============================================================
 
 """选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
@@ -6513,6 +6828,8 @@ from geo.points import AbstractPoint, FreePoint, PointOnObject
 from media.base import MediaObject
 from tools.base import Tool, snap_target
 from ui import theme
+
+import math
 
 
 def _free_points_of(obj, acc, seen):
@@ -6540,6 +6857,8 @@ class SelectTool(Tool):
         self.drag_poo: Optional[PointOnObject] = None
         self.drag_media: Optional[MediaObject] = None
         self.resize_media: Optional[MediaObject] = None
+        self.rotate_media: Optional[MediaObject] = None
+
         self._media_orig: Tuple[float, float] = (0.0, 0.0)
         self._orig_pos: list[Tuple[FreePoint, float, float]] = []
         self._grab_wpt: Optional[Tuple[float, float]] = None
@@ -6598,18 +6917,24 @@ class SelectTool(Tool):
             canvas.doc.set_selection([target])
             if was_selected:
                 sp = canvas.to_screen(wpt[0], wpt[1])
+
+                # ★ 旋转手柄
+                if getattr(target, "rotatable", False):
+                    rr = target.rotate_handle_rect(canvas)
+                    if rr.width() > 0 and rr.contains(sp):
+                        self.rotate_media = target
+                        self._grab_wpt = wpt
+                        return
+
                 if target.edit_button_rect(canvas).contains(sp):
                     target.edit(canvas)
                     self._reset()
                     return
+
                 if target.resize_handle_rect(canvas).contains(sp):
                     self.resize_media = target
                     self._grab_wpt = wpt
                     return
-            self.drag_media = target
-            self._media_orig = (target.x, target.y)
-            self._grab_wpt = wpt
-            return
 
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
@@ -6640,13 +6965,30 @@ class SelectTool(Tool):
 
     def move(self, canvas, wpt, hit):
         if (self.drag_poo is None and not self.drag_pts
-                and self.drag_media is None and self.resize_media is None):
+                and self.drag_media is None and self.resize_media is None
+                and self.rotate_media is None):
             return
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
 
         self._guides = []  # 每次移动清空参考线
+
+        # ★ 旋转媒体对象
+        if self.rotate_media is not None:
+            center = self.rotate_media.screen_rect(canvas).center()
+            cur = canvas.to_screen(wpt[0], wpt[1])
+
+            ang = math.degrees(
+                math.atan2(cur.y() - center.y(), cur.x() - center.x())
+            )
+
+            # 旋转手柄默认在对象正上方，所以 +90°
+            ang += 90.0
+
+            self.rotate_media.rotation = (ang + 360.0) % 360.0
+            canvas.doc.changed.emit()
+            return
 
         if self.resize_media is not None:
             self.resize_media.resize_to(wpt)
@@ -6701,9 +7043,9 @@ class SelectTool(Tool):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\tools\__init__.py
-文件名:   __init__.py
-修改时间: 07/25/2026 20:43:35
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 07/25/2026 20:43:35
 ============================================================
 
 """几何对象库。
@@ -6718,16 +7060,17 @@ for _m in pkgutil.iter_modules(__path__):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\canvas.py
-文件名:   canvas.py
-修改时间: 08/03/2026 16:46:40
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
+鏂囦欢鍚?   canvas.py
+淇敼鏃堕棿: 08/04/2026 22:45:44
 ============================================================
 
 import math
 import os
+import random
 
-from PySide6.QtCore import QPointF, QSize, Qt, Signal
-from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
 from PySide6.QtWidgets import QWidget, QToolButton
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
@@ -6785,7 +7128,15 @@ class Canvas(QWidget):
 
         self.info_panel = InfoPanel(self, self)
 
+        # ================= 雪花彩蛋 =================
+        self._snow_active = False
+        self._snowflakes = []
+        self._snow_timer = QTimer(self)
+        self._snow_timer.setInterval(33)
+        self._snow_timer.timeout.connect(self._tick_snow)
+
         self.refresh_theme()
+        self.update_snow_state()
 
     # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:
@@ -6837,11 +7188,16 @@ class Canvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
             self.render_scene(p)                 # 几何场景（屏幕/导出共用）
+
             # —— 以下仅屏幕显示，不导出 ——
+
+            # ★ snow 彩蛋：标题为 snow 时飘雪花
+            if self._snow_active:
+                self._draw_snow(p)
+
             self._draw_snap_indicator(p)
-            if self.tool is not None:
-                self.tool.draw_overlay(p, self)
         finally:
             p.end()
         self._place_trash()
@@ -7044,10 +7400,16 @@ class Canvas(QWidget):
 
     def resizeEvent(self, ev) -> None:
         self.rail.move(14, 14)
+
         zb = self.zoom_bar
         zb.move(self.width() - zb.width() - 16,
                 self.height() - zb.height() - 16)
+
         self.info_panel.reposition()
+
+        # snow 彩蛋：如果当前没有雪花，但标题仍是 snow，则重新生成
+        if self._snow_active and not self._snowflakes:
+            self._init_snow()
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
@@ -7121,73 +7483,172 @@ class Canvas(QWidget):
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
         self.update()
+    # ================= snow 彩蛋 =================
+
+    def update_snow_state(self):
+        """根据文档标题决定是否开启雪花。"""
+        title = (self.doc.meta.get("title") or "").strip().lower()
+        active = (title == "snow")
+
+        if active and not self._snow_active:
+            self._init_snow()
+            self._snow_timer.start()
+        elif not active and self._snow_active:
+            self._snow_timer.stop()
+            self._snowflakes.clear()
+
+        self._snow_active = active
+        self.update()
+
+    def _init_snow(self):
+        w = max(self.width(), 800)
+        h = max(self.height(), 600)
+
+        self._snowflakes = []
+        for _ in range(140):
+            self._snowflakes.append({
+                "x": random.uniform(0.0, float(w)),
+                "y": random.uniform(0.0, float(h)),
+                "r": random.uniform(1.2, 3.4),
+                "v": random.uniform(0.6, 1.9),
+                "amp": random.uniform(0.2, 0.9),
+                "phase": random.uniform(0.0, 2.0 * math.pi),
+            })
+
+    def _tick_snow(self):
+        if not self._snow_active:
+            return
+
+        w = max(self.width(), 1)
+        h = max(self.height(), 1)
+
+        for f in self._snowflakes:
+            f["y"] += f["v"]
+            f["phase"] += 0.02
+            f["x"] += math.sin(f["phase"]) * f["amp"]
+
+            if f["y"] > h + 6.0:
+                f["y"] = -6.0
+                f["x"] = random.uniform(0.0, float(w))
+
+        self.update()
+
+    def _draw_snow(self, p: QPainter) -> None:
+        p.save()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(255, 255, 255, 190))
+
+        for f in self._snowflakes:
+            p.drawEllipse(QPointF(f["x"], f["y"]), f["r"], f["r"])
+
+        p.restore()
 
 def content_bbox(doc):
-    """所有可见对象的包围盒。函数曲线可能无限延伸，不参与包围盒计算，
-    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。"""
+    """所有可见对象的包围盒。
+    函数曲线可能无限延伸，不参与普通包围盒计算，
+    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。
+    """
     xs, ys = [], []
     funcs = []
+
     for o in doc.objects:
         if not (o.visible and o.exists):
             continue
+
         if isinstance(o, FunctionCurve):
             funcs.append(o)
             continue
-        if isinstance(o, AbstractPoint):
-            xs.append(o.x); ys.append(o.y)
-            continue
-        if hasattr(o, "world_pos"):
+
+        # 媒体对象：左上角世界坐标 + 宽高
+        # 注意：MediaObject 修复后 y 向下增长，即底边是 o.y - o.height
+        if getattr(o, "media", False):
             try:
-                wx, wy = o.world_pos()
-                xs.append(wx); ys.append(wy)
+                xs.append(o.x)
+                xs.append(o.x + o.width)
+                ys.append(o.y)
+                ys.append(o.y - o.height)
                 continue
             except Exception:
                 pass
+
+        if isinstance(o, AbstractPoint):
+            xs.append(o.x)
+            ys.append(o.y)
+            continue
+
+        if hasattr(o, "world_pos"):
+            try:
+                wx, wy = o.world_pos()
+                xs.append(wx)
+                ys.append(wy)
+                continue
+            except Exception:
+                pass
+
         if isinstance(getattr(o, "anchor", None), tuple):
-            xs.append(o.anchor[0]); ys.append(o.anchor[1]); continue
+            xs.append(o.anchor[0])
+            ys.append(o.anchor[1])
+            continue
+
         if isinstance(getattr(o, "label_pos", None), tuple):
-            xs.append(o.label_pos[0]); ys.append(o.label_pos[1]); continue
+            xs.append(o.label_pos[0])
+            ys.append(o.label_pos[1])
+            continue
+
         try:
             for i in range(37):
                 px, py = o.point_at(i / 36)
-                xs.append(px); ys.append(py)
-        except (NotImplementedError, Exception):
+                xs.append(px)
+                ys.append(py)
+        except Exception:
             pass
 
     # 用非函数对象的包围盒（加边距）裁剪函数
     if funcs:
         if xs:
-            x_min, x_max, y_min, y_max = min(xs), max(xs), min(ys), max(ys)
+            x_min, x_max = min(xs), max(xs)
+            y_min, y_max = min(ys), max(ys)
             m = max(x_max - x_min, y_max - y_min) * 0.3 + 2.0
-            cx0, cx1, cy0, cy1 = x_min - m, x_max + m, y_min - m, y_max + m
+            cx0, cx1 = x_min - m, x_max + m
+            cy0, cy1 = y_min - m, y_max + m
         else:
             cx0, cx1, cy0, cy1 = -10.0, 10.0, -10.0, 10.0
+
         for f in funcs:
+            a, b = f._param_domain()
+
             if f.kind == "explicit":
-                a, b = f._param_domain()
-                a, b = max(a, cx0), min(b, cx1)
+                a = max(a, cx0)
+                b = min(b, cx1)
                 if a >= b:
                     a, b = cx0, cx1
-                for i in range(200):
-                    p = f._eval_at(a + (b - a) * i / 199)
+
+                n = 199
+                for i in range(n + 1):
+                    u = a + (b - a) * i / n
+                    p = f._eval_point(u)
                     if p is not None and cy0 <= p[1] <= cy1:
-                        xs.append(p[0]); ys.append(p[1])
+                        xs.append(p[0])
+                        ys.append(p[1])
             else:
-                a, b = f._param_domain()
-                for i in range(300):
-                    p = f._eval_at(a + (b - a) * i / 299)
+                n = 299
+                for i in range(n + 1):
+                    u = a + (b - a) * i / n
+                    p = f._eval_point(u)
                     if p is not None and cx0 <= p[0] <= cx1 and cy0 <= p[1] <= cy1:
-                        xs.append(p[0]); ys.append(p[1])
+                        xs.append(p[0])
+                        ys.append(p[1])
 
     if not xs:
         return None
+
     return min(xs), min(ys), max(xs), max(ys)
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\export_courseware.py
-文件名:   export_courseware.py
-修改时间: 08/03/2026 20:08:33
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\export_courseware.py
+鏂囦欢鍚?   export_courseware.py
+淇敼鏃堕棿: 08/04/2026 20:28:09
 ============================================================
 
 """导出到课件：一键生成课件包（含向导）。
@@ -7255,8 +7716,12 @@ def _render_media_to_base64(obj):
         def __init__(self, obj, scale):
             self.scale = scale
             self.obj = obj
+
         def to_screen(self, x, y):
-            return QPointF((x - self.obj.x) * self.scale, (y - self.obj.y) * self.scale)
+            # 对象左上角映射到 (0, 0)
+            # 世界 y 向上，媒体局部屏幕 y 向下，因此用 obj.y - y
+            return QPointF((x - self.obj.x) * self.scale,
+                           (self.obj.y - y) * self.scale)
             
     mock_view = MockView(obj, view_scale)
     
@@ -7286,25 +7751,57 @@ def _render_media_to_base64(obj):
 
 # ───────────── 表达式转换（Python → JS）─────────────
 def _py_expr_to_js(expr, var_names):
+    """把 GeoSketch 表达式转换成 JSXGraph / JS 表达式。"""
     s = expr.replace("^", "**")
-    s = s.replace("sin(", "Math.sin(")
-    s = s.replace("cos(", "Math.cos(")
-    s = s.replace("tan(", "Math.tan(")
-    s = s.replace("sqrt(", "Math.sqrt(")
-    s = s.replace("abs(", "Math.abs(")
-    s = s.replace("ln(", "Math.log(")
-    s = s.replace("log(", "Math.log10(")
-    s = s.replace("exp(", "Math.exp(")
-    s = re.sub(r'\bpi\b', 'Math.PI', s)
-    s = re.sub(r'\be\b', 'Math.E', s)
-    for v in var_names:
-        s = re.sub(r'\b' + re.escape(v) + r'\b', f'{v}.Value()', s)
+
+    # 长函数名优先，避免 asin 被 sin 误伤
+    funcs = [
+        ("arcsin", "Math.asin"),
+        ("arccos", "Math.acos"),
+        ("arctan", "Math.atan"),
+        ("asin", "Math.asin"),
+        ("acos", "Math.acos"),
+        ("atan", "Math.atan"),
+        ("sinh", "Math.sinh"),
+        ("cosh", "Math.cosh"),
+        ("tanh", "Math.tanh"),
+        ("sqrt", "Math.sqrt"),
+        ("abs", "Math.abs"),
+        ("ln", "Math.log"),
+        ("log", "Math.log10"),
+        ("exp", "Math.exp"),
+        ("sin", "Math.sin"),
+        ("cos", "Math.cos"),
+        ("tan", "Math.tan"),
+
+        # 这三个依赖 _jsx_export 里定义的辅助函数
+        ("cot", "cot"),
+        ("sec", "sec"),
+        ("csc", "csc"),
+    ]
+
+    for py_name, js_name in funcs:
+        s = re.sub(rf"(?<![\w$.]){py_name}\s*\(", js_name + "(", s)
+
+    # 常量
+    s = re.sub(r"(?<![\w$.])pi(?![\w])", "Math.PI", s)
+    s = re.sub(r"(?<![\w$.])π(?![\w])", "Math.PI", s)
+    s = re.sub(r"(?<![\w$.])e(?![\w])", "Math.E", s)
+
+    # 变量滑杆：长变量名优先，避免短名误替换长名
+    for v in sorted(var_names, key=len, reverse=True):
+        s = re.sub(rf"(?<![\w$.]){re.escape(v)}(?![\w])", f"{v}.Value()", s)
+
     return s
 
 
 # ───────────── 交互网页（JSXGraph）─────────────
 def _jsx_export(doc, include_vars=True):
-    lines = []
+    lines = [
+        "function cot(x) { return 1 / Math.tan(x); }",
+        "function sec(x) { return 1 / Math.cos(x); }",
+        "function csc(x) { return 1 / Math.sin(x); }",
+    ]
     names = {}
     counter = [0]
     all_var_names = doc.vars.names()
@@ -7459,27 +7956,45 @@ def _jsx_export(doc, include_vars=True):
                              f"{{strokeColor: '#e8590c', strokeWidth: 2}});")
 
         elif tn == "FunctionCurve":
-            n = nv(); names[obj.id] = n
-            js_expr = _py_expr_to_js(obj.expr, var_names)
+            n = nv()
+            names[obj.id] = n
+
             if obj.kind == "explicit":
-                lines.append(f"var {n} = board.create('functiongraph', "
-                             f"[function(x) {{ return {js_expr}; }}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                # x 是函数自变量，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v != "x"]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
+                lines.append(
+                    f"var {n} = board.create('functiongraph', "
+                    f"[function(x) {{ return {js_expr}; }}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
+
             elif obj.kind == "parametric":
-                js_expr2 = _py_expr_to_js(obj.expr2, var_names)
+                # t 是参数，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v != "t"]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
+                js_expr2 = _py_expr_to_js(obj.expr2, safe_vars)
                 domain = obj.domain or (0, 2 * math.pi)
-                lines.append(f"var {n} = board.create('curve', ["
-                             f"function(t) {{ return {js_expr}; }}, "
-                             f"function(t) {{ return {js_expr2}; }}, "
-                             f"{domain[0]}, {domain[1]}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                lines.append(
+                    f"var {n} = board.create('curve', ["
+                    f"function(t) {{ return {js_expr}; }}, "
+                    f"function(t) {{ return {js_expr2}; }}, "
+                    f"{domain[0]}, {domain[1]}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
+
             elif obj.kind == "polar":
+                # t / θ 都是极坐标参数，不能被滑杆变量替换
+                safe_vars = [v for v in var_names if v not in ("t", "θ")]
+                js_expr = _py_expr_to_js(obj.expr, safe_vars)
                 domain = obj.domain or (0, 2 * math.pi)
-                lines.append(f"var {n} = board.create('curve', ["
-                             f"function(t) {{ return {js_expr} * Math.cos(t); }}, "
-                             f"function(t) {{ return {js_expr} * Math.sin(t); }}, "
-                             f"{domain[0]}, {domain[1]}], "
-                             f"{{strokeColor: '{obj.color}', strokeWidth: 2}});")
+                lines.append(
+                    f"var {n} = board.create('curve', ["
+                    f"function(t) {{ return {js_expr} * Math.cos(t); }}, "
+                    f"function(t) {{ return {js_expr} * Math.sin(t); }}, "
+                    f"{domain[0]}, {domain[1]}], "
+                    f"{{strokeColor: '{obj.color}', strokeWidth: 2}});"
+                )
 
         # ★ 新增：墨迹笔画
         elif tn == "InkStroke":
@@ -7709,9 +8224,9 @@ def export_courseware(canvas, parent=None):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\export_wizard.py
-文件名:   export_wizard.py
-修改时间: 07/27/2026 14:26:07
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\export_wizard.py
+鏂囦欢鍚?   export_wizard.py
+淇敼鏃堕棿: 07/27/2026 14:26:07
 ============================================================
 
 """导出向导：可视化配置导出选项，带实时预览。
@@ -7867,9 +8382,9 @@ class ExportWizard(QDialog):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\formula_editor.py
-文件名:   formula_editor.py
-修改时间: 07/30/2026 18:08:10
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\formula_editor.py
+鏂囦欢鍚?   formula_editor.py
+淇敼鏃堕棿: 07/30/2026 18:08:10
 ============================================================
 
 """函数编辑器：Desmos 风格 —— 虚拟数学键盘 + 实时数学预览。"""
@@ -8153,9 +8668,9 @@ class FormulaEditor(QDialog):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\function_panel.py
-文件名:   function_panel.py
-修改时间: 08/01/2026 23:32:05
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\function_panel.py
+鏂囦欢鍚?   function_panel.py
+淇敼鏃堕棿: 08/01/2026 23:32:05
 ============================================================
 
 """函数编辑器：可折叠的停靠侧栏（QDockWidget），函数显示于此。"""
@@ -8404,9 +8919,9 @@ class FunctionEditorDock(QDockWidget):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\icons.py
-文件名:   icons.py
-修改时间: 08/03/2026 10:24:36
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\icons.py
+鏂囦欢鍚?   icons.py
+淇敼鏃堕棿: 08/04/2026 20:24:10
 ============================================================
 
 """图标库：基于轻量第三方库 qtawesome（内置 Font Awesome / Material Design Icons）。
@@ -8425,43 +8940,40 @@ from ui import theme
 # 工具键 → 候选图标名（按序尝试，全部失败则返回空图标）
 TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "select":    ("fa5s.mouse-pointer", "fa.mouse-pointer", "mdi.cursor-default-outline"),
-    "point":     ("fa5s.dot-circle",    "fa.dot-circle-o",  "mdi.circle-small"),
-    "segment":   ("fa5s.slash",         "mdi.vector-line",  "fa.minus"),
-    "circle":    ("fa5.circle",         "mdi.circle-outline", "fa5s.circle"),
-    "intersect": ("fa5s.crosshairs",    "fa.crosshairs",    "mdi.target"),
-    "polygon":   ("fa5s.draw-polygon",  "mdi.vector-polygon", "fa5s.shapes"),
-    "midpoint":  ("mdi.circle-double",        "fa5s.dot-circle"),
-    "divide":    ("fa5s.divide",              "mdi.division"),
-    "line":      ("mdi.vector-line",          "fa5s.minus"),
-    "ray":       ("fa5s.long-arrow-alt-right","mdi.arrow-right-bold"),
-    "angle":     ("fa5s.drafting-compass",    "mdi.angle-acute"),
-    "ratio":     ("fa5s.balance-scale",       "mdi.scale-balance"),
-    "text":      ("fa5s.font",                "mdi.format-text"),
-    "perp":         ("mdi.angle-right",        "fa5s.drafting-compass"),
-    "parallel":     ("fa5s.equals",            "mdi.vector-parallel"),
-    "bisector":     ("fa5s.drafting-compass",  "mdi.vector-radius"),
-    "angle_divide": ("fa5s.chart-pie",         "mdi.pie-chart-outline"),
-    "ellipse":  ("mdi.ellipse-outline", "fa5s.circle"),
-    "bezier":   ("fa5s.bezier-curve",   "mdi.vector-bezier"),
-    "box":        ("fa5s.vector-square",  "mdi.vector-rectangle"),
-    "length":     ("mdi.ruler",           "fa5s.ruler-horizontal"),
-    "fixedangle": ("mdi.angle-acute",     "fa5s.drafting-compass"),
-    "freefill":  ("fa5s.shapes",  "mdi.shape"),
-    "length":    ("fa5s.ruler",            "mdi.ruler"),
-    "distance":  ("fa5s.arrows-alt-h",     "mdi.arrow-expand-horizontal"),
+    "point":     ("fa5s.dot-circle", "fa.dot-circle-o", "mdi.circle-small"),
+    "segment":   ("fa5s.slash", "mdi.vector-line", "fa.minus"),
+    "circle":    ("fa5.circle", "mdi.circle-outline", "fa5s.circle"),
+    "intersect": ("fa5s.crosshairs", "fa.crosshairs", "mdi.target"),
+    "polygon":   ("fa5s.draw-polygon", "mdi.vector-polygon", "fa5s.shapes"),
+    "midpoint":  ("mdi.circle-double", "fa5s.dot-circle"),
+    "divide":    ("fa5s.divide", "mdi.division"),
+    "line":      ("mdi.vector-line", "fa5s.minus"),
+    "ray":       ("fa5s.long-arrow-alt-right", "mdi.arrow-right-bold"),
     "angle":     ("fa5s.drafting-compass", "mdi.angle-acute"),
-    "ratio":     ("fa5s.balance-scale",    "mdi.scale-balance"),
-    "area":      ("fa5s.draw-polygon",     "mdi.texture-box"),
-    "perimeter": ("fa5s.vector-square",    "mdi.ruler-square"),
-    "radius":    ("fa5s.circle-notch",     "mdi.radius"),
-    "diameter":  ("fa5s.circle",           "mdi.circle-diameter"),
-    "slope":     ("fa5s.chart-line",       "mdi.slope-downhill"),
-    "coord":     ("fa5s.crosshairs",       "mdi.crosshairs-gps"),
-    "ink":  ("fa5s.pen-fancy",  "mdi.fountain-pen-tip"),
-    "insert_image":  ("fa5s.image",      "mdi.image"),
-    "insert_table":  ("fa5s.table",      "mdi.table"),
-    "insert_pie":    ("fa5s.chart-pie",  "mdi.chart-pie"),
-    "insert_bar":    ("fa5s.chart-bar",  "mdi.chart-bar"),
+    "ratio":     ("fa5s.balance-scale", "mdi.scale-balance"),
+    "text":      ("fa5s.font", "mdi.format-text"),
+    "perp":      ("mdi.angle-right", "fa5s.drafting-compass"),
+    "parallel":  ("fa5s.equals", "mdi.vector-parallel"),
+    "bisector":  ("fa5s.drafting-compass", "mdi.vector-radius"),
+    "angle_divide": ("fa5s.chart-pie", "mdi.pie-chart-outline"),
+    "ellipse":   ("mdi.ellipse-outline", "fa5s.circle"),
+    "bezier":    ("fa5s.bezier-curve", "mdi.vector-bezier"),
+    "box":       ("fa5s.vector-square", "mdi.vector-rectangle"),
+    "length":    ("fa5s.ruler", "mdi.ruler"),
+    "fixedangle": ("mdi.angle-acute", "fa5s.drafting-compass"),
+    "freefill":  ("fa5s.shapes", "mdi.shape"),
+    "distance":  ("fa5s.arrows-alt-h", "mdi.arrow-expand-horizontal"),
+    "area":      ("fa5s.draw-polygon", "mdi.texture-box"),
+    "perimeter": ("fa5s.vector-square", "mdi.ruler-square"),
+    "radius":    ("fa5s.circle-notch", "mdi.radius"),
+    "diameter":  ("fa5s.circle", "mdi.circle-diameter"),
+    "slope":     ("fa5s.chart-line", "mdi.slope-downhill"),
+    "coord":     ("fa5s.crosshairs", "mdi.crosshairs-gps"),
+    "ink":       ("fa5s.pen-fancy", "mdi.fountain-pen-tip"),
+    "insert_image": ("fa5s.image", "mdi.image"),
+    "insert_table": ("fa5s.table", "mdi.table"),
+    "insert_pie":   ("fa5s.chart-pie", "mdi.chart-pie"),
+    "insert_bar":   ("fa5s.chart-bar", "mdi.chart-bar"),
 }
 
 
@@ -8507,9 +9019,9 @@ def build_tool_icon(spec: dict) -> QIcon:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\info_panel.py
-文件名:   info_panel.py
-修改时间: 07/27/2026 14:46:46
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\info_panel.py
+鏂囦欢鍚?   info_panel.py
+淇敼鏃堕棿: 08/04/2026 20:21:43
 ============================================================
 
 """信息面板：选中几何图形后浮动显示其属性（支持多边形等全部对象），拖动时实时刷新。"""
@@ -8569,7 +9081,10 @@ def describe(obj):
     elif n == "RatioMeasure":
         rows.append(("长度₁", f"{obj.l1:.3f}"))
         rows.append(("长度₂", f"{obj.l2:.3f}"))
-        rows.append(("比值", f"{obj.ratio:.3f}"))
+        if obj.den:
+            rows.append(("比值", f"{obj.num / obj.den:.3f}"))
+        else:
+            rows.append(("比值", "∞"))
     elif n == "Ray":
         rows.append(("端点", f"({obj.origin.x:.2f}, {obj.origin.y:.2f})"))
     elif n == "TextObject":
@@ -8635,9 +9150,9 @@ class InfoPanel(QWidget):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\main_window.py
-文件名:   main_window.py
-修改时间: 08/03/2026 20:33:57
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\main_window.py
+鏂囦欢鍚?   main_window.py
+淇敼鏃堕棿: 08/04/2026 22:47:08
 ============================================================
 
 import datetime
@@ -8685,6 +9200,7 @@ class MainWindow(QMainWindow):
         self._build_var_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
+        self.canvas.update_snow_state()
 
     def _create_tool_actions(self) -> None:
         for spec in TOOL_REGISTRY:
@@ -8949,27 +9465,34 @@ class MainWindow(QMainWindow):
             self, "打开", "", "GeoSketch 文件 (*.wgeo)")
         if path:
             self.doc.load(path)
+            self.canvas.update_snow_state()
             
     def _doc_info(self) -> None:
         title, ok = QInputDialog.getText(
             self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))
         if not ok:
             return
+
         author, ok2 = QInputDialog.getText(
             self, "文档信息", "作者（可留空，不强制署名）：",
             text=self.doc.meta.get("author", ""))
+
         self.doc.meta["title"] = title
         if ok2:
             self.doc.meta["author"] = author
+
         # 标题显示在窗口标题栏
         base = "GeoSketch · 几何画板"
         self.setWindowTitle(f"{title} - {base}" if title else base)
 
+        # ★ snow 彩蛋：标题变化后检查是否下雪
+        self.canvas.update_snow_state()
+
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\theme.py
-文件名:   theme.py
-修改时间: 08/02/2026 14:43:11
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\theme.py
+鏂囦欢鍚?   theme.py
+淇敼鏃堕棿: 08/02/2026 14:43:11
 ============================================================
 
 """多主题系统：内置 4 套主题，运行时动态切换。
@@ -9216,9 +9739,9 @@ def import_theme(path):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\theme_editor.py
-文件名:   theme_editor.py
-修改时间: 08/02/2026 14:53:45
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\theme_editor.py
+鏂囦欢鍚?   theme_editor.py
+淇敼鏃堕棿: 08/02/2026 14:53:45
 ============================================================
 
 """自定义主题编辑器：可视化调整所有颜色项，支持保存/导入/导出/实时应用。"""
@@ -9402,9 +9925,9 @@ class ThemeEditorDialog(QDialog):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\tool_rail.py
-文件名:   tool_rail.py
-修改时间: 07/26/2026 18:30:10
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\tool_rail.py
+鏂囦欢鍚?   tool_rail.py
+淇敼鏃堕棿: 07/26/2026 18:30:10
 ============================================================
 
 """左侧悬浮工具栏：磨砂玻璃质感，按钮由 TOOL_REGISTRY 中 panel="rail" 的工具生成。
@@ -9460,9 +9983,9 @@ class ToolRail(QWidget):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\variable_widgets.py
-文件名:   variable_widgets.py
-修改时间: 08/03/2026 20:54:04
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\variable_widgets.py
+鏂囦欢鍚?   variable_widgets.py
+淇敼鏃堕棿: 08/04/2026 20:18:40
 ============================================================
 
 """变量 UI：两步创建向导 + 画布左下角的滑杆面板。"""
@@ -9694,21 +10217,17 @@ class VariableRangeDialog(QDialog):
         form.addRow(btns)
 
     def result_data(self):
-        name = self._name_page.edit.text().strip()
-        vp = self._value_page
-        if vp.is_dependent.isChecked():
-            return name, 0.0, 0.0, 10.0, vp.expr_edit.text().strip()
-        lo, hi = vp.vmin.value(), vp.vmax.value()
+        lo = self.vmin.value()
+        hi = self.vmax.value()
         if lo > hi:
             lo, hi = hi, lo
-        val = min(max(vp.value.value(), lo), hi)
-        return name, val, lo, hi, ""
+        return lo, hi
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\zoom_bar.py
-文件名:   zoom_bar.py
-修改时间: 07/26/2026 18:30:19
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\zoom_bar.py
+鏂囦欢鍚?   zoom_bar.py
+淇敼鏃堕棿: 07/26/2026 18:30:19
 ============================================================
 
 """右下角缩放控件：以画布中心为锚点缩放；滚轮缩放仍以光标为锚点。
@@ -9760,17 +10279,17 @@ class ZoomBar(QWidget):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\__init__.py
-文件名:   __init__.py
-修改时间: 07/25/2026 20:40:52
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 07/25/2026 20:40:52
 ============================================================
 
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\math\font.py
-文件名:   font.py
-修改时间: 07/29/2026 14:08:15
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\font.py
+鏂囦欢鍚?   font.py
+淇敼鏃堕棿: 07/29/2026 14:08:15
 ============================================================
 
 """数学字体加载：优先随包的 STIX Two Math，逐级回退系统数学/衬线字体。"""
@@ -9835,9 +10354,9 @@ def family_name():
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\math\layout.py
-文件名:   layout.py
-修改时间: 07/29/2026 14:09:05
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\layout.py
+鏂囦欢鍚?   layout.py
+淇敼鏃堕棿: 07/29/2026 14:09:05
 ============================================================
 
 """布局引擎：两遍走 AST——measure 算出 (宽, 升, 降)，draw 按基线矢量绘制。
@@ -10028,9 +10547,9 @@ class MathLayout:
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\math\parser.py
-文件名:   parser.py
-修改时间: 07/30/2026 21:16:33
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\parser.py
+鏂囦欢鍚?   parser.py
+淇敼鏃堕棿: 07/30/2026 21:16:33
 ============================================================
 
 """迷你数学排版器：词法/语法分析，输出 AST。
@@ -10232,9 +10751,9 @@ def parse(text):
 
 
 ============================================================
-文件路径: C:\PythonProjects\geosketch\ui\math\__init__.py
-文件名:   __init__.py
-修改时间: 07/29/2026 14:09:18
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 07/29/2026 14:09:18
 ============================================================
 
 """迷你数学排版器对外接口：draw_math / measure_math。"""
