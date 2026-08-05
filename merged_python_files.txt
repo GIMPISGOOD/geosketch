@@ -5702,6 +5702,228 @@ class TestObjectState:
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tests\test_overlay_visible.py
+鏂囦欢鍚?   test_overlay_visible.py
+淇敼鏃堕棿: 08/05/2026 12:38:27
+============================================================
+
+"""工具覆盖层 draw_overlay 可见性回归测试。
+
+用于防止：
+1. 画圆预览圆/半径不见
+2. 框选框不见
+3. 选择工具红色参考线不见
+4. 某个对象渲染异常导致整个 overlay 层被吞掉
+
+运行：
+    python -m pytest tests/test_overlay_visible.py -v
+"""
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtWidgets import QApplication
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+# ------------------------------------------------------------
+# 工具函数
+# ------------------------------------------------------------
+
+def _make_canvas():
+    from core.document import Document
+    from ui.canvas import Canvas
+
+    doc = Document()
+    canvas = Canvas(doc)
+
+    canvas.resize(360, 240)
+    canvas.origin = QPointF(180.0, 120.0)
+    canvas.scale = 20.0
+
+    return canvas
+
+
+def _non_white_count(img: QImage, step=2):
+    count = 0
+    for y in range(0, img.height(), step):
+        for x in range(0, img.width(), step):
+            c = img.pixelColor(x, y)
+            if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
+                count += 1
+    return count
+
+
+# ------------------------------------------------------------
+# 1. paintEvent 必须执行 tool.draw_overlay
+# ------------------------------------------------------------
+
+class _OverlayProbeTool:
+    """探针工具：只要 draw_overlay 被调用，就把画布涂红。"""
+    hint = "probe"
+    def activated(self, canvas): pass
+    def deactivated(self, canvas): pass
+    def press(self, canvas, wpt, hit): pass
+    def move(self, canvas, wpt, hit): pass
+    def release(self, canvas, wpt, hit): pass
+    def cancel(self, canvas): pass
+    def draw_overlay(self, p, view):
+        p.fillRect(view.rect(), QColor(255, 0, 0))
+
+
+def test_paint_event_executes_tool_overlay():
+    """验证 Canvas.paintEvent 源码中是否包含调用 draw_overlay 的逻辑。
+    使用源码检查可以避免 Qt 离屏渲染 (offscreen) 下 QWidget 未显示时
+    QPainter(self) 报错的底层限制。"""
+    import inspect
+    from ui.canvas import Canvas
+    
+    source = inspect.getsource(Canvas.paintEvent)
+    
+    assert "draw_overlay" in source, (
+        "Canvas.paintEvent 源码中没有找到 draw_overlay 调用。"
+        "请确保 paintEvent 中包含 self.tool.draw_overlay(p, self)。"
+    )
+
+
+# ------------------------------------------------------------
+# 2. 画圆工具预览必须可见
+# ------------------------------------------------------------
+
+def test_circle_tool_preview_visible():
+    from geo.points import FreePoint
+    from tools.circle_tool import CircleTool
+
+    canvas = _make_canvas()
+    tool = CircleTool()
+    tool.center = FreePoint(0.0, 0.0)
+    canvas.cursor_wpt = (3.0, 0.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    assert _non_white_count(img) > 20, (
+        "画圆工具预览不可见。"
+        "请检查 theme.dashed_pen 是否返回了有效画笔，"
+        "以及 CircleTool.draw_overlay 是否正常绘制。"
+    )
+
+
+# ------------------------------------------------------------
+# 3. 画圆工具半径线必须可见
+# ------------------------------------------------------------
+
+def test_circle_tool_radius_line_visible():
+    from geo.points import FreePoint
+    from tools.circle_tool import CircleTool
+
+    canvas = _make_canvas()
+    tool = CircleTool()
+    tool.center = FreePoint(0.0, 0.0)
+    canvas.cursor_wpt = (4.0, 0.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    # 半径线在 y=120 附近，从 x=180 到 x=260
+    marked = 0
+    y = int(canvas.origin.y())
+    for x in range(int(canvas.origin.x()), int(canvas.origin.x() + 4.0 * canvas.scale), 2):
+        c = img.pixelColor(x, y)
+        if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
+            marked += 1
+
+    assert marked > 5, (
+        "画圆工具半径预览线不可见。"
+        "请检查 CircleTool.draw_overlay 是否画了 p.drawLine(center, cursor)。"
+    )
+
+
+# ------------------------------------------------------------
+# 4. 选择工具红色参考线必须可见
+# ------------------------------------------------------------
+
+def test_select_tool_red_guide_visible():
+    from tools.select import SelectTool
+
+    canvas = _make_canvas()
+    tool = SelectTool()
+    tool._guides = [("v", 0.0)]
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    # ★ 关闭抗锯齿，避免边缘颜色与白色背景混合导致阈值判断失败
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    x = int(canvas.origin.x())
+    red_found = False
+
+    # ★ 逐像素扫描(step=1)，避免虚线间隙导致漏判
+    for y in range(0, img.height(), 1):
+        c = img.pixelColor(x, y)
+        # 判断是否为明显的红色（红色通道显著大于绿/蓝通道）
+        if c.red() > 150 and c.red() > c.green() + 30 and c.red() > c.blue() + 30:
+            red_found = True
+            break
+
+    assert red_found, (
+        "选择工具红色参考线不可见。"
+        "请检查 SelectTool.draw_overlay 和 theme.dashed_pen。"
+    )
+
+
+# ------------------------------------------------------------
+# 5. 框选工具预览必须可见
+# ------------------------------------------------------------
+
+def test_box_select_overlay_visible():
+    from tools.box_select import BoxSelectTool
+
+    canvas = _make_canvas()
+    tool = BoxSelectTool()
+    tool.box_start = (-4.0, -2.0)
+    tool.box_end = (4.0, 2.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    assert _non_white_count(img) > 50, (
+        "框选工具预览框不可见。"
+        "请检查 BoxSelectTool.draw_overlay。"
+    )
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\base.py
 鏂囦欢鍚?   base.py
 淇敼鏃堕棿: 08/01/2026 23:29:52
@@ -6241,7 +6463,7 @@ class ChainFillTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\circle_tool.py
 鏂囦欢鍚?   circle_tool.py
-淇敼鏃堕棿: 07/25/2026 23:26:09
+淇敼鏃堕棿: 08/05/2026 12:34:18
 ============================================================
 
 import math
@@ -6282,12 +6504,23 @@ class CircleTool(Tool):
     def draw_overlay(self, p, view):
         if self.center is None:
             return
+
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
-        c = view.to_screen(self.center.x, self.center.y)
-        r = (math.hypot(view.cursor_wpt[0] - self.center.x,
-                        view.cursor_wpt[1] - self.center.y) * view.scale)
-        p.drawEllipse(c, r, r)
+
+        center_sp = view.to_screen(self.center.x, self.center.y)
+        cursor_sp = view.to_screen(*view.cursor_wpt)
+
+        r = math.hypot(
+            view.cursor_wpt[0] - self.center.x,
+            view.cursor_wpt[1] - self.center.y
+        ) * view.scale
+
+        # 预览圆
+        p.drawEllipse(center_sp, r, r)
+
+        # ★ 半径预览线：圆心 → 当前光标
+        p.drawLine(center_sp, cursor_sp)
 
 
 ============================================================
@@ -7060,9 +7293,1541 @@ for _m in pkgutil.iter_modules(__path__):
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\apply.py
+鏂囦欢鍚?   apply.py
+淇敼鏃堕棿: 08/04/2026 23:15:00
+============================================================
+
+"""把 TransformDriver 应用到选中对象，并支持深度迭代。"""
+
+from geo.points import AbstractPoint
+from geo.segments import Segment
+from geo.circles import Circle
+
+from plugins.line_tool import Line
+from plugins.ray_tool import Ray
+from plugins.ellipse_tool import Ellipse
+from plugins.polygon import RegularPolygon
+
+from transforms.objects import TransformPoint, CircleAxisPoint, InvertedCircle
+
+
+def create_transformed_copies(doc, driver, targets, depth=1):
+    """对 targets 应用 driver，depth 表示迭代层数。"""
+    depth = max(1, int(depth))
+    created = []
+
+    doc.begin_action()
+    try:
+        if driver not in doc.objects:
+            doc.add(driver)
+
+        for src in targets:
+            created.extend(_iterate_one(doc, driver, src, depth))
+    finally:
+        doc.end_action()
+
+    doc.changed.emit()
+    return created
+
+
+# ------------------------------------------------------------
+# 单一对象迭代
+# ------------------------------------------------------------
+
+def _iterate_one(doc, driver, src, depth):
+    created = []
+
+    # ---------------- 点 ----------------
+    if isinstance(src, AbstractPoint):
+        cur = src
+        for _ in range(depth):
+            p = TransformPoint(driver, cur)
+            doc.add(p)
+            created.append(p)
+            cur = p
+        return created
+
+    # ---------------- 反演：只支持点/圆 ----------------
+    if driver.kind == "invert":
+        if isinstance(src, Circle) or isinstance(src, InvertedCircle):
+            cur = src
+            for _ in range(depth):
+                ic = InvertedCircle(driver, cur)
+                doc.add(ic)
+                created.append(ic)
+                cur = ic
+            return created
+
+        # 线段/直线/射线等暂不支持反演
+        return []
+
+    # ---------------- 线段 ----------------
+    if isinstance(src, Segment):
+        a, b = src.a, src.b
+
+        for _ in range(depth):
+            ta = TransformPoint(driver, a)
+            tb = TransformPoint(driver, b)
+
+            doc.add(ta)
+            doc.add(tb)
+
+            seg = Segment(ta, tb)
+            doc.add(seg)
+
+            created.append(seg)
+            a, b = ta, tb
+
+        return created
+
+    # ---------------- 直线 ----------------
+    if isinstance(src, Line):
+        a, b = src.a, src.b
+
+        for _ in range(depth):
+            ta = TransformPoint(driver, a)
+            tb = TransformPoint(driver, b)
+
+            doc.add(ta)
+            doc.add(tb)
+
+            line = Line(ta, tb)
+            doc.add(line)
+
+            created.append(line)
+            a, b = ta, tb
+
+        return created
+
+    # ---------------- 射线 ----------------
+    if isinstance(src, Ray):
+        a, b = src.origin, src.through
+
+        for _ in range(depth):
+            ta = TransformPoint(driver, a)
+            tb = TransformPoint(driver, b)
+
+            doc.add(ta)
+            doc.add(tb)
+
+            ray = Ray(ta, tb)
+            doc.add(ray)
+
+            created.append(ray)
+            a, b = ta, tb
+
+        return created
+
+    # ---------------- 圆 ----------------
+    if isinstance(src, Circle):
+        # 相似变换：圆仍映射为圆
+        if driver.similarity:
+            center = src.center
+            through = src.through
+
+            for _ in range(depth):
+                tc = TransformPoint(driver, center)
+                tt = TransformPoint(driver, through)
+
+                doc.add(tc)
+                doc.add(tt)
+
+                cir = Circle(tc, tt)
+                doc.add(cir)
+
+                created.append(cir)
+                center, through = tc, tt
+
+            return created
+
+        # 仿射变换：圆映射为椭圆
+        ax = CircleAxisPoint(src, 0)
+        ay = CircleAxisPoint(src, 1)
+
+        doc.add(ax)
+        doc.add(ay)
+
+        return _iterate_ellipse(doc, driver, src.center, ax, ay, depth)
+
+    # ---------------- 椭圆 ----------------
+    if isinstance(src, Ellipse):
+        return _iterate_ellipse(doc, driver, src.center, src.axis_a, src.axis_b, depth)
+
+    # ---------------- 正多边形 ----------------
+    if isinstance(src, RegularPolygon):
+        # 一般仿射会把正多边形变成非正多边形，这里只在相似变换下支持
+        if driver.similarity:
+            center = src.center
+            vertex = src.vertex
+
+            for _ in range(depth):
+                tc = TransformPoint(driver, center)
+                tv = TransformPoint(driver, vertex)
+
+                doc.add(tc)
+                doc.add(tv)
+
+                poly = RegularPolygon(tc, tv, src.n)
+                doc.add(poly)
+
+                created.append(poly)
+                center, vertex = tc, tv
+
+            return created
+
+        return []
+
+    return created
+
+
+# ------------------------------------------------------------
+# 椭圆迭代
+# ------------------------------------------------------------
+
+def _iterate_ellipse(doc, driver, center, axis_a, axis_b, depth):
+    created = []
+
+    c = center
+    a = axis_a
+    b = axis_b
+
+    for _ in range(depth):
+        tc = TransformPoint(driver, c)
+        ta = TransformPoint(driver, a)
+        tb = TransformPoint(driver, b)
+
+        doc.add(tc)
+        doc.add(ta)
+        doc.add(tb)
+
+        ell = Ellipse(tc, ta, tb)
+        doc.add(ell)
+
+        created.append(ell)
+
+        c, a, b = tc, ta, tb
+
+    return created
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\base.py
+鏂囦欢鍚?   base.py
+淇敼鏃堕棿: 08/04/2026 23:14:26
+============================================================
+
+"""变换数学基础：表达式求值、矩阵、仿射求解。"""
+
+import math
+from core.variables import eval_expr
+
+
+def eval_num(expr, default=0.0):
+    """把表达式求值为 float。支持 {a}、a、2*a+1 等。"""
+    if expr is None:
+        return default
+
+    if isinstance(expr, (int, float)):
+        return float(expr)
+
+    s = str(expr).strip()
+    if not s:
+        return default
+
+    if s.startswith("{") and s.endswith("}"):
+        s = s[1:-1].strip()
+
+    v = eval_expr(s)
+    if v is None:
+        return default
+
+    try:
+        if math.isfinite(float(v)):
+            return float(v)
+    except Exception:
+        pass
+
+    return default
+
+
+def identity():
+    return (1.0, 0.0, 0.0,
+            0.0, 1.0, 0.0)
+
+
+def translation(dx, dy):
+    return (1.0, 0.0, float(dx),
+            0.0, 1.0, float(dy))
+
+
+def matrix_around(a, b, d, e, cx, cy):
+    """以 (cx, cy) 为中心套用线性部分 [[a,b],[d,e]]。"""
+    c = cx - a * cx - b * cy
+    f = cy - d * cx - e * cy
+    return (a, b, c, d, e, f)
+
+
+def rotation_matrix(cx, cy, angle_deg):
+    ang = math.radians(angle_deg)
+    a = math.cos(ang)
+    b = -math.sin(ang)
+    d = math.sin(ang)
+    e = math.cos(ang)
+    return matrix_around(a, b, d, e, cx, cy)
+
+
+def scale_matrix(cx, cy, s):
+    return matrix_around(s, 0.0, 0.0, s, cx, cy)
+
+
+def reflect_matrix(x1, y1, x2, y2):
+    """关于直线 P1P2 的反射矩阵。"""
+    dx = x2 - x1
+    dy = y2 - y1
+    L2 = dx * dx + dy * dy
+
+    if L2 < 1e-12:
+        return None
+
+    a = (dx * dx - dy * dy) / L2
+    b = 2.0 * dx * dy / L2
+
+    # 线性部分 [[a,b],[b,-a]]
+    c = x1 - (a * x1 + b * y1)
+    f = y1 - (b * x1 - a * y1)
+
+    return (a, b, c, b, -a, f)
+
+
+def apply_matrix(m, x, y):
+    a, b, c, d, e, f = m
+    return (a * x + b * y + c,
+            d * x + e * y + f)
+
+
+def _det3(m):
+    return (
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    )
+
+
+def _solve3(A, b):
+    D = _det3(A)
+    if abs(D) < 1e-12:
+        return None
+
+    def replace(col):
+        return [
+            [b[i] if j == col else A[i][j] for j in range(3)]
+            for i in range(3)
+        ]
+
+    return [_det3(replace(col)) / D for col in range(3)]
+
+
+def solve_affine(src, dst):
+    """由三组对应点求仿射矩阵。
+
+    src = [(x1,y1), (x2,y2), (x3,y3)]
+    dst = [(X1,Y1), (X2,Y2), (X3,Y3)]
+
+    返回 (a,b,c,d,e,f)，满足：
+        X = a*x + b*y + c
+        Y = d*x + e*y + f
+    """
+    if len(src) != 3 or len(dst) != 3:
+        return None
+
+    A = [[p[0], p[1], 1.0] for p in src]
+
+    bx = [p[0] for p in dst]
+    by = [p[1] for p in dst]
+
+    abc = _solve3(A, bx)
+    deff = _solve3(A, by)
+
+    if abc is None or deff is None:
+        return None
+
+    a, b, c = abc
+    d, e, f = deff
+
+    return (a, b, c, d, e, f)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\objects.py
+鏂囦欢鍚?   objects.py
+淇敼鏃堕棿: 08/04/2026 23:14:39
+============================================================
+
+"""变换对象：TransformDriver / TransformPoint / IterPoint / InvertedCircle 等。"""
+
+import math
+
+from PySide6.QtCore import Qt
+
+from core.registry import register_geo, register_renderer
+from core.variables import evaluate, get_store
+
+from geo.base import GeoObject
+from geo.points import AbstractPoint
+from ui import theme
+
+from transforms.base import (
+    eval_num,
+    identity,
+    translation,
+    rotation_matrix,
+    scale_matrix,
+    reflect_matrix,
+    solve_affine,
+    apply_matrix,
+)
+
+
+# ============================================================
+# 变换驱动器
+# ============================================================
+
+@register_geo("TransformDriver")
+class TransformDriver(GeoObject):
+    """变换驱动器：保存变换类型、参数点、参数表达式，并实时计算变换。"""
+
+    expr_driver = True
+
+    def __init__(self, kind, points=(), segments=(), circles=(), exprs=None):
+        self.kind = kind
+        self._points = list(points)
+        self._segments = list(segments)
+        self._circles = list(circles)
+        self.exprs = dict(exprs or {})
+
+        objs = self._points + self._segments + self._circles
+
+        unique = []
+        idx = {}
+        for o in objs:
+            if id(o) not in idx:
+                idx[id(o)] = len(unique)
+                unique.append(o)
+
+        super().__init__(parents=tuple(unique))
+
+        self.point_idxs = [idx[id(o)] for o in self._points]
+        self.segment_idxs = [idx[id(o)] for o in self._segments]
+        self.circle_idxs = [idx[id(o)] for o in self._circles]
+
+        self.ready = False
+        self.similarity = False
+        self.matrix = identity()
+        self.inv_center = (0.0, 0.0)
+        self.inv_r2 = 1.0
+
+        self.recompute()
+
+    # ---------------- 重算 ----------------
+
+    def recompute(self):
+        self.ready = False
+        self.similarity = False
+        self.matrix = identity()
+        self.inv_center = (0.0, 0.0)
+        self.inv_r2 = 1.0
+
+        pts = self._points
+        segs = self._segments
+        circs = self._circles
+        ex = self.exprs
+        kind = self.kind
+
+        # ---------- 平移 ----------
+        if kind == "translate":
+            mode = ex.get("mode", "expr")
+
+            if mode == "expr":
+                dx = eval_num(ex.get("dx", "0"))
+                dy = eval_num(ex.get("dy", "0"))
+                self.matrix = translation(dx, dy)
+                self.ready = True
+                self.similarity = True
+
+            elif mode == "points":
+                if len(pts) >= 2 and pts[0].exists and pts[1].exists:
+                    dx = pts[1].x - pts[0].x
+                    dy = pts[1].y - pts[0].y
+                    self.matrix = translation(dx, dy)
+                    self.ready = True
+                    self.similarity = True
+
+            elif mode == "segment":
+                if segs:
+                    seg = segs[0]
+                    p1 = p2 = None
+
+                    if hasattr(seg, "a") and hasattr(seg, "b"):
+                        p1, p2 = seg.a, seg.b
+                    elif hasattr(seg, "origin") and hasattr(seg, "through"):
+                        p1, p2 = seg.origin, seg.through
+
+                    if p1 is not None and p2 is not None and p1.exists and p2.exists:
+                        dx = p2.x - p1.x
+                        dy = p2.y - p1.y
+                        self.matrix = translation(dx, dy)
+                        self.ready = True
+                        self.similarity = True
+
+        # ---------- 旋转 ----------
+        elif kind == "rotate":
+            angle = eval_num(ex.get("angle", "0"))
+            cx = cy = 0.0
+
+            if pts:
+                p = pts[0]
+                if p.exists:
+                    cx, cy = p.x, p.y
+
+            self.matrix = rotation_matrix(cx, cy, angle)
+            self.ready = True
+            self.similarity = True
+
+        # ---------- 缩放 ----------
+        elif kind == "scale":
+            mode = ex.get("mode", "expr")
+            s = 1.0
+            ok = False
+
+            if mode == "ratio":
+                if len(segs) >= 2 and hasattr(segs[0], "length") and hasattr(segs[1], "length"):
+                    l1 = segs[0].length()
+                    l2 = segs[1].length()
+                    if abs(l2) > 1e-12:
+                        s = l1 / l2
+                        ok = True
+            else:
+                s = eval_num(ex.get("factor", "1"), 1.0)
+                ok = True
+
+            if ok:
+                cx = cy = 0.0
+                if pts:
+                    p = pts[0]
+                    if p.exists:
+                        cx, cy = p.x, p.y
+
+                self.matrix = scale_matrix(cx, cy, s)
+                self.ready = True
+                self.similarity = True
+
+        # ---------- 轴对称反射 ----------
+        elif kind == "reflect":
+            if len(pts) >= 2 and pts[0].exists and pts[1].exists:
+                m = reflect_matrix(pts[0].x, pts[0].y, pts[1].x, pts[1].y)
+                if m is not None:
+                    self.matrix = m
+                    self.ready = True
+                    self.similarity = True
+
+        # ---------- 中心对称 ----------
+        elif kind == "symmetry":
+            cx = cy = 0.0
+            if pts:
+                p = pts[0]
+                if p.exists:
+                    cx, cy = p.x, p.y
+
+            self.matrix = (
+                -1.0, 0.0, 2.0 * cx,
+                0.0, -1.0, 2.0 * cy
+            )
+            self.ready = True
+            self.similarity = True
+
+        # ---------- 自定义仿射：矩阵表达式 ----------
+        elif kind == "affine":
+            a = eval_num(ex.get("a", "1"))
+            b = eval_num(ex.get("b", "0"))
+            c = eval_num(ex.get("c", "0"))
+            d = eval_num(ex.get("d", "0"))
+            e = eval_num(ex.get("e", "1"))
+            f = eval_num(ex.get("f", "0"))
+
+            self.matrix = (a, b, c, d, e, f)
+            self.ready = True
+            self.similarity = False
+
+        # ---------- 自定义仿射：三对应点 ----------
+        elif kind == "affine_pts":
+            if len(pts) >= 6 and all(p.exists for p in pts[:6]):
+                src = [(pts[i].x, pts[i].y) for i in range(3)]
+                dst = [(pts[i].x, pts[i].y) for i in range(3, 6)]
+                m = solve_affine(src, dst)
+
+                if m is not None:
+                    self.matrix = m
+                    self.ready = True
+                    self.similarity = False
+
+        # ---------- 圆反演 ----------
+        elif kind == "invert":
+            center = None
+            radius = None
+
+            if circs:
+                cobj = circs[0]
+                if getattr(cobj, "exists", True) and hasattr(cobj, "center") and hasattr(cobj, "r"):
+                    center = (cobj.center.x, cobj.center.y)
+                    radius = cobj.r
+
+            elif pts:
+                p = pts[0]
+                if p.exists:
+                    center = (p.x, p.y)
+                    radius = eval_num(ex.get("radius", "1"), 1.0)
+
+            if center is not None and radius is not None and radius > 1e-12:
+                self.inv_center = center
+                self.inv_r2 = radius * radius
+                self.ready = True
+                self.similarity = False
+
+    # ---------------- 应用 ----------------
+
+    def apply_point(self, x, y):
+        if not self.ready:
+            return None
+
+        if self.kind == "invert":
+            cx, cy = self.inv_center
+            dx = x - cx
+            dy = y - cy
+            d2 = dx * dx + dy * dy
+
+            if d2 < 1e-12:
+                return None
+
+            k = self.inv_r2 / d2
+            return (cx + dx * k, cy + dy * k)
+
+        return apply_matrix(self.matrix, x, y)
+
+    def moved_points(self):
+        # 变量变化后触发依赖它的变换点重算
+        return [self]
+
+    def distance_to(self, x, y):
+        return None
+
+    # ---------------- 序列化 ----------------
+
+    def dump(self):
+        return {
+            "kind": self.kind,
+            "exprs": self.exprs,
+            "point_idxs": self.point_idxs,
+            "segment_idxs": self.segment_idxs,
+            "circle_idxs": self.circle_idxs,
+        }
+
+    @classmethod
+    def build(cls, parents, params):
+        pts = [parents[i] for i in params.get("point_idxs", [])]
+        segs = [parents[i] for i in params.get("segment_idxs", [])]
+        circs = [parents[i] for i in params.get("circle_idxs", [])]
+
+        return cls(
+            params.get("kind", "translate"),
+            points=pts,
+            segments=segs,
+            circles=circs,
+            exprs=params.get("exprs", {})
+        )
+
+
+# ============================================================
+# 变换点
+# ============================================================
+
+@register_geo("TransformPoint")
+class TransformPoint(AbstractPoint):
+    """由 TransformDriver 作用于 source 点得到的从动点。"""
+
+    def __init__(self, driver, source):
+        super().__init__(parents=(driver, source))
+        self.driver = driver
+        self.source = source
+        self.recompute()
+
+    def recompute(self):
+        if not getattr(self.source, "exists", True):
+            self.exists = False
+            return
+
+        if not self.driver.ready:
+            self.exists = False
+            return
+
+        if not hasattr(self.source, "x") or not hasattr(self.source, "y"):
+            self.exists = False
+            return
+
+        p = self.driver.apply_point(self.source.x, self.source.y)
+
+        if p is None:
+            self.exists = False
+            return
+
+        self.x, self.y = p
+        self.exists = True
+
+    def dump(self):
+        return {}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents[0], parents[1])
+
+
+# ============================================================
+# 圆的轴点：用于把圆经仿射变换映射成椭圆
+# ============================================================
+
+@register_geo("CircleAxisPoint")
+class CircleAxisPoint(AbstractPoint):
+    """圆上的辅助轴点：axis=0 → 圆心右侧 r；axis=1 → 圆心上方 r。"""
+
+    def __init__(self, circle, axis=0):
+        super().__init__(parents=(circle,))
+        self.circle = circle
+        self.axis = int(axis)
+        self.recompute()
+
+    def recompute(self):
+        c = self.circle
+
+        if not getattr(c, "exists", True):
+            self.exists = False
+            return
+
+        if self.axis == 0:
+            self.x = c.center.x + c.r
+            self.y = c.center.y
+        else:
+            self.x = c.center.x
+            self.y = c.center.y + c.r
+
+        self.exists = True
+
+    def dump(self):
+        return {"axis": self.axis}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents[0], params.get("axis", 0))
+
+
+# ============================================================
+# 反演圆
+# ============================================================
+
+@register_geo("InvertedCircle")
+class InvertedCircle(GeoObject):
+    """圆在反演圆下的像。若原圆经过反演中心，则不存在（退化为直线）。"""
+
+    def __init__(self, driver, source):
+        super().__init__(parents=(driver, source))
+        self.driver = driver
+        self.source = source
+        self.cx = 0.0
+        self.cy = 0.0
+        self.r = 0.0
+        self.recompute()
+
+    def recompute(self):
+        drv = self.driver
+        src = self.source
+
+        if drv.kind != "invert" or not drv.ready:
+            self.exists = False
+            return
+
+        if not getattr(src, "exists", True):
+            self.exists = False
+            return
+
+        # 支持 Circle / InvertedCircle
+        if hasattr(src, "center") and hasattr(src, "r"):
+            sx = src.center.x
+            sy = src.center.y
+            sr = src.r
+        elif hasattr(src, "cx") and hasattr(src, "cy") and hasattr(src, "r"):
+            sx = src.cx
+            sy = src.cy
+            sr = src.r
+        else:
+            self.exists = False
+            return
+
+        ox, oy = drv.inv_center
+        R2 = drv.inv_r2
+
+        dx = sx - ox
+        dy = sy - oy
+        d2 = dx * dx + dy * dy
+        denom = d2 - sr * sr
+
+        if abs(denom) < 1e-9:
+            self.exists = False
+            return
+
+        k = R2 / denom
+
+        self.cx = ox + dx * k
+        self.cy = oy + dy * k
+        self.r = abs(R2 * sr / denom)
+        self.exists = True
+
+    def point_at(self, t):
+        ang = 2.0 * math.pi * t
+        return (self.cx + self.r * math.cos(ang),
+                self.cy + self.r * math.sin(ang))
+
+    def project(self, x, y):
+        return (math.atan2(y - self.cy, x - self.cx) / (2.0 * math.pi)) % 1.0
+
+    def distance_to(self, x, y):
+        return abs(math.hypot(x - self.cx, y - self.cy) - self.r)
+
+    def dump(self):
+        return {}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents[0], parents[1])
+
+
+@register_renderer(InvertedCircle)
+def draw_inverted_circle(p, obj, view):
+    if not obj.exists:
+        return
+
+    c = view.to_screen(obj.cx, obj.cy)
+
+    p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.CIRCLE, 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawEllipse(c, obj.r * view.scale, obj.r * view.scale)
+
+
+# ============================================================
+# 迭代点：用于数列点 / 分形迭代
+# ============================================================
+
+@register_geo("IterPoint")
+class IterPoint(AbstractPoint):
+    """迭代点：P_{n+1} = (fx(x,y,n), fy(x,y,n))。"""
+
+    expr_driver = True
+
+    def __init__(self, prev, n, expr_x, expr_y):
+        super().__init__(parents=(prev,))
+        self.prev = prev
+        self.n = int(n)
+        self.expr_x = expr_x
+        self.expr_y = expr_y
+        self.recompute()
+
+    def recompute(self):
+        if not getattr(self.prev, "exists", True):
+            self.exists = False
+            return
+
+        vd = get_store().as_dict()
+        vd["x"] = self.prev.x
+        vd["y"] = self.prev.y
+        vd["n"] = float(self.n)
+
+        x = evaluate(self.expr_x, vd)
+        y = evaluate(self.expr_y, vd)
+
+        if x is None or y is None:
+            self.exists = False
+            return
+
+        self.x = float(x)
+        self.y = float(y)
+        self.exists = True
+
+    def moved_points(self):
+        return []
+
+    def dump(self):
+        return {
+            "n": self.n,
+            "expr_x": self.expr_x,
+            "expr_y": self.expr_y,
+        }
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(
+            parents[0],
+            params.get("n", 1),
+            params.get("expr_x", "x"),
+            params.get("expr_y", "y"),
+        )
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\tools.py
+鏂囦欢鍚?   tools.py
+淇敼鏃堕棿: 08/05/2026 13:56:39
+============================================================
+
+"""变换工具：注册到主菜单「变换」。"""
+
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QInputDialog, QMessageBox
+
+from core.registry import register_tool
+
+from tools.base import Tool, point_or_snap
+
+from transforms.objects import TransformDriver, IterPoint
+from transforms.apply import create_transformed_copies
+
+
+# ------------------------------------------------------------
+# 工具函数
+# ------------------------------------------------------------
+
+def _back_select(canvas):
+    from tools.select import SelectTool
+    QTimer.singleShot(0, lambda: canvas.set_tool(SelectTool()))
+
+
+def _ask_depth(canvas):
+    depth, ok = QInputDialog.getInt(
+        canvas,
+        "迭代深度",
+        "副本层数（1 = 单次变换）：",
+        1, 1, 200, 1
+    )
+    return depth if ok else None
+
+
+def _ask_expr(canvas, title, label, default="0"):
+    text, ok = QInputDialog.getText(canvas, title, label, text=default)
+    if not ok:
+        return None
+    return text.strip()
+
+
+def _finish(canvas, created):
+    if created:
+        canvas.doc.set_selection(created)
+    else:
+        canvas.cursor_info.emit("当前对象暂不支持该变换")
+    _back_select(canvas)
+
+
+def _apply_driver(canvas, driver, targets, depth):
+    created = create_transformed_copies(canvas.doc, driver, targets, depth)
+    _finish(canvas, created)
+
+
+def _axis_points(hit):
+    """从命中对象提取两个端点：线段 / 直线 / 射线。"""
+    if hit is None:
+        return None
+
+    if hasattr(hit, "a") and hasattr(hit, "b") \
+            and hasattr(hit.a, "x") and hasattr(hit.b, "x"):
+        return hit.a, hit.b
+
+    if hasattr(hit, "origin") and hasattr(hit, "through") \
+            and hasattr(hit.origin, "x") and hasattr(hit.through, "x"):
+        return hit.origin, hit.through
+
+    return None
+
+
+# ------------------------------------------------------------
+# 基类
+# ------------------------------------------------------------
+
+class TransformTool(Tool):
+    def __init__(self):
+        self.targets = []
+
+    def activated(self, canvas):
+        self.targets = [o for o in canvas.doc.objects if o.selected]
+
+        if not self.targets:
+            QMessageBox.information(
+                canvas, 
+                "变换提示",
+                "⚠️ 您还没有选中任何对象！\n\n"
+                "正确用法：\n"
+                "1. 按快捷键 V 切回【选择工具】\n"
+                "2. 框选或点击您要变换的图形（使其高亮）\n"
+                "3. 再次点击本变换菜单"
+            )
+            _back_select(canvas)
+            return
+
+        self._start(canvas)
+
+    def _start(self, canvas):
+        pass
+
+    def deactivated(self, canvas):
+        self.targets = []
+
+    def cancel(self, canvas):
+        _back_select(canvas)
+
+
+# ============================================================
+# 平移
+# ============================================================
+
+@register_tool(name="平移·坐标", order=301, panel="transform", icon="select",
+               hint="按 dx/dy 表达式平移选中对象，可绑定变量")
+class TranslateExprTool(TransformTool):
+    def _start(self, canvas):
+        dx = _ask_expr(canvas, "平移·坐标", "dx 表达式（可绑定变量）：", "1")
+        if dx is None:
+            _back_select(canvas)
+            return
+
+        dy = _ask_expr(canvas, "平移·坐标", "dy 表达式（可绑定变量）：", "0")
+        if dy is None:
+            _back_select(canvas)
+            return
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            _back_select(canvas)
+            return
+
+        driver = TransformDriver(
+            "translate",
+            exprs={"mode": "expr", "dx": dx, "dy": dy}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+@register_tool(name="平移·两点向量", order=302, panel="transform", icon="select",
+               hint="先选对象，再点击两个点 A→B 作为平移向量")
+class TranslateVectorTool(TransformTool):
+    def _start(self, canvas):
+        self.pts = []
+        canvas.cursor_info.emit("点击两个点作为平移向量：A → B")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        pt = point_or_snap(canvas, wpt, hit)
+        self.pts.append(pt)
+
+        if len(self.pts) == 2:
+            depth = _ask_depth(canvas)
+            if depth is None:
+                return
+
+            driver = TransformDriver(
+                "translate",
+                points=self.pts,
+                exprs={"mode": "points"}
+            )
+
+            _apply_driver(canvas, driver, self.targets, depth)
+
+    def cancel(self, canvas):
+        self.pts = []
+        _back_select(canvas)
+
+
+@register_tool(name="平移·标记线段", order=303, panel="transform", icon="select",
+               hint="先选对象，再点击一条线段/直线/射线作为平移向量")
+class TranslateSegmentTool(TransformTool):
+    def _start(self, canvas):
+        canvas.cursor_info.emit("点击一条线段/直线/射线作为平移向量")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        if _axis_points(hit) is None:
+            canvas.cursor_info.emit("请点击一条线段/直线/射线")
+            return
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            return
+
+        driver = TransformDriver(
+            "translate",
+            segments=[hit],
+            exprs={"mode": "segment"}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+# ============================================================
+# 旋转
+# ============================================================
+
+@register_tool(name="旋转·角度", order=311, panel="transform", icon="select",
+               hint="先选对象，点击旋转中心，再输入角度表达式")
+class RotateTool(TransformTool):
+    def _start(self, canvas):
+        canvas.cursor_info.emit("点击旋转中心")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        center = point_or_snap(canvas, wpt, hit)
+
+        angle = _ask_expr(canvas, "旋转", "角度表达式（度，可绑定变量）：", "90")
+        if angle is None:
+            _back_select(canvas)
+            return
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            _back_select(canvas)
+            return
+
+        driver = TransformDriver(
+            "rotate",
+            points=[center],
+            exprs={"angle": angle}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+# ============================================================
+# 缩放
+# ============================================================
+
+@register_tool(name="缩放·比例", order=321, panel="transform", icon="select",
+               hint="先选对象，点击缩放中心，再输入比例表达式")
+class ScaleFactorTool(TransformTool):
+    def _start(self, canvas):
+        canvas.cursor_info.emit("点击缩放中心")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        center = point_or_snap(canvas, wpt, hit)
+
+        factor = _ask_expr(canvas, "缩放", "比例表达式（可绑定变量）：", "1.2")
+        if factor is None:
+            _back_select(canvas)
+            return
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            _back_select(canvas)
+            return
+
+        driver = TransformDriver(
+            "scale",
+            points=[center],
+            exprs={"mode": "expr", "factor": factor}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+@register_tool(name="缩放·线段比", order=322, panel="transform", icon="select",
+               hint="先选对象，点击缩放中心，再点两条线段，比例 = 线段1/线段2")
+class ScaleRatioTool(TransformTool):
+    def _start(self, canvas):
+        self.step = 0
+        self.center = None
+        self.seg1 = None
+        canvas.cursor_info.emit("点击缩放中心")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        if self.step == 0:
+            self.center = point_or_snap(canvas, wpt, hit)
+            self.step = 1
+            canvas.cursor_info.emit("点击第一条线段（分子）")
+
+        elif self.step == 1:
+            if hit is None or not hasattr(hit, "length"):
+                canvas.cursor_info.emit("请点击一条线段")
+                return
+
+            self.seg1 = hit
+            self.step = 2
+            canvas.cursor_info.emit("点击第二条线段（分母）")
+
+        elif self.step == 2:
+            if hit is None or not hasattr(hit, "length"):
+                canvas.cursor_info.emit("请点击一条线段")
+                return
+
+            seg2 = hit
+
+            depth = _ask_depth(canvas)
+            if depth is None:
+                return
+
+            driver = TransformDriver(
+                "scale",
+                points=[self.center],
+                segments=[self.seg1, seg2],
+                exprs={"mode": "ratio"}
+            )
+
+            _apply_driver(canvas, driver, self.targets, depth)
+
+    def cancel(self, canvas):
+        self.step = 0
+        self.center = None
+        self.seg1 = None
+        _back_select(canvas)
+
+
+# ============================================================
+# 反射 / 中心对称
+# ============================================================
+
+@register_tool(name="反射·轴对称", order=331, panel="transform", icon="select",
+               hint="先选对象，再点击对称轴：可直接点线段/直线，或点两个点")
+class ReflectTool(TransformTool):
+    def _start(self, canvas):
+        self.axis_pts = []
+        canvas.cursor_info.emit("点击对称轴：可直接点一条线段/直线，或点两个点")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        if not self.axis_pts:
+            ap = _axis_points(hit)
+            if ap is not None:
+                self.axis_pts = list(ap)
+                self._finish(canvas)
+                return
+
+            pt = point_or_snap(canvas, wpt, hit)
+            self.axis_pts.append(pt)
+            canvas.cursor_info.emit("再点击第二个点确定对称轴")
+        else:
+            pt = point_or_snap(canvas, wpt, hit)
+            self.axis_pts.append(pt)
+
+            if len(self.axis_pts) == 2:
+                self._finish(canvas)
+
+    def _finish(self, canvas):
+        depth = _ask_depth(canvas)
+        if depth is None:
+            return
+
+        driver = TransformDriver(
+            "reflect",
+            points=self.axis_pts,
+            exprs={}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+    def cancel(self, canvas):
+        self.axis_pts = []
+        _back_select(canvas)
+
+
+@register_tool(name="反射·中心对称", order=332, panel="transform", icon="select",
+               hint="先选对象，再点击对称中心")
+class CentralSymmetryTool(TransformTool):
+    def _start(self, canvas):
+        canvas.cursor_info.emit("点击对称中心")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        center = point_or_snap(canvas, wpt, hit)
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            return
+
+        driver = TransformDriver(
+            "symmetry",
+            points=[center],
+            exprs={}
+        )
+
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+# ============================================================
+# 自定义仿射变换
+# ============================================================
+
+@register_tool(name="仿射·矩阵", order=341, panel="transform", icon="select",
+               hint="输入 2×3 矩阵实现任意仿射变换")
+class AffineMatrixTool(TransformTool):
+    def _start(self, canvas):
+        text, ok = QInputDialog.getMultiLineText(
+            canvas,
+            "仿射变换·矩阵",
+            "输入 2×3 矩阵，每行三个表达式，用空格分隔：\n"
+            "X = a*x + b*y + c\n"
+            "Y = d*x + e*y + f\n\n"
+            "例如：\n1 0 0\n0 1 0",
+            "1 0 0\n0 1 0"
+        )
+
+        if not ok:
+            _back_select(canvas)
+            return
+
+        rows = [r.split() for r in text.strip().splitlines() if r.strip()]
+
+        if len(rows) < 2 or len(rows[0]) < 3 or len(rows[1]) < 3:
+            canvas.cursor_info.emit("矩阵格式不正确")
+            _back_select(canvas)
+            return
+
+        exprs = {
+            "a": rows[0][0],
+            "b": rows[0][1],
+            "c": rows[0][2],
+            "d": rows[1][0],
+            "e": rows[1][1],
+            "f": rows[1][2],
+        }
+
+        depth = _ask_depth(canvas)
+        if depth is None:
+            _back_select(canvas)
+            return
+
+        driver = TransformDriver("affine", exprs=exprs)
+        _apply_driver(canvas, driver, self.targets, depth)
+
+
+@register_tool(name="仿射·三对应点", order=342, panel="transform", icon="select",
+               hint="依次点 3 个源点，再点 3 个目标点，求仿射变换")
+class AffinePointsTool(TransformTool):
+    def _start(self, canvas):
+        self.pts = []
+        canvas.cursor_info.emit("依次点 3 个源点，再点 3 个目标点")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        pt = point_or_snap(canvas, wpt, hit)
+        self.pts.append(pt)
+
+        n = len(self.pts)
+
+        if n < 3:
+            canvas.cursor_info.emit(f"源点 {n}/3")
+        elif n == 3:
+            canvas.cursor_info.emit("源点完成，开始点目标点 1/3")
+        elif n < 6:
+            canvas.cursor_info.emit(f"目标点 {n - 3}/3")
+
+        if n == 6:
+            depth = _ask_depth(canvas)
+            if depth is None:
+                return
+
+            driver = TransformDriver(
+                "affine_pts",
+                points=self.pts,
+                exprs={}
+            )
+
+            _apply_driver(canvas, driver, self.targets, depth)
+
+    def cancel(self, canvas):
+        self.pts = []
+        _back_select(canvas)
+
+
+# ============================================================
+# 圆反演
+# ============================================================
+
+@register_tool(name="反演·圆内外翻转", order=351, panel="transform", icon="select",
+               hint="先选对象，点击反演圆；或点击空白设置中心后输入半径")
+class InversionTool(TransformTool):
+    def _start(self, canvas):
+        self.center = None
+        canvas.cursor_info.emit("点击反演圆；或点击空白处设置反演中心")
+
+    def press(self, canvas, wpt, hit):
+        if not self.targets:
+            return
+
+        # 直接选择已有圆作为反演圆
+        if hit is not None and type(hit).__name__ == "Circle":
+            depth = _ask_depth(canvas)
+            if depth is None:
+                return
+
+            driver = TransformDriver(
+                "invert",
+                circles=[hit],
+                exprs={}
+            )
+
+            _apply_driver(canvas, driver, self.targets, depth)
+            return
+
+        # 否则：点中心 + 输入半径
+        if self.center is None:
+            self.center = point_or_snap(canvas, wpt, hit)
+
+            radius = _ask_expr(canvas, "反演半径", "半径表达式（可绑定变量）：", "1")
+            if radius is None:
+                _back_select(canvas)
+                return
+
+            depth = _ask_depth(canvas)
+            if depth is None:
+                _back_select(canvas)
+                return
+
+            driver = TransformDriver(
+                "invert",
+                points=[self.center],
+                exprs={"radius": radius}
+            )
+
+            _apply_driver(canvas, driver, self.targets, depth)
+
+    def cancel(self, canvas):
+        self.center = None
+        _back_select(canvas)
+
+
+# ============================================================
+# 迭代点列 / 分形数列点
+# ============================================================
+
+@register_tool(name="迭代·数列点", order=361, panel="transform", icon="select",
+               hint="点击起点，输入迭代公式，生成点列")
+class IterationPointTool(Tool):
+    def __init__(self):
+        self.start = None
+
+    def activated(self, canvas):
+        self.start = None
+
+        sel = [o for o in canvas.doc.objects if o.selected]
+
+        from geo.points import AbstractPoint
+        pts = [o for o in sel if isinstance(o, AbstractPoint)]
+
+        if len(pts) == 1:
+            self._run(canvas, pts[0])
+        else:
+            canvas.cursor_info.emit("点击迭代起点")
+
+    def deactivated(self, canvas):
+        self.start = None
+
+    def press(self, canvas, wpt, hit):
+        start = point_or_snap(canvas, wpt, hit)
+        self._run(canvas, start)
+
+    def _run(self, canvas, start):
+        fx, ok = QInputDialog.getText(
+            canvas,
+            "迭代点列",
+            "x_{n+1} 表达式（可用 x,y,n 和变量）：",
+            text="x + 0.5"
+        )
+        if not ok:
+            _back_select(canvas)
+            return
+
+        fy, ok = QInputDialog.getText(
+            canvas,
+            "迭代点列",
+            "y_{n+1} 表达式（可用 x,y,n 和变量）：",
+            text="y"
+        )
+        if not ok:
+            _back_select(canvas)
+            return
+
+        depth, ok = QInputDialog.getInt(
+            canvas,
+            "迭代深度",
+            "生成点数：",
+            20, 1, 1000, 1
+        )
+        if not ok:
+            _back_select(canvas)
+            return
+
+        doc = canvas.doc
+        created = []
+
+        doc.begin_action()
+        try:
+            cur = start
+            for i in range(1, int(depth) + 1):
+                p = IterPoint(cur, i, fx.strip(), fy.strip())
+                doc.add(p)
+                created.append(p)
+                cur = p
+        finally:
+            doc.end_action()
+
+        doc.set_selection(created)
+        _back_select(canvas)
+
+    def cancel(self, canvas):
+        _back_select(canvas)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/04/2026 23:14:10
+============================================================
+
+"""变换模块：平移 / 旋转 / 缩放 / 反射 / 中心对称 / 仿射 / 反演 / 迭代。
+
+在本目录新建 .py 文件会自动导入并注册。
+"""
+
+import importlib
+import pkgutil
+
+for _m in pkgutil.iter_modules(__path__):
+    importlib.import_module(f"{__name__}.{_m.name}")
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
 鏂囦欢鍚?   canvas.py
-淇敼鏃堕棿: 08/04/2026 22:45:44
+淇敼鏃堕棿: 08/05/2026 13:44:46
 ============================================================
 
 import math
@@ -7189,17 +8954,51 @@ class Canvas(QWidget):
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-            self.render_scene(p)                 # 几何场景（屏幕/导出共用）
+            # 1. 几何场景（保存状态，防止某个对象污染画笔）
+            p.save()
+            try:
+                self.render_scene(p)
+            except Exception:
+                import traceback
+                traceback.print_exc()
+            finally:
+                p.restore()
 
             # —— 以下仅屏幕显示，不导出 ——
 
-            # ★ snow 彩蛋：标题为 snow 时飘雪花
-            if self._snow_active:
-                self._draw_snow(p)
+            # 2. snow 彩蛋：标题为 snow 时飘雪花
+            if getattr(self, "_snow_active", False):
+                p.save()
+                try:
+                    self._draw_snow(p)
+                except Exception:
+                    pass
+                finally:
+                    p.restore()
 
-            self._draw_snap_indicator(p)
+            # 3. 磁吸指示器
+            p.save()
+            try:
+                self._draw_snap_indicator(p)
+            except Exception:
+                pass
+            finally:
+                p.restore()
+
+            # 4. ★ 工具覆盖层（画圆预览、框选框、红色参考线等）
+            if self.tool is not None:
+                p.save()
+                try:
+                    self.tool.draw_overlay(p, self)
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+                finally:
+                    p.restore()
+
         finally:
             p.end()
+
         self._place_trash()
 
     def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
@@ -9152,7 +10951,7 @@ class InfoPanel(QWidget):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\main_window.py
 鏂囦欢鍚?   main_window.py
-淇敼鏃堕棿: 08/04/2026 22:47:08
+淇敼鏃堕棿: 08/04/2026 23:13:16
 ============================================================
 
 import datetime
@@ -9169,6 +10968,7 @@ import geo            # noqa: F401
 import tools          # noqa: F401
 import plugins        # noqa: F401
 import media           # noqa: F401
+import transforms     # noqa: F401
 from core.document import Document
 from core.registry import TOOL_REGISTRY
 from ui import theme
@@ -9348,6 +11148,20 @@ class MainWindow(QMainWindow):
             tm.addAction(self._actions[spec["cls"]])
         if not plugin_specs:
             e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
+        # ================= 变换菜单 =================
+        gm = mb.addMenu("变换(&G)")
+
+        transform_specs = sorted(
+            [s for s in TOOL_REGISTRY if s.get("panel") == "transform"],
+            key=lambda s: s.get("order", 99)
+        )
+
+        for spec in transform_specs:
+            gm.addAction(self._actions[spec["cls"]])
+
+        if not transform_specs:
+            e = gm.addAction("（暂无变换工具）")
+            e.setEnabled(False)
         # 插入菜单：媒体对象
         im = mb.addMenu("插入(&I)")
         insert_specs = sorted(
@@ -9492,7 +11306,7 @@ class MainWindow(QMainWindow):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\theme.py
 鏂囦欢鍚?   theme.py
-淇敼鏃堕棿: 08/02/2026 14:43:11
+淇敼鏃堕棿: 08/05/2026 12:30:36
 ============================================================
 
 """多主题系统：内置 4 套主题，运行时动态切换。
@@ -9698,8 +11512,18 @@ def pen(color, width=1.0):
 
 
 def dashed_pen(color, width=1.0):
-    p = QPen(QColor(color), float(width), Qt.PenStyle.DashLine)
-    p.setDashPattern([6, 4])
+    """虚线画笔：显式 CustomDashLine + 浮点 dash pattern。"""
+    if isinstance(color, QColor):
+        c = QColor(color)
+    else:
+        c = _c(color)
+
+    p = QPen(c, float(width))
+    p.setStyle(Qt.PenStyle.CustomDashLine)
+    p.setDashPattern([6.0, 4.0])
+    p.setCapStyle(Qt.PenCapStyle.FlatCap)
+    p.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
+
     return p
 
 

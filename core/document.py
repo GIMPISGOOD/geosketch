@@ -187,6 +187,12 @@ class Document(QObject):
 
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
+        # ★ 新增：标记所有函数曲线缓存失效
+        from geo.function_curve import FunctionCurve
+        for obj in self.objects:
+            if isinstance(obj, FunctionCurve):
+                obj.invalidate_cache()
+
         moved = []
         for eo in sorted(self.expr_objects, key=lambda o: o.id):
             if eo.exists:

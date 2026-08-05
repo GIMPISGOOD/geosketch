@@ -10,6 +10,7 @@ from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
 from geo.function_curve import FunctionCurve
+from core.variables import get_store
 from tools.select import SelectTool
 from ui import theme
 from ui.icons import trash_icon
@@ -70,6 +71,21 @@ class Canvas(QWidget):
 
         self.refresh_theme()
         self.update_snow_state()
+
+        from geo.function_sampler import get_sampler
+        self._sampler = get_sampler()
+        self._sampler.sampled.connect(self._on_function_sampled)
+
+    def _on_function_sampled(self, curve_id, points):
+        """子线程采样完成 → 更新对应曲线的缓存 → 触发重绘。"""
+        from geo.function_curve import FunctionCurve
+        store = get_store()
+        for obj in self.doc.objects:
+            if isinstance(obj, FunctionCurve) and obj.id == curve_id:
+                domain = obj.get_domain(self)
+                obj.update_cache(points, store.version, domain)
+                self.update()
+                break
 
     # ================= 坐标变换 =================
     def to_screen(self, x: float, y: float) -> QPointF:

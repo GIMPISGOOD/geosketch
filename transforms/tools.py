@@ -1,7 +1,7 @@
 """变换工具：注册到主菜单「变换」。"""
 
 from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QInputDialog
+from PySide6.QtWidgets import QInputDialog, QMessageBox
 
 from core.registry import register_tool
 
@@ -78,7 +78,15 @@ class TransformTool(Tool):
         self.targets = [o for o in canvas.doc.objects if o.selected]
 
         if not self.targets:
-            canvas.cursor_info.emit("请先用选择工具选中要变换的对象")
+            QMessageBox.information(
+                canvas, 
+                "变换提示",
+                "⚠️ 您还没有选中任何对象！\n\n"
+                "正确用法：\n"
+                "1. 按快捷键 V 切回【选择工具】\n"
+                "2. 框选或点击您要变换的图形（使其高亮）\n"
+                "3. 再次点击本变换菜单"
+            )
             _back_select(canvas)
             return
 

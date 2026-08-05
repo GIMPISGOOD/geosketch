@@ -5,6 +5,7 @@ import math
 from typing import Optional, Tuple
 
 from PySide6.QtCore import QPointF
+from PySide6.QtGui import QPainterPath
 
 from core.registry import register_geo, register_renderer
 from core.variables import evaluate, get_store
@@ -36,6 +37,12 @@ class FunctionCurve(GeoObject):
         self.color = color or next_color()
         self.label_text = label_text
         self._domain = domain
+
+        # ★ 渲染缓存
+        self._cached_points: list = []       # 采样点缓存
+        self._cache_version: int = -1        # 缓存对应的变量版本号
+        self._cache_domain: tuple = (None, None)     # 缓存对应的视窗域
+        self._cache_dirty: bool = True       # 是否需要重新采样
 
     def _eval_at(self, u):
         """在参数 u 处求值。
@@ -89,7 +96,55 @@ class FunctionCurve(GeoObject):
             x1, _ = view.to_world(QPointF(view.width(), 0))
             return (min(x0, x1), max(x0, x1))
         return (0.0, 2 * math.pi)
+    
+    def invalidate_cache(self):
+        """表达式或变量变化时调用，标记缓存失效。"""
+        self._cache_dirty = True
 
+    def _cache_valid(self, var_version, domain):
+        """检查缓存是否仍然有效。"""
+        return (not self._cache_dirty
+                and self._cache_version == var_version
+                and self._cache_domain == domain
+                and len(self._cached_points) > 0)
+
+    def update_cache(self, points, var_version, domain):
+        """子线程采样完成后更新缓存（由信号槽调用）。"""
+        self._cached_points = points
+        self._cache_version = var_version
+        self._cache_domain = domain
+        self._cache_dirty = False
+
+    def get_cached_or_request(self, view):
+        """获取缓存点列表；若失效则提交异步采样任务。
+
+        返回 (points, is_fresh)：
+        - is_fresh=True  → 缓存有效，直接使用
+        - is_fresh=False → 缓存失效，已提交采样，当前返回旧缓存或空列表
+        """
+        domain = self.get_domain(view)
+        store = get_store()
+        var_version = store.version
+
+        if self._cache_valid(var_version, domain):
+            return self._cached_points, True
+
+        # 缓存失效 → 提交异步采样
+        n = min(max(int(view.width()), 400), 4000)
+        from geo.function_sampler import get_sampler
+        get_sampler().submit(
+            curve_id=self.id,
+            kind=self.kind,
+            expr=self.expr,
+            expr2=self.expr2,
+            domain=domain,
+            n=n,
+            var_snapshot=store.as_dict()
+        )
+
+        # 返回旧缓存（可能为空），主线程先用旧数据绘制
+        return self._cached_points, False
+    
     def sample(self, view, n=900) -> list[Optional[Tuple[float, float]]]:
         a, b = self.get_domain(view)
         self._domain = (a, b)
@@ -196,90 +251,177 @@ class FunctionCurve(GeoObject):
                    params.get("color"), params.get("label_text"))
 
 
+# ============================================================
+# 渲染器（性能优化版）
+# ============================================================
+
 @register_renderer(FunctionCurve)
 def draw_function(p, obj, view):
     if not obj.exists:
         return
     color = theme.SELECTED if obj.selected else getattr(obj, "color", theme.CIRCLE)
     p.setPen(theme.pen(color, 2))
-    if obj.kind == "explicit":
-        _draw_explicit(p, obj, view)
-    elif obj.kind == "parametric":
-        _draw_parametric(p, obj, view)
-    elif obj.kind == "polar":
-        _draw_polar(p, obj, view)
+
+    # ★ 尝试使用缓存
+    cached, fresh = obj.get_cached_or_request(view)
+
+    if fresh and cached:
+        # 缓存有效：直接绘制缓存点（极快）
+        _draw_cached(p, obj, view, cached)
+    else:
+        # 缓存无效：同步采样作为 fallback（首次加载/极端情况）
+        if obj.kind == "explicit":
+            _draw_explicit(p, obj, view)
+        elif obj.kind == "parametric":
+            _draw_parametric(p, obj, view)
+        elif obj.kind == "polar":
+            _draw_polar(p, obj, view)
+
 
 
 def _draw_explicit(p, obj, view):
-    """显函数：只采样可见 x 范围，按像素密度采样，渐近线处断开。"""
+    """显函数：变量字典只获取一次 + QPainterPath + 合理采样密度。"""
     x0, _ = view.to_world(QPointF(0, 0))
     x1, _ = view.to_world(QPointF(view.width(), 0))
     if x0 > x1:
         x0, x1 = x1, x0
+
     _, yt = view.to_world(QPointF(0, 0))
     _, yb = view.to_world(QPointF(0, view.height()))
     y_range = abs(yt - yb) or 1.0
-    n = min(max(int(view.width() * 3), 600), 12000)
-    
+
+    # ★ 优化 1：采样点数 = 屏幕像素宽度（不再 ×3，上限 4000）
+    n = min(max(int(view.width()), 400), 4000)
+
+    # ★ 优化 2：变量字典只获取一次
+    vd = get_store().as_dict()
+
+    path = QPainterPath()
+    has_path = False
     prev_y = None
-    prev_sp = None
+
     for i in range(n + 1):
         x = x0 + (x1 - x0) * i / n
-        y = obj._eval_at(x)
-        
-        # ★ 类型保护：只接受实数，tuple/None/复数全部跳过
-        if not isinstance(y, (int, float)) or not math.isfinite(y):
+        vd["x"] = x
+
+        try:
+            y = evaluate(obj.expr, vd)
+        except Exception:
+            y = None
+
+        if y is None or not isinstance(y, (int, float)) or not math.isfinite(y):
+            has_path = False
             prev_y = None
-            prev_sp = None
             continue
-            
-        # 渐近线检测：相邻 y 跳变超过视窗高度 1.5 倍则断开
-        is_break = False
+
+        # 渐近线检测
         if prev_y is not None and abs(y - prev_y) > y_range * 1.5:
-            is_break = True
-            
+            has_path = False
+
         sp = view.to_screen(x, y)
-        
-        # ★ 修复：drawLine 必须接收两个 QPointF
-        if prev_sp is not None and not is_break:
-            p.drawLine(prev_sp, sp)
-            
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
         prev_y = y
-        prev_sp = sp
+
+    # ★ 优化 3：一次性绘制整个路径
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
 
 
 def _draw_parametric(p, obj, view):
+    """参数方程：变量字典只获取一次 + QPainterPath。"""
     a, b = obj.domain or (0, 2 * math.pi)
-    n = 2000
-    prev = None
+    n = 800  # ★ 参数曲线 800 点足够平滑
+
+    vd = get_store().as_dict()
+    vd["t"] = 0.0
+
+    path = QPainterPath()
+    has_path = False
+
     for i in range(n + 1):
         t = a + (b - a) * i / n
-        pt = obj._eval_at(t)
-        if not isinstance(pt, (tuple, list)) or len(pt) != 2:
-            prev = None
+        vd["t"] = t
+
+        try:
+            x = evaluate(obj.expr, vd)
+            y = evaluate(obj.expr2, vd)
+        except Exception:
+            x = y = None
+
+        if (x is None or y is None
+                or not isinstance(x, (int, float)) or not math.isfinite(x)
+                or not isinstance(y, (int, float)) or not math.isfinite(y)):
+            has_path = False
             continue
-        x, y = pt
-        if not (isinstance(x, (int, float)) and isinstance(y, (int, float))
-                and math.isfinite(x) and math.isfinite(y)):
-            prev = None
-            continue
+
         sp = view.to_screen(x, y)
-        if prev is not None:
-            p.drawLine(prev, sp)
-        prev = sp
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
 
 
 def _draw_polar(p, obj, view):
+    """极坐标：变量字典只获取一次 + QPainterPath。"""
     a, b = obj.domain or (0, 2 * math.pi)
-    n = 2000
-    prev = None
+    n = 800
+
+    vd = get_store().as_dict()
+    vd["t"] = 0.0
+    vd["θ"] = 0.0
+
+    path = QPainterPath()
+    has_path = False
+
     for i in range(n + 1):
         t = a + (b - a) * i / n
-        r = obj._eval_at(t)
-        if not isinstance(r, (int, float)) or not math.isfinite(r):
-            prev = None
+        vd["t"] = t
+        vd["θ"] = t
+
+        try:
+            r = evaluate(obj.expr, vd)
+        except Exception:
+            r = None
+
+        if r is None or not isinstance(r, (int, float)) or not math.isfinite(r):
+            has_path = False
             continue
+
         sp = view.to_screen(r * math.cos(t), r * math.sin(t))
-        if prev is not None:
-            p.drawLine(prev, sp)
-        prev = sp
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if has_path or path.elementCount() > 0:
+        p.drawPath(path)
+
+def _draw_cached(p, obj, view, points):
+    """从缓存点列表绘制（主线程零计算）。"""
+    path = QPainterPath()
+    has_path = False
+
+    for pt in points:
+        if pt is None:
+            has_path = False
+            continue
+
+        sp = view.to_screen(pt[0], pt[1])
+        if not has_path:
+            path.moveTo(sp)
+            has_path = True
+        else:
+            path.lineTo(sp)
+
+    if path.elementCount() > 0:
+        p.drawPath(path)
