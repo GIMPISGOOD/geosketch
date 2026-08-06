@@ -436,7 +436,32 @@ class Canvas(QWidget):
         self.setCursor(Qt.CursorShape.SizeAllCursor if hover
                        else Qt.CursorShape.ArrowCursor)
         self.update()
-
+        
+    def contextMenuEvent(self, ev):
+        """右键菜单：支持脚本按钮编辑、对象删除等。"""
+        from PySide6.QtWidgets import QMenu
+        from media.script_button import ScriptButtonObject
+        
+        hit = self.pick(ev.position())
+        menu = QMenu(self)
+        
+        # 如果右键的是脚本按钮
+        if isinstance(hit, ScriptButtonObject):
+            act_edit = menu.addAction("✎ 编辑脚本")
+            act_edit.triggered.connect(lambda: hit.edit(self))
+            menu.addSeparator()
+            
+        # 如果有选中的对象，提供删除选项
+        sel = [o for o in self.doc.objects if o.selected]
+        if sel:
+            act_del = menu.addAction("🗑 删除选中对象")
+            act_del.triggered.connect(self.doc.remove_selected)
+            
+        if not menu.isEmpty():
+            menu.exec(ev.globalPosition().toPoint())
+        else:
+            super().contextMenuEvent(ev)
+            
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False

@@ -612,14 +612,12 @@ class Parser:
 
     def parse_name_template(self) -> NameTemplate:
         """解析对象名模板。
-
         支持：
             P
             P{i}
             P_{i}
             P{i + 1}
             P{i}suffix
-            "P{i}"
         """
         line = self.peek()[2]
         parts = []
@@ -631,22 +629,17 @@ class Parser:
         else:
             self.error("对象名必须以字母、数字或字符串开始")
 
-        # 继续拼接普通文本或 {表达式}
-        while True:
-            if self.at("LBRACE"):
-                self.advance()
+        # ★ 修复：只允许 {表达式} 作为拼接物，避免贪婪吃掉下一行的独立标识符（如 __keep）
+        while self.at("LBRACE"):
+            self.advance()
+            expr = self.parse_expr()
+            self.expect("RBRACE")
+            parts.append(expr)
 
-                expr = self.parse_expr()
-
-                self.expect("RBRACE")
-                parts.append(expr)
-
-            elif self.at("ID") or self.at("NUM") or self.at("STR"):
+            # } 后面可以紧跟普通文本，例如 P{i}suffix
+            if self.at("ID") or self.at("NUM") or self.at("STR"):
                 t = self.advance()
                 parts.append(str(t[1]))
-
-            else:
-                break
 
         return NameTemplate(parts, line)
     
