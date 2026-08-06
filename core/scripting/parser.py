@@ -10,6 +10,7 @@
 - delete point / object
 """
 
+from typing import Any, List, Optional, Tuple, Union
 from .errors import ScriptError
 
 
@@ -118,23 +119,23 @@ KEYWORDS = {
 # ------------------------------------------------------------
 
 class Node:
-    line = 0
+    line: int = 0
 
 
 class Program(Node):
-    def __init__(self, statements):
+    def __init__(self, statements: List[Node]):
         self.statements = statements
 
 
 class Repeat(Node):
-    def __init__(self, count, body, line=0):
+    def __init__(self, count: Node, body: List[Node], line: int = 0):
         self.count = count
         self.body = body
         self.line = line
 
 
 class ForRange(Node):
-    def __init__(self, var, start, end, body, line=0):
+    def __init__(self, var: str, start: Node, end: Node, body: List[Node], line: int = 0):
         self.var = var
         self.start = start
         self.end = end
@@ -143,14 +144,14 @@ class ForRange(Node):
 
 
 class If(Node):
-    def __init__(self, branches, else_body, line=0):
+    def __init__(self, branches: List[Tuple[Node, List[Node]]], else_body: Optional[List[Node]], line: int = 0):
         self.branches = branches
         self.else_body = else_body
         self.line = line
 
 
 class Assign(Node):
-    def __init__(self, name, expr, scope="local", line=0):
+    def __init__(self, name: str, expr: Node, scope: str = "local", line: int = 0):
         self.name = name
         self.expr = expr
         self.scope = scope
@@ -158,13 +159,13 @@ class Assign(Node):
 
 
 class Print(Node):
-    def __init__(self, expr, line=0):
+    def __init__(self, expr: Optional[Node], line: int = 0):
         self.expr = expr
         self.line = line
 
 
 class AddPoint(Node):
-    def __init__(self, name, x, y, line=0):
+    def __init__(self, name: str, x: Node, y: Node, line: int = 0):
         self.name = name
         self.x = x
         self.y = y
@@ -172,7 +173,7 @@ class AddPoint(Node):
 
 
 class AddSegment(Node):
-    def __init__(self, name, a, b, line=0):
+    def __init__(self, name: str, a: str, b: str, line: int = 0):
         self.name = name
         self.a = a
         self.b = b
@@ -180,7 +181,7 @@ class AddSegment(Node):
 
 
 class AddLine(Node):
-    def __init__(self, name, a, b, line=0):
+    def __init__(self, name: str, a: str, b: str, line: int = 0):
         self.name = name
         self.a = a
         self.b = b
@@ -188,7 +189,7 @@ class AddLine(Node):
 
 
 class AddCircle(Node):
-    def __init__(self, name, center, radius, line=0):
+    def __init__(self, name: str, center: str, radius: Node, line: int = 0):
         self.name = name
         self.center = center
         self.radius = radius
@@ -196,14 +197,14 @@ class AddCircle(Node):
 
 
 class AddPolygon(Node):
-    def __init__(self, name, point_names, line=0):
+    def __init__(self, name: str, point_names: List[str], line: int = 0):
         self.name = name
         self.point_names = point_names
         self.line = line
 
 
 class AddText(Node):
-    def __init__(self, name, x, y, text_expr, line=0):
+    def __init__(self, name: str, x: Node, y: Node, text_expr: Node, line: int = 0):
         self.name = name
         self.x = x
         self.y = y
@@ -212,7 +213,7 @@ class AddText(Node):
 
 
 class DeleteObject(Node):
-    def __init__(self, name, line=0):
+    def __init__(self, name: str, line: int = 0):
         self.name = name
         self.line = line
 
@@ -220,31 +221,31 @@ class DeleteObject(Node):
 # 表达式节点
 
 class Num(Node):
-    def __init__(self, value, line=0):
+    def __init__(self, value: float, line: int = 0):
         self.value = value
         self.line = line
 
 
 class Str(Node):
-    def __init__(self, value, line=0):
+    def __init__(self, value: str, line: int = 0):
         self.value = value
         self.line = line
 
 
 class Bool(Node):
-    def __init__(self, value, line=0):
+    def __init__(self, value: bool, line: int = 0):
         self.value = value
         self.line = line
 
 
 class Var(Node):
-    def __init__(self, name, line=0):
+    def __init__(self, name: str, line: int = 0):
         self.name = name
         self.line = line
 
 
 class Bin(Node):
-    def __init__(self, op, left, right, line=0):
+    def __init__(self, op: str, left: Node, right: Node, line: int = 0):
         self.op = op
         self.left = left
         self.right = right
@@ -252,14 +253,14 @@ class Bin(Node):
 
 
 class Unary(Node):
-    def __init__(self, op, operand, line=0):
+    def __init__(self, op: str, operand: Node, line: int = 0):
         self.op = op
         self.operand = operand
         self.line = line
 
 
 class Call(Node):
-    def __init__(self, name, args, line=0):
+    def __init__(self, name: str, args: List[Node], line: int = 0):
         self.name = name
         self.args = args
         self.line = line
@@ -269,8 +270,8 @@ class Call(Node):
 # 词法分析
 # ------------------------------------------------------------
 
-def tokenize(src):
-    tokens = []
+def tokenize(src: str) -> List[Tuple[str, Any, int]]:
+    tokens: List[Tuple[str, Any, int]] = []
     i = 0
     line = 1
     n = len(src)
@@ -401,21 +402,21 @@ def tokenize(src):
 # ------------------------------------------------------------
 
 class Parser:
-    def __init__(self, tokens):
+    def __init__(self, tokens: List[Tuple[str, Any, int]]):
         self.toks = tokens
         self.i = 0
 
     # ---------- 基础 ----------
 
-    def peek(self):
+    def peek(self) -> Tuple[str, Any, int]:
         return self.toks[self.i]
 
-    def advance(self):
+    def advance(self) -> Tuple[str, Any, int]:
         t = self.toks[self.i]
         self.i += 1
         return t
 
-    def at(self, ty, val=None):
+    def at(self, ty: str, val: Optional[str] = None) -> bool:
         t = self.peek()
         if t[0] != ty:
             return False
@@ -423,11 +424,11 @@ class Parser:
             return False
         return True
 
-    def error(self, msg):
+    def error(self, msg: str):
         t = self.peek()
         raise ScriptError(msg, t[2])
 
-    def expect(self, ty, val=None):
+    def expect(self, ty: str, val: Optional[str] = None) -> Tuple[str, Any, int]:
         if not self.at(ty, val):
             t = self.peek()
             if val is None:
@@ -436,12 +437,12 @@ class Parser:
                 self.error(f"期望 {val}，实际得到 {t[1]}")
         return self.advance()
 
-    def expect_key(self, key):
+    def expect_key(self, key: str) -> Tuple[str, Any, int]:
         return self.expect("KEY", key)
 
     # ---------- 入口 ----------
 
-    def parse_program(self):
+    def parse_program(self) -> Program:
         stmts = []
 
         while not self.at("EOF"):
@@ -451,7 +452,7 @@ class Parser:
 
     # ---------- 语句 ----------
 
-    def parse_statement(self):
+    def parse_statement(self) -> Node:
         t = self.peek()
 
         if t[0] == "KEY":
@@ -488,7 +489,7 @@ class Parser:
 
         self.error(f"无法识别的语句：{t[1]}")
 
-    def parse_block(self):
+    def parse_block(self) -> List[Node]:
         self.expect("LBRACE")
         stmts = []
 
@@ -498,7 +499,7 @@ class Parser:
         self.expect("RBRACE")
         return stmts
 
-    def parse_repeat(self):
+    def parse_repeat(self) -> Repeat:
         line = self.peek()[2]
         self.expect_key("repeat")
         count = self.parse_expr()
@@ -506,7 +507,7 @@ class Parser:
 
         return Repeat(count, body, line)
 
-    def parse_for(self):
+    def parse_for(self) -> ForRange:
         line = self.peek()[2]
         self.expect_key("for")
 
@@ -522,7 +523,7 @@ class Parser:
 
         return ForRange(var, start, end, body, line)
 
-    def parse_if(self):
+    def parse_if(self) -> If:
         line = self.peek()[2]
         branches = []
 
@@ -545,7 +546,7 @@ class Parser:
 
         return If(branches, else_body, line)
 
-    def parse_global(self):
+    def parse_global(self) -> Assign:
         line = self.peek()[2]
         self.expect_key("global")
         name = self.expect("ID")[1]
@@ -554,7 +555,7 @@ class Parser:
 
         return Assign(name, expr, scope="global", line=line)
 
-    def parse_set(self):
+    def parse_set(self) -> Assign:
         line = self.peek()[2]
         self.expect_key("set")
         name = self.expect("ID")[1]
@@ -564,7 +565,7 @@ class Parser:
         # set 也视为写全局变量
         return Assign(name, expr, scope="global", line=line)
 
-    def parse_assign(self, scope="local"):
+    def parse_assign(self, scope: str = "local") -> Assign:
         line = self.peek()[2]
         name = self.expect("ID")[1]
         self.expect("ASSIGN")
@@ -572,7 +573,7 @@ class Parser:
 
         return Assign(name, expr, scope=scope, line=line)
 
-    def parse_print(self):
+    def parse_print(self) -> Print:
         line = self.peek()[2]
         self.expect_key("print")
 
@@ -592,7 +593,7 @@ class Parser:
 
     # ---------- add 命令 ----------
 
-    def parse_add(self):
+    def parse_add(self) -> Node:
         line = self.peek()[2]
         self.expect_key("add")
 
@@ -623,7 +624,7 @@ class Parser:
 
         self.error(f"暂不支持 add {kind}")
 
-    def parse_add_point(self, line):
+    def parse_add_point(self, line: int) -> AddPoint:
         self.expect_key("point")
         name = self.expect("ID")[1]
         self.expect_key("at")
@@ -635,7 +636,7 @@ class Parser:
 
         return AddPoint(name, x, y, line)
 
-    def parse_add_segment(self, line):
+    def parse_add_segment(self, line: int) -> AddSegment:
         self.expect_key("segment")
         name = self.expect("ID")[1]
         self.expect_key("from")
@@ -645,7 +646,7 @@ class Parser:
 
         return AddSegment(name, a, b, line)
 
-    def parse_add_line(self, line):
+    def parse_add_line(self, line: int) -> AddLine:
         self.expect_key("line")
         name = self.expect("ID")[1]
         self.expect_key("from")
@@ -655,7 +656,7 @@ class Parser:
 
         return AddLine(name, a, b, line)
 
-    def parse_add_circle(self, line):
+    def parse_add_circle(self, line: int) -> AddCircle:
         self.expect_key("circle")
         name = self.expect("ID")[1]
         self.expect_key("center")
@@ -665,7 +666,7 @@ class Parser:
 
         return AddCircle(name, center, radius, line)
 
-    def parse_add_polygon(self, line):
+    def parse_add_polygon(self, line: int) -> AddPolygon:
         self.expect_key("polygon")
         name = self.expect("ID")[1]
         self.expect_key("points")
@@ -678,7 +679,7 @@ class Parser:
 
         return AddPolygon(name, names, line)
 
-    def parse_add_text(self, line):
+    def parse_add_text(self, line: int) -> AddText:
         self.expect_key("text")
         name = self.expect("ID")[1]
         self.expect_key("at")
@@ -694,7 +695,7 @@ class Parser:
 
     # ---------- delete ----------
 
-    def parse_delete(self):
+    def parse_delete(self) -> DeleteObject:
         line = self.peek()[2]
         self.expect_key("delete")
 
@@ -708,10 +709,10 @@ class Parser:
 
     # ---------- 表达式 ----------
 
-    def parse_expr(self):
+    def parse_expr(self) -> Node:
         return self.parse_or()
 
-    def parse_or(self):
+    def parse_or(self) -> Node:
         left = self.parse_and()
 
         while self.at("KEY", "or"):
@@ -722,7 +723,7 @@ class Parser:
 
         return left
 
-    def parse_and(self):
+    def parse_and(self) -> Node:
         left = self.parse_not()
 
         while self.at("KEY", "and"):
@@ -733,7 +734,7 @@ class Parser:
 
         return left
 
-    def parse_not(self):
+    def parse_not(self) -> Node:
         if self.at("KEY", "not"):
             line = self.peek()[2]
             self.advance()
@@ -741,7 +742,7 @@ class Parser:
 
         return self.parse_comparison()
 
-    def parse_comparison(self):
+    def parse_comparison(self) -> Node:
         left = self.parse_add()
 
         while self.at("OP") and self.peek()[1] in (">", "<", ">=", "<=", "==", "!="):
@@ -751,7 +752,7 @@ class Parser:
 
         return left
 
-    def parse_add(self):
+    def parse_add(self) -> Node:
         left = self.parse_mul()
 
         while self.at("OP") and self.peek()[1] in ("+", "-"):
@@ -761,7 +762,7 @@ class Parser:
 
         return left
 
-    def parse_mul(self):
+    def parse_mul(self) -> Node:
         left = self.parse_power()
 
         while self.at("OP") and self.peek()[1] in ("*", "/", "%"):
@@ -771,7 +772,7 @@ class Parser:
 
         return left
 
-    def parse_power(self):
+    def parse_power(self) -> Node:
         left = self.parse_unary()
 
         if self.at("OP", "^"):
@@ -782,14 +783,14 @@ class Parser:
 
         return left
 
-    def parse_unary(self):
+    def parse_unary(self) -> Node:
         if self.at("OP") and self.peek()[1] in ("+", "-"):
             op = self.advance()[1]
             return Unary(op, self.parse_unary(), self.peek()[2])
 
         return self.parse_primary()
 
-    def parse_primary(self):
+    def parse_primary(self) -> Node:
         t = self.peek()
 
         if t[0] == "NUM":
@@ -837,6 +838,6 @@ class Parser:
         self.error(f"非法表达式：{t[1]}")
 
 
-def parse(src):
+def parse(src: str) -> Program:
     tokens = tokenize(src)
     return Parser(tokens).parse_program()
