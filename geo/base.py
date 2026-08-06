@@ -19,6 +19,7 @@ class GeoObject:
     def __init__(self, parents=()):
         GeoObject._next_id += 1
         self.id = GeoObject._next_id
+        self.name = ""
         self.parents = list(parents)
         self.children = []
         for p in self.parents:

@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-from geo.points import FreePoint
+from geo.points import FreePoint, AbstractPoint
 from core.variables import get_store
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
@@ -31,12 +31,92 @@ class Document(QObject):
         self.expr_objects = []
         self._clipboard = None
         self.meta = {"title": "", "author": "", "theme": "纸白", "created": "", "modified": ""}
+        self.names = {}
+        
+    # ================= 对象命名 =================
 
+    def _auto_name(self, obj):
+        """根据对象类型自动生成名字：P1、S1、C1、Btn1 等。"""
+        tn = type(obj).__name__
+
+        if isinstance(obj, AbstractPoint):
+            prefix = "P"
+        elif tn == "Segment":
+            prefix = "S"
+        elif tn == "Line":
+            prefix = "L"
+        elif tn == "Ray":
+            prefix = "R"
+        elif tn in ("Circle", "ExprCircle"):
+            prefix = "C"
+        elif tn == "RegularPolygon":
+            prefix = "Poly"
+        elif tn == "TextObject":
+            prefix = "T"
+        elif tn == "ChainFill":
+            prefix = "Fill"
+        elif tn == "ScriptButtonObject":
+            prefix = "Btn"
+        elif tn == "FunctionCurve":
+            prefix = "f"
+        else:
+            prefix = tn[:3] or "Obj"
+
+        i = 1
+        while f"{prefix}{i}" in self.names:
+            i += 1
+
+        return f"{prefix}{i}"
+
+    def _unique_name(self, desired, obj):
+        """确保名字唯一；重复则自动加后缀。"""
+        if not desired:
+            return self._auto_name(obj)
+
+        # 脚本引用要求名字必须是合法标识符
+        if not desired.isidentifier():
+            cleaned = "".join(
+                ch if (ch.isalnum() or ch == "_") else "_"
+                for ch in desired
+            )
+            if not cleaned or cleaned[0].isdigit():
+                cleaned = "_" + cleaned
+            desired = cleaned or self._auto_name(obj)
+
+        base = desired
+        i = 2
+
+        while True:
+            old = self.names.get(base)
+            if old is None or old is obj:
+                return base
+            base = f"{desired}_{i}"
+            i += 1
+
+    def _register_name(self, obj):
+        if not hasattr(obj, "name"):
+            obj.name = ""
+
+        obj.name = self._unique_name(getattr(obj, "name", ""), obj)
+        self.names[obj.name] = obj
+
+    def _unregister_name(self, obj):
+        name = getattr(obj, "name", "")
+        if name and self.names.get(name) is obj:
+            del self.names[name]
+
+    def rename_object(self, obj, new_name):
+        """供未来属性面板/右键菜单调用。"""
+        self._unregister_name(obj)
+        obj.name = self._unique_name(new_name, obj)
+        self.names[obj.name] = obj
+        self.changed.emit()
+        
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-
+        self._register_name(obj)
         # ★ 修复：表达式约束对象 + 所有 expr_driver 对象都纳入变量刷新系统
         if (
             isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint))
@@ -65,8 +145,13 @@ class Document(QObject):
         if not sel:
             return
         self._clipboard = [
-            {"id": o.id, "type": o.type_name,
-             "parents": [p.id for p in o.parents], "params": o.dump()}
+            {
+                "id": o.id,
+                "type": o.type_name,
+                "name": getattr(o, "name", ""),
+                "parents": [p.id for p in o.parents],
+                "params": o.dump()
+            }
             for o in self._collect_with_deps(sel)
         ]
 
@@ -83,6 +168,7 @@ class Document(QObject):
             cls = GEO_REGISTRY[item["type"]]
             parents = [id_map[pid] for pid in item["parents"]]
             obj = cls.build(parents, item["params"])
+            obj.name = ""
             if isinstance(obj, FreePoint):        # 只偏移自由点，派生对象自动跟随
                 obj.x += offset[0]
                 obj.y += offset[1]
@@ -119,6 +205,7 @@ class Document(QObject):
                 self.objects.remove(o)
             if o in self.expr_objects:
                 self.expr_objects.remove(o)
+            self._unregister_name(o)
         return doomed
 
     def remove(self, obj):
@@ -142,10 +229,12 @@ class Document(QObject):
     def clear(self):
         if self.objects:
             self._push_undo()
+
         self.objects.clear()
         self.expr_objects.clear()
+        self.names.clear()          # ★
         self.changed.emit()
-
+        
     # ================= 选择 =================
     def set_selection(self, objs):
         target = {id(o) for o in objs}
@@ -173,9 +262,16 @@ class Document(QObject):
 
     # ================= 撤销 / 重做 =================
     def snapshot(self):
-        return [{"id": o.id, "type": o.type_name,
-                 "parents": [p.id for p in o.parents], "params": o.dump()}
-                for o in self.objects]
+        return [
+            {
+                "id": o.id,
+                "type": o.type_name,
+                "name": getattr(o, "name", ""),
+                "parents": [p.id for p in o.parents],
+                "params": o.dump()
+            }
+            for o in self.objects
+        ]
 
     def _push_undo(self):
         self._undo.append(self.snapshot())
@@ -257,7 +353,7 @@ class Document(QObject):
     def _load_state(self, data):
         self.objects.clear()
         self.expr_objects.clear()   # ★ 修复：防止 undo/load 后残留旧表达式对象
-
+        self.names.clear()          
         pool = {}
 
         for item in data:
@@ -265,6 +361,7 @@ class Document(QObject):
             parents = [pool[pid] for pid in item["parents"]]
             obj = cls.build(parents, item["params"])
             obj.id = item["id"]
+            obj.name = item.get("name", "") 
             pool[item["id"]] = self._add(obj)
 
         if data:

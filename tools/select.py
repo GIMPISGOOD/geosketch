@@ -42,7 +42,11 @@ class SelectTool(Tool):
         self._orig_pos: list[Tuple[FreePoint, float, float]] = []
         self._grab_wpt: Optional[Tuple[float, float]] = None
         self._drag_undo_begun = False
-        self._guides: List[Tuple[str, float]] = []   # ★ 智能参考线
+        self._guides: List[Tuple[str, float]] = [] 
+            # ★ 脚本按钮点击/拖动判断
+        self._click_media = None
+        self._press_wpt = None
+        self._moved = False# ★ 智能参考线
 
     def _detect_snap(self, canvas, x, y) -> Tuple[float, float, List[Tuple[str, float]]]:
         """检测对齐吸附：坐标轴 / 其他点。返回 (吸附后x, 吸附后y, 参考线列表)。"""
@@ -85,101 +89,115 @@ class SelectTool(Tool):
                 guides)
 
     def press(self, canvas, wpt, hit):
-     self._reset()
+        self._reset()
 
-     # ★ 修复：先检查已选中媒体对象的手柄。
-     # 旋转手柄在对象世界包围盒外面，不能依赖 pick()/snap_target() 先命中 MediaObject。
-     sp = canvas.to_screen(wpt[0], wpt[1])
+        target = snap_target(canvas, wpt, hit)
 
-     selected_media = [
-        o for o in canvas.doc.objects
-        if o.selected and isinstance(o, MediaObject)
-     ]
-
-     if len(selected_media) == 1:
-        m = selected_media[0]
-
-        # 旋转手柄
-        if getattr(m, "rotatable", False):
-            rr = m.rotate_handle_rect(canvas)
-            if rr.width() > 0 and rr.contains(sp):
-                self.rotate_media = m
-                self._grab_wpt = wpt
-                return
-
-        # 编辑按钮
-        if m.edit_button_rect(canvas).contains(sp):
-            m.edit(canvas)
-            self._reset()
+        if target is None:
+            canvas.doc.set_selection([])
             return
 
-        # 缩放手柄
-        if m.resize_handle_rect(canvas).contains(sp):
-            self.resize_media = m
+        # ★ 延迟导入，避免循环依赖
+        from media.script_button import ScriptButtonObject
+
+        if isinstance(target, MediaObject):
+            was_selected = target.selected
+            canvas.doc.set_selection([target])
+
+            if was_selected:
+                sp = canvas.to_screen(wpt[0], wpt[1])
+
+                # ★ 旋转手柄
+                if getattr(target, "rotatable", False):
+                    rr = target.rotate_handle_rect(canvas)
+                    if rr.width() > 0 and rr.contains(sp):
+                        self.rotate_media = target
+                        self._grab_wpt = wpt
+                        return
+
+                # ★ 编辑按钮
+                if target.edit_button_rect(canvas).contains(sp):
+                    target.edit(canvas)
+                    self._reset()
+                    return
+
+                # ★ 缩放手柄
+                if target.resize_handle_rect(canvas).contains(sp):
+                    self.resize_media = target
+                    self._grab_wpt = wpt
+                    return
+
+            # ★ 媒体对象本体可拖动
+            self.drag_media = target
+            self._media_orig = (target.x, target.y)
             self._grab_wpt = wpt
+
+            # ★ 脚本按钮：如果没有明显拖动，则视为单击运行
+            if isinstance(target, ScriptButtonObject):
+                self._click_media = target
+                self._press_wpt = wpt
+                self._moved = False
+
             return
 
-     target = snap_target(canvas, wpt, hit)
+        selected = [o for o in canvas.doc.objects if o.selected]
+        multi = (len(selected) > 1) and (target in selected)
 
-     if target is None:
-        canvas.doc.set_selection([])
-        return
+        if multi:
+            canvas.doc.set_selection(selected)
 
-    # ★ 修复：媒体对象本体可拖动
-     if isinstance(target, MediaObject):
-        canvas.doc.set_selection([target])
+            pts: list[FreePoint] = []
+            seen = set()
 
-        self.drag_media = target
-        self._media_orig = (target.x, target.y)
+            for o in selected:
+                _free_points_of(o, pts, seen)
+
+            self.drag_pts = pts
+
+        elif isinstance(target, PointOnObject):
+            canvas.doc.set_selection([target])
+            self.drag_poo = target
+
+        elif isinstance(target, FreePoint):
+            canvas.doc.set_selection([target])
+            self.drag_pts = [target]
+
+        elif isinstance(target, AbstractPoint):
+            canvas.doc.set_selection([target])
+
+        else:
+            canvas.doc.set_selection([target])
+
+            pts = []
+            seen = set()
+            _free_points_of(target, pts, seen)
+            self.drag_pts = pts
+
         self._grab_wpt = wpt
-        return
-
-     selected = [o for o in canvas.doc.objects if o.selected]
-     multi = (len(selected) > 1) and (target in selected)
-
-     if multi:
-        canvas.doc.set_selection(selected)
-
-        pts: list[FreePoint] = []
-        seen = set()
-
-        for o in selected:
-            _free_points_of(o, pts, seen)
-
-        self.drag_pts = pts
-
-     elif isinstance(target, PointOnObject):
-        canvas.doc.set_selection([target])
-        self.drag_poo = target
-
-     elif isinstance(target, FreePoint):
-        canvas.doc.set_selection([target])
-        self.drag_pts = [target]
-
-     elif isinstance(target, AbstractPoint):
-        canvas.doc.set_selection([target])
-
-     else:
-        canvas.doc.set_selection([target])
-
-        pts = []
-        seen = set()
-        _free_points_of(target, pts, seen)
-        self.drag_pts = pts
-
-     self._grab_wpt = wpt
-     self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
+        self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
     def move(self, canvas, wpt, hit):
         if (self.drag_poo is None and not self.drag_pts
                 and self.drag_media is None and self.resize_media is None
                 and self.rotate_media is None):
             return
+
+        # ★ 判断脚本按钮是单击还是拖动
+        if self._click_media is not None and self._press_wpt is not None:
+            dx = wpt[0] - self._press_wpt[0]
+            dy = wpt[1] - self._press_wpt[1]
+
+            if math.hypot(dx, dy) > 5.0 / canvas.scale:
+                self._moved = True
+            elif not self._moved:
+                #  ainda 没超过阈值，不启动拖动
+                return
+
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
 
-        self._guides = []  # 每次移动清空参考线
+        self._guides = []
 
         # ★ 旋转媒体对象
         if self.rotate_media is not None:
@@ -190,7 +208,6 @@ class SelectTool(Tool):
                 math.atan2(cur.y() - center.y(), cur.x() - center.x())
             )
 
-            # 旋转手柄默认在对象正上方，所以 +90°
             ang += 90.0
 
             self.rotate_media.rotation = (ang + 360.0) % 360.0
@@ -200,39 +217,55 @@ class SelectTool(Tool):
         if self.resize_media is not None:
             self.resize_media.resize_to(wpt)
             canvas.doc.changed.emit()
-            
+
         elif self.drag_media is not None and self._grab_wpt is not None:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
+
             nx = self._media_orig[0] + dx
             ny = self._media_orig[1] + dy
-            # ★ 媒体对象左上角吸附
+
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
+
             self.drag_media.x = nx
             self.drag_media.y = ny
+
             canvas.doc.changed.emit()
-            
+
         elif self.drag_poo is not None:
             self.drag_poo.drag_to(wpt)
             canvas.doc.recompute_from(self.drag_poo)
-            
+
         elif self._grab_wpt is not None and self.drag_pts:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
+
             base_p, base_ox, base_oy = self._orig_pos[0]
+
             nx = base_ox + dx
             ny = base_oy + dy
-            # ★ 自由点吸附
+
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
+
             actual_dx = nx - base_ox
             actual_dy = ny - base_oy
+
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
+
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
+        # ★ 脚本按钮：没有明显移动则运行
+        if self._click_media is not None and not self._moved:
+            try:
+                self._click_media.run(canvas)
+            except Exception as e:
+                canvas.cursor_info.emit(f"脚本错误：{e}")
+
         if self._drag_undo_begun:
             canvas.doc.end_action()
+
         self._reset()
 
     def cancel(self, canvas):

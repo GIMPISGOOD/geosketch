@@ -409,8 +409,17 @@ class Canvas(QWidget):
             self.doc._commit_undo_if_changed()
 
     def mouseDoubleClickEvent(self, ev):
+        # ★ 双击脚本按钮打开脚本编辑器
+        from media.script_button import ScriptButtonObject
+
+        hit = self.pick(ev.position())
+
+        if isinstance(hit, ScriptButtonObject):
+            hit.edit(self)
+            return
+
         super().mouseDoubleClickEvent(ev)
-            
+        
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
         self.cursor_info.emit(

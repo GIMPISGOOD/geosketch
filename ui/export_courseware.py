@@ -205,6 +205,10 @@ def _jsx_export(doc, include_vars=True):
     for obj in doc.objects:
         if not (obj.visible and obj.exists):
             continue
+    # ★ 导出课件时禁用脚本按钮
+        if type(obj).__name__ == "ScriptButtonObject":
+            continue
+        
         tn = type(obj).__name__
 
         if tn in ("FreePoint", "ExprPoint"):

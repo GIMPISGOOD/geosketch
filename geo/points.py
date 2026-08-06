@@ -125,8 +125,17 @@ def draw_point(p, obj, view):
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
-    draw_math(p, qpt.x() + 9, qpt.y() - 8, _point_label(obj, view), 13,
-              theme.SELECTED if obj.selected else theme.LABEL)
+    # ★ 优先使用对象名；没有名字时回退到旧规则
+    label = getattr(obj, "name", "") or _point_label(obj, view)
+
+    draw_math(
+        p,
+        qpt.x() + 9,
+        qpt.y() - 8,
+        label,
+        13,
+        theme.SELECTED if obj.selected else theme.LABEL
+    )
 
 
 # ───────────────────────────── 磁吸 ─────────────────────────────
