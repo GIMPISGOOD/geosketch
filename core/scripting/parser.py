@@ -743,16 +743,16 @@ class Parser:
         return self.parse_comparison()
 
     def parse_comparison(self) -> Node:
-        left = self.parse_add()
+        left = self.parse_addition()  # ★ 改名
 
         while self.at("OP") and self.peek()[1] in (">", "<", ">=", "<=", "==", "!="):
             op = self.advance()[1]
-            right = self.parse_add()
+            right = self.parse_addition()  # ★ 改名
             left = Bin(op, left, right, left.line)
 
         return left
 
-    def parse_add(self) -> Node:
+    def parse_addition(self) -> Node:  # ★ 改名，避免与语句解析的 parse_add 冲突
         left = self.parse_mul()
 
         while self.at("OP") and self.peek()[1] in ("+", "-"):
