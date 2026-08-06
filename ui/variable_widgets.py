@@ -164,26 +164,49 @@ class VariableSliderPanel(QWidget):
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
-        lbl = QLabel(f"{name} = {var.value:.2f}")
-        lbl.setFont(theme.LABEL_FONT)
-        lbl.setMinimumWidth(90)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        span = (var.vmax - var.vmin) or 1.0
-        slider.setValue(int((var.value - var.vmin) / span * 1000))
-        slider.setMinimumWidth(110)
-        slider.valueChanged.connect(
-            lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax: self._on_slide(n, v, l, a, b))
+
+        # ★ 从动变量：不显示滑杆，只显示表达式和当前值
+        if getattr(var, "expr", ""):
+            lbl = QLabel(f"{name} = {var.expr} = {var.value:.2f}")
+            lbl.setFont(theme.LABEL_FONT)
+            lbl.setToolTip("从动变量：由表达式自动计算，不能手动拖动")
+
+            h.addWidget(lbl, 1)
+
+        else:
+            lbl = QLabel(f"{name} = {var.value:.2f}")
+            lbl.setFont(theme.LABEL_FONT)
+            lbl.setMinimumWidth(90)
+
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 1000)
+
+            span = (var.vmax - var.vmin) or 1.0
+            slider.setValue(int((var.value - var.vmin) / span * 1000))
+            slider.setMinimumWidth(110)
+
+            slider.valueChanged.connect(
+                lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax:
+                    self._on_slide(n, v, l, a, b)
+            )
+
+            # ★ 拖动结束后刷新一次，从动变量的值会跟着更新
+            slider.sliderReleased.connect(self.refresh)
+
+            h.addWidget(lbl)
+            h.addWidget(slider, 1)
+
         rm = QPushButton("×")
         rm.setFixedSize(20, 20)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
+        rm.setStyleSheet(
+            f"border:none;color:{theme.SELECTED.name()};font-weight:700;"
+        )
         rm.clicked.connect(lambda _=False, n=name: self._delete(n))
-        h.addWidget(lbl)
-        h.addWidget(slider, 1)
-        h.addWidget(rm)
-        return w
 
+        h.addWidget(rm)
+
+        return w
     def _on_slide(self, name, v, lbl, vmin, vmax):
         self._dragging = True
         val = vmin + (vmax - vmin) * v / 1000

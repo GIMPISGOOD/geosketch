@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 from ui import theme
 
+from geo.function_sampler import shutdown_sampler
+
 
 def main() -> None:
     app = QApplication(sys.argv)
@@ -19,13 +21,16 @@ def main() -> None:
 
     app.setStyleSheet(theme.app_stylesheet())
 
+    # ★ 应用退出前安全终止后台采样线程
+    app.aboutToQuit.connect(shutdown_sampler)
+
     win = MainWindow()
 
-    # ★ 命令行第一个参数若为 .wgeo，直接载入（启动器靠这个打开课件草图）
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo") and os.path.exists(sys.argv[1]):
         win.doc.load(sys.argv[1])
 
     win.show()
+
     sys.exit(app.exec())
 
 

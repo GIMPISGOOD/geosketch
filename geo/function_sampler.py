@@ -41,6 +41,7 @@ class FunctionSamplerThread(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("FunctionSamplerThread")
         self._tasks: dict[int, _SampleTask] = {}   # curve_id → 最新任务（去重）
         self._queue: list[int] = []                 # 待处理 id 队列
         self._mutex = QMutex()
@@ -58,11 +59,15 @@ class FunctionSamplerThread(QThread):
         self._mutex.unlock()
 
     def stop(self):
+        """停止后台采样线程。"""
         self._mutex.lock()
         self._running = False
         self._cond.wakeOne()
         self._mutex.unlock()
-        self.wait(2000)
+
+        # ★ 只有线程确实在运行时才等待
+        if self.isRunning():
+            self.wait(5000)
 
     def run(self):
         while True:
@@ -151,7 +156,18 @@ _sampler: FunctionSamplerThread | None = None
 
 def get_sampler() -> FunctionSamplerThread:
     global _sampler
+
     if _sampler is None:
         _sampler = FunctionSamplerThread()
         _sampler.start()
+
     return _sampler
+
+
+def shutdown_sampler() -> None:
+    """程序退出时调用，安全终止函数曲线后台采样线程。"""
+    global _sampler
+
+    if _sampler is not None:
+        _sampler.stop()
+        _sampler = None
