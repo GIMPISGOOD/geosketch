@@ -14,7 +14,7 @@ from .errors import ScriptError
 from .parser import (
     Program, Repeat, ForRange, If, Assign, Print,
     AddPoint, AddSegment, AddLine, AddCircle, AddPolygon, AddText,
-    DeleteObject,
+    DeleteObject, NameTemplate,
     Num, Str, Bool, Var, Bin, Unary, Call
 )
 
@@ -181,7 +181,43 @@ class ScriptRuntime:
             store.blockSignals(False)
 
         store.changed.emit()
+    # ------------------------------------------------------------
+    # 对象名模板
+    # ------------------------------------------------------------
 
+    def render_name(self, node, line=None):
+        """把 NameTemplate 渲染成最终对象名。
+
+        例如：
+            P{i}
+            P{i + 1}
+            Point_{n}
+        """
+        if isinstance(node, NameTemplate):
+            buf = []
+
+            for part in node.parts:
+                if isinstance(part, str):
+                    buf.append(part)
+                else:
+                    value = self.eval_expr(part)
+                    buf.append(self._format_value(value))
+
+            name = "".join(buf).strip()
+
+            if not name:
+                raise ScriptError("对象名不能为空", getattr(node, "line", line))
+
+            # 对象名里不允许空格，自动转下划线
+            name = name.replace(" ", "_")
+
+            return name
+
+        if isinstance(node, str):
+            return node
+
+        raise ScriptError("非法对象名", getattr(node, "line", line))
+    
     # ------------------------------------------------------------
     # 对象引用 / 创建 / 删除
     # ------------------------------------------------------------
@@ -192,7 +228,8 @@ class ScriptRuntime:
         if obj is not None and obj in self.doc.objects:
             return obj
 
-        obj = self.doc.names.get(name)
+        names = getattr(self.doc, "names", None) or {}
+        obj = names.get(name)
 
         if obj is None:
             raise ScriptError(f"找不到对象：{name}", line)
@@ -379,49 +416,64 @@ class ScriptRuntime:
     def exec_add_point(self, stmt):
         from geo.points import FreePoint
 
+        name = self.render_name(stmt.name, stmt.line)
+
         x = self._as_number(self.eval_expr(stmt.x), stmt.line)
         y = self._as_number(self.eval_expr(stmt.y), stmt.line)
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         obj = FreePoint(x, y)
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_add_segment(self, stmt):
         from geo.segments import Segment
         from geo.points import AbstractPoint
 
-        a = self.resolve_ref(stmt.a, stmt.line)
-        b = self.resolve_ref(stmt.b, stmt.line)
+        name = self.render_name(stmt.name, stmt.line)
+
+        a_name = self.render_name(stmt.a, stmt.line)
+        b_name = self.render_name(stmt.b, stmt.line)
+
+        a = self.resolve_ref(a_name, stmt.line)
+        b = self.resolve_ref(b_name, stmt.line)
 
         if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
             raise ScriptError("线段两端必须是点对象", stmt.line)
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         obj = Segment(a, b)
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_add_line(self, stmt):
         from plugins.line_tool import Line
         from geo.points import AbstractPoint
 
-        a = self.resolve_ref(stmt.a, stmt.line)
-        b = self.resolve_ref(stmt.b, stmt.line)
+        name = self.render_name(stmt.name, stmt.line)
+
+        a_name = self.render_name(stmt.a, stmt.line)
+        b_name = self.render_name(stmt.b, stmt.line)
+
+        a = self.resolve_ref(a_name, stmt.line)
+        b = self.resolve_ref(b_name, stmt.line)
 
         if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
             raise ScriptError("直线需要两个点对象", stmt.line)
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         obj = Line(a, b)
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_add_circle(self, stmt):
         from geo.constraints import ExprCircle
         from geo.points import AbstractPoint
 
-        center = self.resolve_ref(stmt.center, stmt.line)
+        name = self.render_name(stmt.name, stmt.line)
+
+        center_name = self.render_name(stmt.center, stmt.line)
+        center = self.resolve_ref(center_name, stmt.line)
 
         if not isinstance(center, AbstractPoint):
             raise ScriptError("圆心必须是点对象", stmt.line)
@@ -433,25 +485,28 @@ class ScriptRuntime:
             value = self._as_number(self.eval_expr(stmt.radius), stmt.line)
             expr = str(value)
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         obj = ExprCircle(center, expr)
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_add_polygon(self, stmt):
         from geo.chain_fill import ChainFill, Span, FillStyle
         from geo.points import AbstractPoint
+
+        name = self.render_name(stmt.name, stmt.line)
 
         if len(stmt.point_names) < 3:
             raise ScriptError("多边形至少需要 3 个点", stmt.line)
 
         pts = []
 
-        for name in stmt.point_names:
-            p = self.resolve_ref(name, stmt.line)
+        for name_node in stmt.point_names:
+            point_name = self.render_name(name_node, stmt.line)
+            p = self.resolve_ref(point_name, stmt.line)
 
             if not isinstance(p, AbstractPoint):
-                raise ScriptError(f"{name} 不是点对象", stmt.line)
+                raise ScriptError(f"{point_name} 不是点对象", stmt.line)
 
             pts.append(p)
 
@@ -462,15 +517,17 @@ class ScriptRuntime:
 
         spans.append(Span(pts[-1], pts[0], None))
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         style = FillStyle("#4dabf7", 0.35, "solid")
         obj = ChainFill(spans, style)
 
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_add_text(self, stmt):
         from plugins.text_tool import TextObject
+
+        name = self.render_name(stmt.name, stmt.line)
 
         x = self._as_number(self.eval_expr(stmt.x), stmt.line)
         y = self._as_number(self.eval_expr(stmt.y), stmt.line)
@@ -480,7 +537,7 @@ class ScriptRuntime:
         else:
             text = self._format_value(self.eval_expr(stmt.text_expr))
 
-        self._prepare_name(stmt.name, stmt.line)
+        self._prepare_name(name, stmt.line)
 
         obj = TextObject(
             text=text,
@@ -490,10 +547,12 @@ class ScriptRuntime:
             pos=(x, y)
         )
 
-        self._register_created(obj, stmt.name)
+        self._register_created(obj, name)
 
     def exec_delete(self, stmt):
-        obj = self.resolve_ref(stmt.name, stmt.line)
+        name = self.render_name(stmt.name, stmt.line)
+        obj = self.resolve_ref(name, stmt.line)
+
         self._delete_object(obj, force=False, line=stmt.line)
 
     # ------------------------------------------------------------
@@ -548,14 +607,18 @@ class ScriptRuntime:
         # 逻辑短路
         if op == "and":
             left = self.eval_expr(node.left)
+
             if not self._truth(left):
                 return False
+
             return self._truth(self.eval_expr(node.right))
 
         if op == "or":
             left = self.eval_expr(node.left)
+
             if self._truth(left):
                 return True
+
             return self._truth(self.eval_expr(node.right))
 
         left = self.eval_expr(node.left)
@@ -564,6 +627,10 @@ class ScriptRuntime:
         # 比较
         if op in ("==", "!=", "<", "<=", ">", ">="):
             return self.compare(op, left, right, node.line)
+
+        # ★ 字符串拼接
+        if op == "+" and (isinstance(left, str) or isinstance(right, str)):
+            return self._format_value(left) + self._format_value(right)
 
         # 算术
         a = self._as_number(left, node.line)
@@ -651,13 +718,34 @@ def run_script(doc, script, owner_id=None, canvas=None):
     """执行一段脚本。返回 ScriptRuntime。"""
     from .parser import parse
 
+    # ------------------------------------------------------------
+    # 1. 解析脚本
+    # ------------------------------------------------------------
     try:
         program = parse(script)
+
     except ScriptError as e:
+        # ★ 修复：语法错误也返回 runtime，方便测试和 UI 读取 error
+        rt = ScriptRuntime(doc, canvas=canvas, owner_id=owner_id)
+        rt.error = e
+
         if canvas is not None and hasattr(canvas, "cursor_info"):
             canvas.cursor_info.emit(f"脚本错误：{e}")
-        return None
 
+        return rt
+
+    except Exception as e:
+        rt = ScriptRuntime(doc, canvas=canvas, owner_id=owner_id)
+        rt.error = ScriptError(str(e))
+
+        if canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(f"脚本错误：{e}")
+
+        return rt
+
+    # ------------------------------------------------------------
+    # 2. 执行脚本
+    # ------------------------------------------------------------
     rt = ScriptRuntime(doc, canvas=canvas, owner_id=owner_id)
 
     doc.begin_action()
@@ -667,6 +755,9 @@ def run_script(doc, script, owner_id=None, canvas=None):
     finally:
         doc.end_action()
 
+    # ------------------------------------------------------------
+    # 3. 输出结果
+    # ------------------------------------------------------------
     if rt.error is not None:
         if canvas is not None and hasattr(canvas, "cursor_info"):
             canvas.cursor_info.emit(f"脚本错误：{rt.error}")

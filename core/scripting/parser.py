@@ -165,55 +165,54 @@ class Print(Node):
 
 
 class AddPoint(Node):
-    def __init__(self, name: str, x: Node, y: Node, line: int = 0):
+    def __init__(self, name: "NameTemplate", x: Node, y: Node, line: int = 0):
         self.name = name
         self.x = x
         self.y = y
         self.line = line
 
-
 class AddSegment(Node):
-    def __init__(self, name: str, a: str, b: str, line: int = 0):
+    def __init__(self, name: "NameTemplate", a: "NameTemplate", b: "NameTemplate", line: int = 0):
         self.name = name
         self.a = a
         self.b = b
         self.line = line
-
 
 class AddLine(Node):
-    def __init__(self, name: str, a: str, b: str, line: int = 0):
+    def __init__(self, name: "NameTemplate", a: "NameTemplate", b: "NameTemplate", line: int = 0):
         self.name = name
         self.a = a
         self.b = b
         self.line = line
 
-
 class AddCircle(Node):
-    def __init__(self, name: str, center: str, radius: Node, line: int = 0):
+    def __init__(self, name: "NameTemplate", center: "NameTemplate", radius: Node, line: int = 0):
         self.name = name
         self.center = center
         self.radius = radius
         self.line = line
 
-
 class AddPolygon(Node):
-    def __init__(self, name: str, point_names: List[str], line: int = 0):
+    def __init__(self, name: "NameTemplate", point_names: List["NameTemplate"], line: int = 0):
         self.name = name
         self.point_names = point_names
         self.line = line
 
-
 class AddText(Node):
-    def __init__(self, name: str, x: Node, y: Node, text_expr: Node, line: int = 0):
+    def __init__(self, name: "NameTemplate", x: Node, y: Node, text_expr: Node, line: int = 0):
         self.name = name
         self.x = x
         self.y = y
         self.text_expr = text_expr
         self.line = line
 
+class NameTemplate(Node):
+    def __init__(self, parts, line=0):
+        self.parts = parts
+        self.line = line
 
 class DeleteObject(Node):
-    def __init__(self, name: str, line: int = 0):
+    def __init__(self, name: "NameTemplate", line: int = 0):
         self.name = name
         self.line = line
 
@@ -532,17 +531,37 @@ class Parser:
         body = self.parse_block()
         branches.append((cond, body))
 
-        while self.at("KEY", "elif"):
-            self.advance()
-            cond = self.parse_expr()
-            body = self.parse_block()
-            branches.append((cond, body))
-
         else_body = None
 
-        if self.at("KEY", "else"):
-            self.advance()
-            else_body = self.parse_block()
+        while True:
+            # 支持 elif
+            if self.at("KEY", "elif"):
+                self.advance()
+
+                cond = self.parse_expr()
+                body = self.parse_block()
+                branches.append((cond, body))
+
+                continue
+
+            # 支持 else / else if
+            if self.at("KEY", "else"):
+                self.advance()
+
+                # ★ 兼容 else if 写法，把它当作 elif 处理
+                if self.at("KEY", "if"):
+                    self.advance()
+
+                    cond = self.parse_expr()
+                    body = self.parse_block()
+                    branches.append((cond, body))
+
+                    continue
+
+                else_body = self.parse_block()
+                break
+
+            break
 
         return If(branches, else_body, line)
 
@@ -591,6 +610,46 @@ class Parser:
 
         return Print(expr, line)
 
+    def parse_name_template(self) -> NameTemplate:
+        """解析对象名模板。
+
+        支持：
+            P
+            P{i}
+            P_{i}
+            P{i + 1}
+            P{i}suffix
+            "P{i}"
+        """
+        line = self.peek()[2]
+        parts = []
+
+        # 名字开头：ID / 字符串 / 数字都允许
+        if self.at("ID") or self.at("STR") or self.at("NUM"):
+            t = self.advance()
+            parts.append(str(t[1]))
+        else:
+            self.error("对象名必须以字母、数字或字符串开始")
+
+        # 继续拼接普通文本或 {表达式}
+        while True:
+            if self.at("LBRACE"):
+                self.advance()
+
+                expr = self.parse_expr()
+
+                self.expect("RBRACE")
+                parts.append(expr)
+
+            elif self.at("ID") or self.at("NUM") or self.at("STR"):
+                t = self.advance()
+                parts.append(str(t[1]))
+
+            else:
+                break
+
+        return NameTemplate(parts, line)
+    
     # ---------- add 命令 ----------
 
     def parse_add(self) -> Node:
@@ -626,41 +685,57 @@ class Parser:
 
     def parse_add_point(self, line: int) -> AddPoint:
         self.expect_key("point")
-        name = self.expect("ID")[1]
+
+        # ★ 支持 P{i} 这类名字模板
+        name = self.parse_name_template()
+
         self.expect_key("at")
         self.expect("LPAREN")
+
         x = self.parse_expr()
+
         self.expect("COMMA")
+
         y = self.parse_expr()
+
         self.expect("RPAREN")
 
         return AddPoint(name, x, y, line)
 
     def parse_add_segment(self, line: int) -> AddSegment:
         self.expect_key("segment")
-        name = self.expect("ID")[1]
+
+        name = self.parse_name_template()
+
         self.expect_key("from")
-        a = self.expect("ID")[1]
+        a = self.parse_name_template()
+
         self.expect_key("to")
-        b = self.expect("ID")[1]
+        b = self.parse_name_template()
 
         return AddSegment(name, a, b, line)
 
     def parse_add_line(self, line: int) -> AddLine:
         self.expect_key("line")
-        name = self.expect("ID")[1]
+
+        name = self.parse_name_template()
+
         self.expect_key("from")
-        a = self.expect("ID")[1]
+        a = self.parse_name_template()
+
         self.expect_key("to")
-        b = self.expect("ID")[1]
+        b = self.parse_name_template()
 
         return AddLine(name, a, b, line)
 
     def parse_add_circle(self, line: int) -> AddCircle:
         self.expect_key("circle")
-        name = self.expect("ID")[1]
+
+        name = self.parse_name_template()
+
         self.expect_key("center")
-        center = self.expect("ID")[1]
+        center = self.parse_name_template()
+
         self.expect_key("radius")
         radius = self.parse_expr()
 
@@ -668,25 +743,33 @@ class Parser:
 
     def parse_add_polygon(self, line: int) -> AddPolygon:
         self.expect_key("polygon")
-        name = self.expect("ID")[1]
+
+        name = self.parse_name_template()
+
         self.expect_key("points")
 
-        names = [self.expect("ID")[1]]
+        names = [self.parse_name_template()]
 
         while self.at("COMMA"):
             self.advance()
-            names.append(self.expect("ID")[1])
+            names.append(self.parse_name_template())
 
         return AddPolygon(name, names, line)
 
     def parse_add_text(self, line: int) -> AddText:
         self.expect_key("text")
-        name = self.expect("ID")[1]
+
+        name = self.parse_name_template()
+
         self.expect_key("at")
         self.expect("LPAREN")
+
         x = self.parse_expr()
+
         self.expect("COMMA")
+
         y = self.parse_expr()
+
         self.expect("RPAREN")
 
         text_expr = self.parse_expr()
@@ -697,13 +780,14 @@ class Parser:
 
     def parse_delete(self) -> DeleteObject:
         line = self.peek()[2]
+
         self.expect_key("delete")
 
         # delete point P / delete object P / delete P 都允许
         if self.at("KEY", "point") or self.at("KEY", "object"):
             self.advance()
 
-        name = self.expect("ID")[1]
+        name = self.parse_name_template()
 
         return DeleteObject(name, line)
 

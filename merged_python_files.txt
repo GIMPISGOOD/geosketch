@@ -42,7 +42,7 @@ if __name__ == "__main__":
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\document.py
 鏂囦欢鍚?   document.py
-淇敼鏃堕棿: 08/05/2026 14:17:46
+淇敼鏃堕棿: 08/06/2026 15:55:13
 ============================================================
 
 import json
@@ -53,7 +53,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-from geo.points import FreePoint
+from geo.points import FreePoint, AbstractPoint
 from core.variables import get_store
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
@@ -78,13 +78,100 @@ class Document(QObject):
         self.expr_objects = []
         self._clipboard = None
         self.meta = {"title": "", "author": "", "theme": "纸白", "created": "", "modified": ""}
+        self.names = {}
+        
+    # ================= 对象命名 =================
 
+    def _auto_name(self, obj):
+        """根据对象类型自动生成名字：P1、S1、C1、Btn1 等。"""
+        tn = type(obj).__name__
+
+        if isinstance(obj, AbstractPoint):
+            prefix = "P"
+        elif tn == "Segment":
+            prefix = "S"
+        elif tn == "Line":
+            prefix = "L"
+        elif tn == "Ray":
+            prefix = "R"
+        elif tn in ("Circle", "ExprCircle"):
+            prefix = "C"
+        elif tn == "RegularPolygon":
+            prefix = "Poly"
+        elif tn == "TextObject":
+            prefix = "T"
+        elif tn == "ChainFill":
+            prefix = "Fill"
+        elif tn == "ScriptButtonObject":
+            prefix = "Btn"
+        elif tn == "FunctionCurve":
+            prefix = "f"
+        else:
+            prefix = tn[:3] or "Obj"
+
+        i = 1
+        while f"{prefix}{i}" in self.names:
+            i += 1
+
+        return f"{prefix}{i}"
+
+    def _unique_name(self, desired, obj):
+        """确保名字唯一；重复则自动加后缀。"""
+        if not desired:
+            return self._auto_name(obj)
+
+        # 脚本引用要求名字必须是合法标识符
+        if not desired.isidentifier():
+            cleaned = "".join(
+                ch if (ch.isalnum() or ch == "_") else "_"
+                for ch in desired
+            )
+            if not cleaned or cleaned[0].isdigit():
+                cleaned = "_" + cleaned
+            desired = cleaned or self._auto_name(obj)
+
+        base = desired
+        i = 2
+
+        while True:
+            old = self.names.get(base)
+            if old is None or old is obj:
+                return base
+            base = f"{desired}_{i}"
+            i += 1
+
+    def _register_name(self, obj):
+        if not hasattr(obj, "name"):
+            obj.name = ""
+
+        obj.name = self._unique_name(getattr(obj, "name", ""), obj)
+        self.names[obj.name] = obj
+
+    def _unregister_name(self, obj):
+        name = getattr(obj, "name", "")
+        if name and self.names.get(name) is obj:
+            del self.names[name]
+
+    def rename_object(self, obj, new_name):
+        """供未来属性面板/右键菜单调用。"""
+        self._unregister_name(obj)
+        obj.name = self._unique_name(new_name, obj)
+        self.names[obj.name] = obj
+        self.changed.emit()
+        
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
-            self.expr_objects.append(obj)
+        self._register_name(obj)
+        # ★ 修复：表达式约束对象 + 所有 expr_driver 对象都纳入变量刷新系统
+        if (
+            isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint))
+            or getattr(obj, "expr_driver", False)
+        ):
+            if obj not in self.expr_objects:
+                self.expr_objects.append(obj)
+
         return obj
 
     def _collect_with_deps(self, objs):
@@ -105,8 +192,13 @@ class Document(QObject):
         if not sel:
             return
         self._clipboard = [
-            {"id": o.id, "type": o.type_name,
-             "parents": [p.id for p in o.parents], "params": o.dump()}
+            {
+                "id": o.id,
+                "type": o.type_name,
+                "name": getattr(o, "name", ""),
+                "parents": [p.id for p in o.parents],
+                "params": o.dump()
+            }
             for o in self._collect_with_deps(sel)
         ]
 
@@ -123,6 +215,7 @@ class Document(QObject):
             cls = GEO_REGISTRY[item["type"]]
             parents = [id_map[pid] for pid in item["parents"]]
             obj = cls.build(parents, item["params"])
+            obj.name = ""
             if isinstance(obj, FreePoint):        # 只偏移自由点，派生对象自动跟随
                 obj.x += offset[0]
                 obj.y += offset[1]
@@ -159,6 +252,7 @@ class Document(QObject):
                 self.objects.remove(o)
             if o in self.expr_objects:
                 self.expr_objects.remove(o)
+            self._unregister_name(o)
         return doomed
 
     def remove(self, obj):
@@ -182,10 +276,12 @@ class Document(QObject):
     def clear(self):
         if self.objects:
             self._push_undo()
+
         self.objects.clear()
         self.expr_objects.clear()
+        self.names.clear()          # ★
         self.changed.emit()
-
+        
     # ================= 选择 =================
     def set_selection(self, objs):
         target = {id(o) for o in objs}
@@ -213,9 +309,16 @@ class Document(QObject):
 
     # ================= 撤销 / 重做 =================
     def snapshot(self):
-        return [{"id": o.id, "type": o.type_name,
-                 "parents": [p.id for p in o.parents], "params": o.dump()}
-                for o in self.objects]
+        return [
+            {
+                "id": o.id,
+                "type": o.type_name,
+                "name": getattr(o, "name", ""),
+                "parents": [p.id for p in o.parents],
+                "params": o.dump()
+            }
+            for o in self.objects
+        ]
 
     def _push_undo(self):
         self._undo.append(self.snapshot())
@@ -296,15 +399,21 @@ class Document(QObject):
     # ================= 序列化 =================
     def _load_state(self, data):
         self.objects.clear()
+        self.expr_objects.clear()   # ★ 修复：防止 undo/load 后残留旧表达式对象
+        self.names.clear()          
         pool = {}
+
         for item in data:
             cls = GEO_REGISTRY[item["type"]]
             parents = [pool[pid] for pid in item["parents"]]
             obj = cls.build(parents, item["params"])
-            obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+            obj.id = item["id"]
+            obj.name = item.get("name", "") 
             pool[item["id"]] = self._add(obj)
+
         if data:
             GeoObject.bump_ids(max(item["id"] for item in data))
+
         self.changed.emit()
 
     def save(self, path):
@@ -723,9 +832,1572 @@ def render_template(text: str) -> str:
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\errors.py
+鏂囦欢鍚?   errors.py
+淇敼鏃堕棿: 08/06/2026 15:57:24
+============================================================
+
+class ScriptError(Exception):
+    """脚本错误：带行号。"""
+
+    def __init__(self, message, line=None):
+        if line is not None:
+            message = f"第 {line} 行：{message}"
+        super().__init__(message)
+        self.line = line
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\parser.py
+鏂囦欢鍚?   parser.py
+淇敼鏃堕棿: 08/06/2026 16:08:02
+============================================================
+
+"""GeoSketch 脚本解析器。
+
+支持：
+- repeat N {}
+- for i from A to B {}
+- if cond {} else if cond {} else {}
+- local/global 变量赋值
+- print(...)
+- add point / segment / line / circle / polygon / text
+- delete point / object
+"""
+
+from typing import Any, List, Optional, Tuple, Union
+from .errors import ScriptError
+
+
+# ------------------------------------------------------------
+# 关键字
+# ------------------------------------------------------------
+
+KEYWORDS = {
+    # 控制流
+    "repeat": "repeat",
+    "重复": "repeat",
+
+    "for": "for",
+    "遍历": "for",
+
+    "from": "from",
+    "从": "from",
+
+    "to": "to",
+    "到": "to",
+
+    "if": "if",
+    "如果": "if",
+
+    "elif": "elif",
+    "否则如果": "elif",
+
+    "else": "else",
+    "否则": "else",
+
+    # 变量
+    "global": "global",
+    "全局": "global",
+
+    "set": "set",
+    "设置": "set",
+
+    # 布尔
+    "true": "true",
+    "真": "true",
+
+    "false": "false",
+    "假": "false",
+
+    # 逻辑
+    "and": "and",
+    "并且": "and",
+    "且": "and",
+
+    "or": "or",
+    "或者": "or",
+
+    "not": "not",
+    "非": "not",
+
+    # 命令
+    "add": "add",
+    "新增": "add",
+    "添加": "add",
+
+    "delete": "delete",
+    "删除": "delete",
+
+    "print": "print",
+    "打印": "print",
+
+    # 图元
+    "point": "point",
+    "点": "point",
+
+    "segment": "segment",
+    "线段": "segment",
+
+    "line": "line",
+    "直线": "line",
+
+    "circle": "circle",
+    "圆": "circle",
+
+    "polygon": "polygon",
+    "多边形": "polygon",
+
+    "text": "text",
+    "文本": "text",
+
+    # 介词
+    "at": "at",
+    "在": "at",
+
+    "center": "center",
+    "圆心": "center",
+
+    "radius": "radius",
+    "半径": "radius",
+
+    "points": "points",
+    "点集": "points",
+
+    "object": "object",
+    "对象": "object",
+}
+
+
+# ------------------------------------------------------------
+# AST 节点
+# ------------------------------------------------------------
+
+class Node:
+    line: int = 0
+
+
+class Program(Node):
+    def __init__(self, statements: List[Node]):
+        self.statements = statements
+
+
+class Repeat(Node):
+    def __init__(self, count: Node, body: List[Node], line: int = 0):
+        self.count = count
+        self.body = body
+        self.line = line
+
+
+class ForRange(Node):
+    def __init__(self, var: str, start: Node, end: Node, body: List[Node], line: int = 0):
+        self.var = var
+        self.start = start
+        self.end = end
+        self.body = body
+        self.line = line
+
+
+class If(Node):
+    def __init__(self, branches: List[Tuple[Node, List[Node]]], else_body: Optional[List[Node]], line: int = 0):
+        self.branches = branches
+        self.else_body = else_body
+        self.line = line
+
+
+class Assign(Node):
+    def __init__(self, name: str, expr: Node, scope: str = "local", line: int = 0):
+        self.name = name
+        self.expr = expr
+        self.scope = scope
+        self.line = line
+
+
+class Print(Node):
+    def __init__(self, expr: Optional[Node], line: int = 0):
+        self.expr = expr
+        self.line = line
+
+
+class AddPoint(Node):
+    def __init__(self, name: str, x: Node, y: Node, line: int = 0):
+        self.name = name
+        self.x = x
+        self.y = y
+        self.line = line
+
+
+class AddSegment(Node):
+    def __init__(self, name: str, a: str, b: str, line: int = 0):
+        self.name = name
+        self.a = a
+        self.b = b
+        self.line = line
+
+
+class AddLine(Node):
+    def __init__(self, name: str, a: str, b: str, line: int = 0):
+        self.name = name
+        self.a = a
+        self.b = b
+        self.line = line
+
+
+class AddCircle(Node):
+    def __init__(self, name: str, center: str, radius: Node, line: int = 0):
+        self.name = name
+        self.center = center
+        self.radius = radius
+        self.line = line
+
+
+class AddPolygon(Node):
+    def __init__(self, name: str, point_names: List[str], line: int = 0):
+        self.name = name
+        self.point_names = point_names
+        self.line = line
+
+
+class AddText(Node):
+    def __init__(self, name: str, x: Node, y: Node, text_expr: Node, line: int = 0):
+        self.name = name
+        self.x = x
+        self.y = y
+        self.text_expr = text_expr
+        self.line = line
+
+
+class DeleteObject(Node):
+    def __init__(self, name: str, line: int = 0):
+        self.name = name
+        self.line = line
+
+
+# 表达式节点
+
+class Num(Node):
+    def __init__(self, value: float, line: int = 0):
+        self.value = value
+        self.line = line
+
+
+class Str(Node):
+    def __init__(self, value: str, line: int = 0):
+        self.value = value
+        self.line = line
+
+
+class Bool(Node):
+    def __init__(self, value: bool, line: int = 0):
+        self.value = value
+        self.line = line
+
+
+class Var(Node):
+    def __init__(self, name: str, line: int = 0):
+        self.name = name
+        self.line = line
+
+
+class Bin(Node):
+    def __init__(self, op: str, left: Node, right: Node, line: int = 0):
+        self.op = op
+        self.left = left
+        self.right = right
+        self.line = line
+
+
+class Unary(Node):
+    def __init__(self, op: str, operand: Node, line: int = 0):
+        self.op = op
+        self.operand = operand
+        self.line = line
+
+
+class Call(Node):
+    def __init__(self, name: str, args: List[Node], line: int = 0):
+        self.name = name
+        self.args = args
+        self.line = line
+
+
+# ------------------------------------------------------------
+# 词法分析
+# ------------------------------------------------------------
+
+def tokenize(src: str) -> List[Tuple[str, Any, int]]:
+    tokens: List[Tuple[str, Any, int]] = []
+    i = 0
+    line = 1
+    n = len(src)
+
+    two_ops = {">=", "<=", "==", "!="}
+    single_ops = set("+-*/%^<>")
+
+    while i < n:
+        ch = src[i]
+
+        if ch == "\n":
+            line += 1
+            i += 1
+            continue
+
+        if ch.isspace():
+            i += 1
+            continue
+
+        # 注释
+        if ch == "#":
+            while i < n and src[i] != "\n":
+                i += 1
+            continue
+
+        # 字符串
+        if ch in ("\"", "'"):
+            quote = ch
+            i += 1
+            buf = []
+
+            while i < n and src[i] != quote:
+                if src[i] == "\\" and i + 1 < n:
+                    nxt = src[i + 1]
+                    if nxt == "n":
+                        buf.append("\n")
+                    elif nxt == "t":
+                        buf.append("\t")
+                    else:
+                        buf.append(nxt)
+                    i += 2
+                    continue
+
+                if src[i] == "\n":
+                    line += 1
+
+                buf.append(src[i])
+                i += 1
+
+            if i >= n:
+                raise ScriptError("字符串未闭合", line)
+
+            i += 1
+            tokens.append(("STR", "".join(buf), line))
+            continue
+
+        # 数字
+        if ch.isdigit() or (ch == "." and i + 1 < n and src[i + 1].isdigit()):
+            j = i
+            dot = False
+
+            while j < n and (src[j].isdigit() or (src[j] == "." and not dot)):
+                if src[j] == ".":
+                    dot = True
+                j += 1
+
+            text = src[i:j]
+            try:
+                val = float(text)
+            except Exception:
+                raise ScriptError(f"非法数字：{text}", line)
+
+            tokens.append(("NUM", val, line))
+            i = j
+            continue
+
+        # 标识符 / 关键字
+        if ch.isalpha() or ch == "_":
+            j = i + 1
+
+            while j < n and (src[j].isalnum() or src[j] == "_"):
+                j += 1
+
+            word = src[i:j]
+            key = word.lower()
+
+            if key in KEYWORDS:
+                tokens.append(("KEY", KEYWORDS[key], line))
+            else:
+                tokens.append(("ID", word, line))
+
+            i = j
+            continue
+
+        # 双字符运算符
+        two = src[i:i + 2]
+        if two in two_ops:
+            tokens.append(("OP", two, line))
+            i += 2
+            continue
+
+        # 单字符
+        if ch == "{":
+            tokens.append(("LBRACE", ch, line))
+        elif ch == "}":
+            tokens.append(("RBRACE", ch, line))
+        elif ch == "(":
+            tokens.append(("LPAREN", ch, line))
+        elif ch == ")":
+            tokens.append(("RPAREN", ch, line))
+        elif ch == ",":
+            tokens.append(("COMMA", ch, line))
+        elif ch == "=":
+            tokens.append(("ASSIGN", ch, line))
+        elif ch in single_ops:
+            tokens.append(("OP", ch, line))
+        else:
+            raise ScriptError(f"无法识别的字符：{ch}", line)
+
+        i += 1
+
+    tokens.append(("EOF", "", line))
+    return tokens
+
+
+# ------------------------------------------------------------
+# 语法分析
+# ------------------------------------------------------------
+
+class Parser:
+    def __init__(self, tokens: List[Tuple[str, Any, int]]):
+        self.toks = tokens
+        self.i = 0
+
+    # ---------- 基础 ----------
+
+    def peek(self) -> Tuple[str, Any, int]:
+        return self.toks[self.i]
+
+    def advance(self) -> Tuple[str, Any, int]:
+        t = self.toks[self.i]
+        self.i += 1
+        return t
+
+    def at(self, ty: str, val: Optional[str] = None) -> bool:
+        t = self.peek()
+        if t[0] != ty:
+            return False
+        if val is not None and t[1] != val:
+            return False
+        return True
+
+    def error(self, msg: str):
+        t = self.peek()
+        raise ScriptError(msg, t[2])
+
+    def expect(self, ty: str, val: Optional[str] = None) -> Tuple[str, Any, int]:
+        if not self.at(ty, val):
+            t = self.peek()
+            if val is None:
+                self.error(f"期望 {ty}，实际得到 {t[0]}:{t[1]}")
+            else:
+                self.error(f"期望 {val}，实际得到 {t[1]}")
+        return self.advance()
+
+    def expect_key(self, key: str) -> Tuple[str, Any, int]:
+        return self.expect("KEY", key)
+
+    # ---------- 入口 ----------
+
+    def parse_program(self) -> Program:
+        stmts = []
+
+        while not self.at("EOF"):
+            stmts.append(self.parse_statement())
+
+        return Program(stmts)
+
+    # ---------- 语句 ----------
+
+    def parse_statement(self) -> Node:
+        t = self.peek()
+
+        if t[0] == "KEY":
+            key = t[1]
+
+            if key == "repeat":
+                return self.parse_repeat()
+
+            if key == "for":
+                return self.parse_for()
+
+            if key == "if":
+                return self.parse_if()
+
+            if key == "global":
+                return self.parse_global()
+
+            if key == "set":
+                return self.parse_set()
+
+            if key == "print":
+                return self.parse_print()
+
+            if key == "add":
+                return self.parse_add()
+
+            if key == "delete":
+                return self.parse_delete()
+
+        if t[0] == "ID":
+            nxt = self.toks[self.i + 1]
+            if nxt[0] == "ASSIGN":
+                return self.parse_assign(scope="local")
+
+        self.error(f"无法识别的语句：{t[1]}")
+
+    def parse_block(self) -> List[Node]:
+        self.expect("LBRACE")
+        stmts = []
+
+        while not self.at("RBRACE") and not self.at("EOF"):
+            stmts.append(self.parse_statement())
+
+        self.expect("RBRACE")
+        return stmts
+
+    def parse_repeat(self) -> Repeat:
+        line = self.peek()[2]
+        self.expect_key("repeat")
+        count = self.parse_expr()
+        body = self.parse_block()
+
+        return Repeat(count, body, line)
+
+    def parse_for(self) -> ForRange:
+        line = self.peek()[2]
+        self.expect_key("for")
+
+        var = self.expect("ID")[1]
+
+        self.expect_key("from")
+        start = self.parse_expr()
+
+        self.expect_key("to")
+        end = self.parse_expr()
+
+        body = self.parse_block()
+
+        return ForRange(var, start, end, body, line)
+
+    def parse_if(self) -> If:
+        line = self.peek()[2]
+        branches = []
+
+        self.expect_key("if")
+        cond = self.parse_expr()
+        body = self.parse_block()
+        branches.append((cond, body))
+
+        while self.at("KEY", "elif"):
+            self.advance()
+            cond = self.parse_expr()
+            body = self.parse_block()
+            branches.append((cond, body))
+
+        else_body = None
+
+        if self.at("KEY", "else"):
+            self.advance()
+            else_body = self.parse_block()
+
+        return If(branches, else_body, line)
+
+    def parse_global(self) -> Assign:
+        line = self.peek()[2]
+        self.expect_key("global")
+        name = self.expect("ID")[1]
+        self.expect("ASSIGN")
+        expr = self.parse_expr()
+
+        return Assign(name, expr, scope="global", line=line)
+
+    def parse_set(self) -> Assign:
+        line = self.peek()[2]
+        self.expect_key("set")
+        name = self.expect("ID")[1]
+        self.expect("ASSIGN")
+        expr = self.parse_expr()
+
+        # set 也视为写全局变量
+        return Assign(name, expr, scope="global", line=line)
+
+    def parse_assign(self, scope: str = "local") -> Assign:
+        line = self.peek()[2]
+        name = self.expect("ID")[1]
+        self.expect("ASSIGN")
+        expr = self.parse_expr()
+
+        return Assign(name, expr, scope=scope, line=line)
+
+    def parse_print(self) -> Print:
+        line = self.peek()[2]
+        self.expect_key("print")
+
+        expr = None
+
+        if self.at("LPAREN"):
+            self.advance()
+
+            if not self.at("RPAREN"):
+                expr = self.parse_expr()
+
+            self.expect("RPAREN")
+        else:
+            expr = self.parse_expr()
+
+        return Print(expr, line)
+
+    # ---------- add 命令 ----------
+
+    def parse_add(self) -> Node:
+        line = self.peek()[2]
+        self.expect_key("add")
+
+        t = self.peek()
+
+        if t[0] != "KEY":
+            self.error("add 后需要指定对象类型：point/segment/line/circle/polygon/text")
+
+        kind = t[1]
+
+        if kind == "point":
+            return self.parse_add_point(line)
+
+        if kind == "segment":
+            return self.parse_add_segment(line)
+
+        if kind == "line":
+            return self.parse_add_line(line)
+
+        if kind == "circle":
+            return self.parse_add_circle(line)
+
+        if kind == "polygon":
+            return self.parse_add_polygon(line)
+
+        if kind == "text":
+            return self.parse_add_text(line)
+
+        self.error(f"暂不支持 add {kind}")
+
+    def parse_add_point(self, line: int) -> AddPoint:
+        self.expect_key("point")
+        name = self.expect("ID")[1]
+        self.expect_key("at")
+        self.expect("LPAREN")
+        x = self.parse_expr()
+        self.expect("COMMA")
+        y = self.parse_expr()
+        self.expect("RPAREN")
+
+        return AddPoint(name, x, y, line)
+
+    def parse_add_segment(self, line: int) -> AddSegment:
+        self.expect_key("segment")
+        name = self.expect("ID")[1]
+        self.expect_key("from")
+        a = self.expect("ID")[1]
+        self.expect_key("to")
+        b = self.expect("ID")[1]
+
+        return AddSegment(name, a, b, line)
+
+    def parse_add_line(self, line: int) -> AddLine:
+        self.expect_key("line")
+        name = self.expect("ID")[1]
+        self.expect_key("from")
+        a = self.expect("ID")[1]
+        self.expect_key("to")
+        b = self.expect("ID")[1]
+
+        return AddLine(name, a, b, line)
+
+    def parse_add_circle(self, line: int) -> AddCircle:
+        self.expect_key("circle")
+        name = self.expect("ID")[1]
+        self.expect_key("center")
+        center = self.expect("ID")[1]
+        self.expect_key("radius")
+        radius = self.parse_expr()
+
+        return AddCircle(name, center, radius, line)
+
+    def parse_add_polygon(self, line: int) -> AddPolygon:
+        self.expect_key("polygon")
+        name = self.expect("ID")[1]
+        self.expect_key("points")
+
+        names = [self.expect("ID")[1]]
+
+        while self.at("COMMA"):
+            self.advance()
+            names.append(self.expect("ID")[1])
+
+        return AddPolygon(name, names, line)
+
+    def parse_add_text(self, line: int) -> AddText:
+        self.expect_key("text")
+        name = self.expect("ID")[1]
+        self.expect_key("at")
+        self.expect("LPAREN")
+        x = self.parse_expr()
+        self.expect("COMMA")
+        y = self.parse_expr()
+        self.expect("RPAREN")
+
+        text_expr = self.parse_expr()
+
+        return AddText(name, x, y, text_expr, line)
+
+    # ---------- delete ----------
+
+    def parse_delete(self) -> DeleteObject:
+        line = self.peek()[2]
+        self.expect_key("delete")
+
+        # delete point P / delete object P / delete P 都允许
+        if self.at("KEY", "point") or self.at("KEY", "object"):
+            self.advance()
+
+        name = self.expect("ID")[1]
+
+        return DeleteObject(name, line)
+
+    # ---------- 表达式 ----------
+
+    def parse_expr(self) -> Node:
+        return self.parse_or()
+
+    def parse_or(self) -> Node:
+        left = self.parse_and()
+
+        while self.at("KEY", "or"):
+            line = self.peek()[2]
+            self.advance()
+            right = self.parse_and()
+            left = Bin("or", left, right, line)
+
+        return left
+
+    def parse_and(self) -> Node:
+        left = self.parse_not()
+
+        while self.at("KEY", "and"):
+            line = self.peek()[2]
+            self.advance()
+            right = self.parse_not()
+            left = Bin("and", left, right, line)
+
+        return left
+
+    def parse_not(self) -> Node:
+        if self.at("KEY", "not"):
+            line = self.peek()[2]
+            self.advance()
+            return Unary("not", self.parse_not(), line)
+
+        return self.parse_comparison()
+
+    def parse_comparison(self) -> Node:
+        left = self.parse_addition()  # ★ 改名
+
+        while self.at("OP") and self.peek()[1] in (">", "<", ">=", "<=", "==", "!="):
+            op = self.advance()[1]
+            right = self.parse_addition()  # ★ 改名
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_addition(self) -> Node:  # ★ 改名，避免与语句解析的 parse_add 冲突
+        left = self.parse_mul()
+
+        while self.at("OP") and self.peek()[1] in ("+", "-"):
+            op = self.advance()[1]
+            right = self.parse_mul()
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_mul(self) -> Node:
+        left = self.parse_power()
+
+        while self.at("OP") and self.peek()[1] in ("*", "/", "%"):
+            op = self.advance()[1]
+            right = self.parse_power()
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_power(self) -> Node:
+        left = self.parse_unary()
+
+        if self.at("OP", "^"):
+            line = self.peek()[2]
+            self.advance()
+            right = self.parse_power()
+            return Bin("^", left, right, line)
+
+        return left
+
+    def parse_unary(self) -> Node:
+        if self.at("OP") and self.peek()[1] in ("+", "-"):
+            op = self.advance()[1]
+            return Unary(op, self.parse_unary(), self.peek()[2])
+
+        return self.parse_primary()
+
+    def parse_primary(self) -> Node:
+        t = self.peek()
+
+        if t[0] == "NUM":
+            self.advance()
+            return Num(t[1], t[2])
+
+        if t[0] == "STR":
+            self.advance()
+            return Str(t[1], t[2])
+
+        if t[0] == "KEY" and t[1] == "true":
+            self.advance()
+            return Bool(True, t[2])
+
+        if t[0] == "KEY" and t[1] == "false":
+            self.advance()
+            return Bool(False, t[2])
+
+        if t[0] == "ID":
+            name = self.advance()[1]
+
+            # 支持 sin(x), sqrt(x) 等数学函数
+            if self.at("LPAREN"):
+                self.advance()
+                args = []
+
+                if not self.at("RPAREN"):
+                    args.append(self.parse_expr())
+
+                    while self.at("COMMA"):
+                        self.advance()
+                        args.append(self.parse_expr())
+
+                self.expect("RPAREN")
+                return Call(name, args, t[2])
+
+            return Var(name, t[2])
+
+        if t[0] == "LPAREN":
+            self.advance()
+            expr = self.parse_expr()
+            self.expect("RPAREN")
+            return expr
+
+        self.error(f"非法表达式：{t[1]}")
+
+
+def parse(src: str) -> Program:
+    tokens = tokenize(src)
+    return Parser(tokens).parse_program()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\runtime.py
+鏂囦欢鍚?   runtime.py
+淇敼鏃堕棿: 08/06/2026 15:58:28
+============================================================
+
+"""GeoSketch 脚本运行时。
+
+职责：
+- 执行 AST
+- 管理局部变量 / 全局变量
+- 管理脚本创建对象
+- 处理 __keep
+- 控制最大执行步数
+"""
+
+from core.variables import FUNCS, CONSTS
+
+from .errors import ScriptError
+from .parser import (
+    Program, Repeat, ForRange, If, Assign, Print,
+    AddPoint, AddSegment, AddLine, AddCircle, AddPolygon, AddText,
+    DeleteObject,
+    Num, Str, Bool, Var, Bin, Unary, Call
+)
+
+
+class ScriptRuntime:
+    MAX_STEPS = 100000
+
+    def __init__(self, doc, canvas=None, owner_id=None):
+        self.doc = doc
+        self.canvas = canvas
+        self.owner_id = owner_id
+
+        self.locals = {}
+        self.globals = {}
+
+        # 脚本内对象引用表：脚本名 -> GeoObject
+        self.refs = {}
+
+        self.created = []
+        self.deleted = []
+        self.logs = []
+
+        self.steps = 0
+        self.keep = False
+        self.allow_existing = False
+        self.error = None
+
+    # ------------------------------------------------------------
+    # 执行入口
+    # ------------------------------------------------------------
+
+    def execute(self, program: Program):
+        try:
+            for stmt in program.statements:
+                self._step(stmt)
+                self.exec_stmt(stmt)
+
+            self._finalize_success()
+
+        except ScriptError as e:
+            self.error = e
+            self._finalize_error()
+
+        except Exception as e:
+            self.error = ScriptError(str(e))
+            self._finalize_error()
+
+        return self
+
+    def _finalize_success(self):
+        keep_val = self.locals.get(
+            "__keep",
+            self.globals.get("__keep", False)
+        )
+
+        self.keep = self._truth(keep_val)
+
+        self._apply_globals()
+
+        if not self.keep:
+            self._remove_created()
+
+        self.doc.changed.emit()
+
+    def _finalize_error(self):
+        # 出错时不保留临时对象
+        self._remove_created()
+        self.doc.changed.emit()
+
+    # ------------------------------------------------------------
+    # 基础工具
+    # ------------------------------------------------------------
+
+    def _step(self, node=None):
+        self.steps += 1
+
+        if self.steps > self.MAX_STEPS:
+            line = getattr(node, "line", None)
+            raise ScriptError(f"超过最大执行步数 {self.MAX_STEPS}", line)
+
+    def _truth(self, value):
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+
+        if isinstance(value, str):
+            return len(value) > 0
+
+        return bool(value)
+
+    def _as_number(self, value, line=None):
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        raise ScriptError("此处需要数值", line)
+
+    def _format_value(self, value):
+        if isinstance(value, float):
+            if abs(value - round(value)) < 1e-9:
+                return str(int(round(value)))
+            return f"{value:.6g}"
+
+        return str(value)
+
+    # ------------------------------------------------------------
+    # 变量
+    # ------------------------------------------------------------
+
+    def lookup_var(self, name, line=None):
+        if name in self.locals:
+            return self.locals[name]
+
+        if name in self.globals:
+            return self.globals[name]
+
+        # 全局变量系统
+        var = self.doc.vars.get_var(name)
+        if var is not None:
+            return var.value
+
+        if name in CONSTS:
+            return CONSTS[name]
+
+        raise ScriptError(f"未定义变量：{name}", line)
+
+    def _apply_globals(self):
+        store = self.doc.vars
+
+        if not self.globals:
+            return
+
+        store.blockSignals(True)
+
+        try:
+            for name, value in self.globals.items():
+                # __keep 是脚本内部特殊变量，不写入全局变量面板
+                if name == "__keep":
+                    continue
+
+                if isinstance(value, bool):
+                    value = 1.0 if value else 0.0
+
+                if not isinstance(value, (int, float)):
+                    continue
+
+                value = float(value)
+
+                if store.get_var(name) is not None:
+                    store.set(name, value)
+                else:
+                    store.define(
+                        name=name,
+                        value=value,
+                        vmin=value - 10.0,
+                        vmax=value + 10.0,
+                        expr=""
+                    )
+        finally:
+            store.blockSignals(False)
+
+        store.changed.emit()
+
+    # ------------------------------------------------------------
+    # 对象引用 / 创建 / 删除
+    # ------------------------------------------------------------
+
+    def resolve_ref(self, name, line=None):
+        obj = self.refs.get(name)
+
+        if obj is not None and obj in self.doc.objects:
+            return obj
+
+        obj = self.doc.names.get(name)
+
+        if obj is None:
+            raise ScriptError(f"找不到对象：{name}", line)
+
+        return obj
+
+    def _prepare_name(self, script_name, line=None):
+        """重复运行脚本时，默认先删除上一次由本脚本创建的同名对象。"""
+        old = self.refs.get(script_name)
+
+        if old is None:
+            old = self.doc.names.get(script_name)
+
+        if old is None:
+            return
+
+        owned = getattr(old, "script_owner", None) == self.owner_id
+
+        if owned:
+            self._delete_object(old, force=True)
+        else:
+            # 不是本脚本创建的对象：不删除，由 Document 自动重命名新对象
+            return
+
+    def _register_created(self, obj, script_name):
+        if script_name:
+            obj.script_owner = self.owner_id
+            obj.script_name = script_name
+            obj.name = script_name
+
+        self.doc._add(obj)
+
+        self.created.append(obj)
+
+        if script_name:
+            self.refs[script_name] = obj
+
+    def _delete_object(self, obj, force=False, line=None):
+        if obj not in self.doc.objects:
+            return
+
+        owned = getattr(obj, "script_owner", None) == self.owner_id
+
+        if not owned and not force and not self.allow_existing:
+            raise ScriptError(
+                "当前脚本不能删除已有对象。只有 __keep = true 时才允许修改/删除已有对象。",
+                line
+            )
+
+        doomed = self.doc._remove(obj)
+
+        for d in doomed:
+            if d in self.created:
+                self.created.remove(d)
+
+            for k, v in list(self.refs.items()):
+                if v is d:
+                    del self.refs[k]
+
+            self.deleted.append(d)
+
+    def _remove_created(self):
+        for obj in list(self.created):
+            if obj in self.doc.objects:
+                doomed = self.doc._remove(obj)
+
+                for d in doomed:
+                    if d in self.created:
+                        self.created.remove(d)
+
+                    for k, v in list(self.refs.items()):
+                        if v is d:
+                            del self.refs[k]
+
+    # ------------------------------------------------------------
+    # 语句执行
+    # ------------------------------------------------------------
+
+    def exec_stmt(self, stmt):
+        if isinstance(stmt, Repeat):
+            return self.exec_repeat(stmt)
+
+        if isinstance(stmt, ForRange):
+            return self.exec_for(stmt)
+
+        if isinstance(stmt, If):
+            return self.exec_if(stmt)
+
+        if isinstance(stmt, Assign):
+            return self.exec_assign(stmt)
+
+        if isinstance(stmt, Print):
+            return self.exec_print(stmt)
+
+        if isinstance(stmt, AddPoint):
+            return self.exec_add_point(stmt)
+
+        if isinstance(stmt, AddSegment):
+            return self.exec_add_segment(stmt)
+
+        if isinstance(stmt, AddLine):
+            return self.exec_add_line(stmt)
+
+        if isinstance(stmt, AddCircle):
+            return self.exec_add_circle(stmt)
+
+        if isinstance(stmt, AddPolygon):
+            return self.exec_add_polygon(stmt)
+
+        if isinstance(stmt, AddText):
+            return self.exec_add_text(stmt)
+
+        if isinstance(stmt, DeleteObject):
+            return self.exec_delete(stmt)
+
+        raise ScriptError("未知语句", getattr(stmt, "line", None))
+
+    def exec_block(self, block):
+        for stmt in block:
+            self._step(stmt)
+            self.exec_stmt(stmt)
+
+    def exec_repeat(self, stmt):
+        count = self.eval_expr(stmt.count)
+        count = int(self._as_number(count, stmt.line))
+
+        if count <= 0:
+            return
+
+        for _ in range(count):
+            self._step(stmt)
+            self.exec_block(stmt.body)
+
+    def exec_for(self, stmt):
+        start = int(self._as_number(self.eval_expr(stmt.start), stmt.line))
+        end = int(self._as_number(self.eval_expr(stmt.end), stmt.line))
+
+        if start <= end:
+            it = range(start, end + 1)
+        else:
+            it = range(start, end - 1, -1)
+
+        for i in it:
+            self._step(stmt)
+            self.locals[stmt.var] = float(i)
+            self.exec_block(stmt.body)
+
+    def exec_if(self, stmt):
+        for cond, body in stmt.branches:
+            if self._truth(self.eval_expr(cond)):
+                self.exec_block(body)
+                return
+
+        if stmt.else_body is not None:
+            self.exec_block(stmt.else_body)
+
+    def exec_assign(self, stmt):
+        value = self.eval_expr(stmt.expr)
+
+        if stmt.scope == "global":
+            self.globals[stmt.name] = value
+        else:
+            self.locals[stmt.name] = value
+
+        if stmt.name == "__keep":
+            self.allow_existing = self._truth(value)
+
+    def exec_print(self, stmt):
+        if stmt.expr is None:
+            self.logs.append("")
+            return
+
+        value = self.eval_expr(stmt.expr)
+        text = self._format_value(value)
+        self.logs.append(text)
+
+        if self.canvas is not None and hasattr(self.canvas, "cursor_info"):
+            self.canvas.cursor_info.emit(text)
+
+    # ------------------------------------------------------------
+    # 几何命令
+    # ------------------------------------------------------------
+
+    def exec_add_point(self, stmt):
+        from geo.points import FreePoint
+
+        x = self._as_number(self.eval_expr(stmt.x), stmt.line)
+        y = self._as_number(self.eval_expr(stmt.y), stmt.line)
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        obj = FreePoint(x, y)
+        self._register_created(obj, stmt.name)
+
+    def exec_add_segment(self, stmt):
+        from geo.segments import Segment
+        from geo.points import AbstractPoint
+
+        a = self.resolve_ref(stmt.a, stmt.line)
+        b = self.resolve_ref(stmt.b, stmt.line)
+
+        if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
+            raise ScriptError("线段两端必须是点对象", stmt.line)
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        obj = Segment(a, b)
+        self._register_created(obj, stmt.name)
+
+    def exec_add_line(self, stmt):
+        from plugins.line_tool import Line
+        from geo.points import AbstractPoint
+
+        a = self.resolve_ref(stmt.a, stmt.line)
+        b = self.resolve_ref(stmt.b, stmt.line)
+
+        if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
+            raise ScriptError("直线需要两个点对象", stmt.line)
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        obj = Line(a, b)
+        self._register_created(obj, stmt.name)
+
+    def exec_add_circle(self, stmt):
+        from geo.constraints import ExprCircle
+        from geo.points import AbstractPoint
+
+        center = self.resolve_ref(stmt.center, stmt.line)
+
+        if not isinstance(center, AbstractPoint):
+            raise ScriptError("圆心必须是点对象", stmt.line)
+
+        # 如果半径写成字符串，例如 radius "a+1"，则作为表达式圆处理
+        if isinstance(stmt.radius, Str):
+            expr = stmt.radius.value
+        else:
+            value = self._as_number(self.eval_expr(stmt.radius), stmt.line)
+            expr = str(value)
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        obj = ExprCircle(center, expr)
+        self._register_created(obj, stmt.name)
+
+    def exec_add_polygon(self, stmt):
+        from geo.chain_fill import ChainFill, Span, FillStyle
+        from geo.points import AbstractPoint
+
+        if len(stmt.point_names) < 3:
+            raise ScriptError("多边形至少需要 3 个点", stmt.line)
+
+        pts = []
+
+        for name in stmt.point_names:
+            p = self.resolve_ref(name, stmt.line)
+
+            if not isinstance(p, AbstractPoint):
+                raise ScriptError(f"{name} 不是点对象", stmt.line)
+
+            pts.append(p)
+
+        spans = []
+
+        for i in range(len(pts) - 1):
+            spans.append(Span(pts[i], pts[i + 1], None))
+
+        spans.append(Span(pts[-1], pts[0], None))
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        style = FillStyle("#4dabf7", 0.35, "solid")
+        obj = ChainFill(spans, style)
+
+        self._register_created(obj, stmt.name)
+
+    def exec_add_text(self, stmt):
+        from plugins.text_tool import TextObject
+
+        x = self._as_number(self.eval_expr(stmt.x), stmt.line)
+        y = self._as_number(self.eval_expr(stmt.y), stmt.line)
+
+        if isinstance(stmt.text_expr, Str):
+            text = stmt.text_expr.value
+        else:
+            text = self._format_value(self.eval_expr(stmt.text_expr))
+
+        self._prepare_name(stmt.name, stmt.line)
+
+        obj = TextObject(
+            text=text,
+            color="#1f2937",
+            size=16,
+            anchor=None,
+            pos=(x, y)
+        )
+
+        self._register_created(obj, stmt.name)
+
+    def exec_delete(self, stmt):
+        obj = self.resolve_ref(stmt.name, stmt.line)
+        self._delete_object(obj, force=False, line=stmt.line)
+
+    # ------------------------------------------------------------
+    # 表达式求值
+    # ------------------------------------------------------------
+
+    def eval_expr(self, node):
+        self._step(node)
+
+        if isinstance(node, Num):
+            return float(node.value)
+
+        if isinstance(node, Str):
+            return node.value
+
+        if isinstance(node, Bool):
+            return node.value
+
+        if isinstance(node, Var):
+            return self.lookup_var(node.name, node.line)
+
+        if isinstance(node, Unary):
+            return self.eval_unary(node)
+
+        if isinstance(node, Bin):
+            return self.eval_bin(node)
+
+        if isinstance(node, Call):
+            return self.eval_call(node)
+
+        raise ScriptError("未知表达式", getattr(node, "line", None))
+
+    def eval_unary(self, node):
+        value = self.eval_expr(node.operand)
+
+        if node.op == "not":
+            return not self._truth(value)
+
+        value = self._as_number(value, node.line)
+
+        if node.op == "-":
+            return -value
+
+        if node.op == "+":
+            return value
+
+        raise ScriptError(f"未知一元运算符：{node.op}", node.line)
+
+    def eval_bin(self, node):
+        op = node.op
+
+        # 逻辑短路
+        if op == "and":
+            left = self.eval_expr(node.left)
+            if not self._truth(left):
+                return False
+            return self._truth(self.eval_expr(node.right))
+
+        if op == "or":
+            left = self.eval_expr(node.left)
+            if self._truth(left):
+                return True
+            return self._truth(self.eval_expr(node.right))
+
+        left = self.eval_expr(node.left)
+        right = self.eval_expr(node.right)
+
+        # 比较
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return self.compare(op, left, right, node.line)
+
+        # 算术
+        a = self._as_number(left, node.line)
+        b = self._as_number(right, node.line)
+
+        if op == "+":
+            return a + b
+
+        if op == "-":
+            return a - b
+
+        if op == "*":
+            return a * b
+
+        if op == "/":
+            if abs(b) < 1e-12:
+                raise ScriptError("除数为 0", node.line)
+            return a / b
+
+        if op == "%":
+            if abs(b) < 1e-12:
+                raise ScriptError("模运算除数为 0", node.line)
+            return a % b
+
+        if op == "^":
+            return a ** b
+
+        raise ScriptError(f"未知运算符：{op}", node.line)
+
+    def compare(self, op, left, right, line=None):
+        # 字符串比较
+        if isinstance(left, str) or isinstance(right, str):
+            if op == "==":
+                return str(left) == str(right)
+            if op == "!=":
+                return str(left) != str(right)
+            raise ScriptError("字符串只能使用 == 或 !=", line)
+
+        a = self._as_number(left, line)
+        b = self._as_number(right, line)
+
+        if op == "==":
+            return abs(a - b) < 1e-12
+
+        if op == "!=":
+            return abs(a - b) >= 1e-12
+
+        if op == "<":
+            return a < b
+
+        if op == "<=":
+            return a <= b
+
+        if op == ">":
+            return a > b
+
+        if op == ">=":
+            return a >= b
+
+        raise ScriptError(f"未知比较运算符：{op}", line)
+
+    def eval_call(self, node):
+        name = node.name
+
+        if name not in FUNCS:
+            raise ScriptError(f"不支持的函数：{name}", node.line)
+
+        args = []
+
+        for arg in node.args:
+            v = self.eval_expr(arg)
+            args.append(self._as_number(v, node.line))
+
+        try:
+            return float(FUNCS[name](*args))
+        except Exception as e:
+            raise ScriptError(f"函数 {name} 计算失败：{e}", node.line)
+
+
+# ------------------------------------------------------------
+# 对外入口
+# ------------------------------------------------------------
+
+def run_script(doc, script, owner_id=None, canvas=None):
+    """执行一段脚本。返回 ScriptRuntime。"""
+    from .parser import parse
+
+    try:
+        program = parse(script)
+    except ScriptError as e:
+        if canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(f"脚本错误：{e}")
+        return None
+
+    rt = ScriptRuntime(doc, canvas=canvas, owner_id=owner_id)
+
+    doc.begin_action()
+
+    try:
+        rt.execute(program)
+    finally:
+        doc.end_action()
+
+    if rt.error is not None:
+        if canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(f"脚本错误：{rt.error}")
+    else:
+        if rt.logs and canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(" | ".join(rt.logs))
+
+    return rt
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/06/2026 15:57:01
+============================================================
+
+from .errors import ScriptError
+from .parser import parse
+from .runtime import ScriptRuntime, run_script
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\base.py
 鏂囦欢鍚?   base.py
-淇敼鏃堕棿: 07/26/2026 23:37:08
+淇敼鏃堕棿: 08/06/2026 15:48:29
 ============================================================
 
 # geo/base.py
@@ -749,6 +2421,7 @@ class GeoObject:
     def __init__(self, parents=()):
         GeoObject._next_id += 1
         self.id = GeoObject._next_id
+        self.name = ""
         self.parents = list(parents)
         self.children = []
         for p in self.parents:
@@ -794,13 +2467,17 @@ class GeoObject:
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\chain_fill.py
 鏂囦欢鍚?   chain_fill.py
-淇敼鏃堕棿: 07/27/2026 19:18:26
+淇敼鏃堕棿: 08/05/2026 22:30:42
 ============================================================
 
 """链式填充：由"点+曲线"有序链围成的闭合区域。
-边界可混合 点（顶点）与任意曲线（线段/圆/椭圆弧/贝塞尔/多边形边）；
-支持 纯色/渐变/斜线/交叉线 四种填充样式，颜色与透明度用户自定义，无描边。
-边界退化（面积趋近 0）时自动隐藏，恢复后自动出现。"""
+
+新增：
+- 弧段条件：auto / short / long / ccw / cw
+- 填充规则：evenodd / winding
+- 点击闭合曲线时可根据点击位置选择期望弧段
+"""
+
 import math
 
 from PySide6.QtCore import QPointF, Qt
@@ -812,6 +2489,7 @@ from ui import theme
 
 
 # ───────────── 几何工具 ─────────────
+
 def _point_seg_dist(px, py, x1, y1, x2, y2):
     dx, dy = x2 - x1, y2 - y1
     denom = dx * dx + dy * dy
@@ -832,12 +2510,14 @@ def _point_in_polygon(x, y, pts):
 def polygon_edge(poly, x, y):
     """返回离点 (x,y) 最近的多边形边索引。"""
     best_k, best_d = 0, float("inf")
+
     for k in range(poly.n):
         a = poly.verts[k]
         b = poly.verts[(k + 1) % poly.n]
         d = _point_seg_dist(x, y, a[0], a[1], b[0], b[1])
         if d < best_d:
             best_k, best_d = k, d
+
     return best_k
 
 
@@ -846,22 +2526,102 @@ def hatch_lines(p, rect, color, opacity, gap=8, angle=45):
     a = math.radians(angle)
     dx, dy = math.cos(a), math.sin(a)
     px, py = -math.sin(a), math.cos(a)
+
     diag = math.hypot(rect.width(), rect.height()) * 1.5
     cx, cy = rect.center().x(), rect.center().y()
     n = int(diag / gap) + 2
+
     c = QColor(color)
     c.setAlphaF(opacity)
     p.setPen(theme.pen(c, 1.2))
+
     for i in range(-n, n + 1):
         ox, oy = cx + px * i * gap, cy + py * i * gap
-        p.drawLine(QPointF(ox - dx * diag, oy - dy * diag),
-                   QPointF(ox + dx * diag, oy + dy * diag))
+        p.drawLine(
+            QPointF(ox - dx * diag, oy - dy * diag),
+            QPointF(ox + dx * diag, oy + dy * diag)
+        )
+
+
+# ───────────── 弧段条件 ─────────────
+
+ARC_MODES = ("auto", "short", "long", "ccw", "cw")
+
+
+def _closed_span(t0: float, t1: float, mode: str = "auto") -> float:
+    """
+    计算闭合曲线从 t0 到 t1 的参数跨度。
+
+    mode:
+        auto   自动，默认短弧
+        short  短弧
+        long   长弧
+        ccw    逆时针方向，即参数增加方向
+        cw     顺时针方向，即参数减少方向
+    """
+    eps = 1e-9
+    delta = (t1 - t0) % 1.0
+
+    # 逆时针：参数增加方向
+    if mode == "ccw":
+        return delta if delta > eps else 1.0
+
+    # 顺时针：参数减少方向
+    if mode == "cw":
+        return delta - 1.0 if delta > eps else -1.0
+
+    # 长弧
+    if mode == "long":
+        if delta <= eps or delta >= 1.0 - eps:
+            return 1.0
+        if delta < 0.5:
+            return delta - 1.0
+        return delta
+
+    # auto / short：短弧
+    if delta <= eps or delta >= 1.0 - eps:
+        return 0.0
+
+    if delta > 0.5:
+        return delta - 1.0
+
+    return delta
+
+
+def choose_closed_arc(curve, from_pt, to_pt, prefer):
+    """
+    根据用户点击位置 prefer，在闭合曲线的两段候选弧中选择一段。
+
+    返回:
+        "ccw" 或 "cw"
+    """
+    if not getattr(curve, "closed", False):
+        return "auto"
+
+    t0 = curve.project(from_pt.x, from_pt.y)
+    t1 = curve.project(to_pt.x, to_pt.y)
+
+    eps = 1e-9
+    delta = (t1 - t0) % 1.0
+
+    # 逆时针候选
+    span_ccw = delta if delta > eps else 1.0
+    mid_ccw = curve.point_at(t0 + span_ccw * 0.5)
+    d_ccw = math.hypot(mid_ccw[0] - prefer[0], mid_ccw[1] - prefer[1])
+
+    # 顺时针候选
+    span_cw = delta - 1.0 if delta > eps else -1.0
+    mid_cw = curve.point_at(t0 + span_cw * 0.5)
+    d_cw = math.hypot(mid_cw[0] - prefer[0], mid_cw[1] - prefer[1])
+
+    return "ccw" if d_ccw <= d_cw else "cw"
 
 
 # ───────────── 曲线引用 & 段 ─────────────
+
 class CurveRef:
-    """曲线引用：整条曲线对象，或多边形的第 edge 条边。
-    统一提供 point_at / project / closed，使多边形边也能参与链式边界。"""
+    """曲线引用：整条曲线对象，或多边形的第 edge 条边。"""
+
     def __init__(self, obj, edge=None):
         self.obj = obj
         self.edge = edge
@@ -869,135 +2629,221 @@ class CurveRef:
     def point_at(self, t):
         if self.edge is None:
             return self.obj.point_at(t)
+
         poly = self.obj
         a = poly.verts[self.edge]
         b = poly.verts[(self.edge + 1) % poly.n]
-        return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
+
+        return (
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t
+        )
 
     def project(self, x, y):
         if self.edge is None:
             return self.obj.project(x, y)
+
         poly = self.obj
         a = poly.verts[self.edge]
         b = poly.verts[(self.edge + 1) % poly.n]
+
         dx, dy = b[0] - a[0], b[1] - a[1]
         denom = dx * dx + dy * dy
+
         if denom == 0:
             return 0.0
+
         return max(0.0, min(1.0, ((x - a[0]) * dx + (y - a[1]) * dy) / denom))
 
     @property
     def closed(self):
         if self.edge is None:
-            return getattr(self.obj, "closed", False)
+            if hasattr(self.obj, "closed"):
+                return bool(self.obj.closed)
+
+            # 兼容未显式设置 closed 的对象
+            return type(self.obj).__name__ in (
+                "Circle",
+                "ExprCircle",
+                "Ellipse",
+            )
+
         return False
 
 
 class Span:
     """边界的一段：from_pt → to_pt，可选沿某条曲线。"""
-    def __init__(self, from_pt, to_pt, curve=None):
+
+    def __init__(self, from_pt, to_pt, curve=None, arc="auto"):
         self.from_pt = from_pt
         self.to_pt = to_pt
-        self.curve = curve          # CurveRef 或 None（直线）
+        self.curve = curve
+        self.arc = arc if arc in ARC_MODES else "auto"
 
 
 def sample_span(sp, n=32):
-    """把一段采样成折线：[from_pt, ...曲线内部采样..., to_pt]。
-    闭合曲线（圆/椭圆）自动取较短弧；端点若不在曲线上，由首尾直线自然衔接。"""
+    """把一段采样成折线。闭合曲线根据 arc 条件取弧段。"""
     result = [(sp.from_pt.x, sp.from_pt.y)]
+
     if sp.curve is not None:
         c = sp.curve
+
         t0 = c.project(sp.from_pt.x, sp.from_pt.y)
         t1 = c.project(sp.to_pt.x, sp.to_pt.y)
+
         if c.closed:
-            span_t = (t1 - t0) % 1.0
-            if span_t > 0.5:
-                span_t -= 1.0       # 取较短弧
+            span_t = _closed_span(t0, t1, getattr(sp, "arc", "auto"))
         else:
             span_t = t1 - t0
+
         for i in range(1, n):
             result.append(c.point_at(t0 + span_t * i / n))
+
     result.append((sp.to_pt.x, sp.to_pt.y))
     return result
 
 
 # ───────────── 填充样式 ─────────────
+
 class FillStyle:
-    def __init__(self, color, opacity=0.6, kind="solid"):
+    def __init__(self, color, opacity=0.6, kind="solid", fill_rule="evenodd"):
         self.color = QColor(color)
         self.opacity = opacity
-        self.kind = kind            # solid / gradient / hatch / crosshatch
+        self.kind = kind
+        self.fill_rule = fill_rule if fill_rule in ("evenodd", "winding") else "evenodd"
 
     def dump(self):
-        return {"color": self.color.name(), "opacity": self.opacity, "kind": self.kind}
+        return {
+            "color": self.color.name(),
+            "opacity": self.opacity,
+            "kind": self.kind,
+            "fill_rule": self.fill_rule,
+        }
 
     @classmethod
     def from_dump(cls, d):
-        return cls(QColor(d["color"]), d.get("opacity", 0.6), d.get("kind", "solid"))
+        return cls(
+            QColor(d["color"]),
+            d.get("opacity", 0.6),
+            d.get("kind", "solid"),
+            d.get("fill_rule", "evenodd"),
+        )
 
 
 # ───────────── 链式填充对象 ─────────────
+
 @register_geo("ChainFill")
 class ChainFill(GeoObject):
     def __init__(self, spans, style):
         parents, seen = [], set()
+
         for sp in spans:
             for obj in (sp.from_pt, sp.to_pt):
                 if id(obj) not in seen:
-                    seen.add(id(obj)); parents.append(obj)
+                    seen.add(id(obj))
+                    parents.append(obj)
+
             if sp.curve is not None and id(sp.curve.obj) not in seen:
-                seen.add(id(sp.curve.obj)); parents.append(sp.curve.obj)
+                seen.add(id(sp.curve.obj))
+                parents.append(sp.curve.obj)
+
         super().__init__(parents=tuple(parents))
+
         self.spans = spans
         self.style = style
         self.path_pts = []
+
         self.recompute()
 
     def recompute(self):
         pts = []
+
         for sp in self.spans:
             pts.extend(sample_span(sp)[:-1])
+
         self.path_pts = pts
-        # 边界退化（面积≈0）时自动隐藏；恢复后自动出现
         self.exists = len(pts) >= 3 and abs(self._area()) > 1e-9
 
     def _area(self):
         pts, n = self.path_pts, len(self.path_pts)
+
         if n < 3:
             return 0.0
-        return sum(pts[i][0] * pts[(i + 1) % n][1] -
-                   pts[(i + 1) % n][0] * pts[i][1] for i in range(n)) / 2
+
+        return sum(
+            pts[i][0] * pts[(i + 1) % n][1] -
+            pts[(i + 1) % n][0] * pts[i][1]
+            for i in range(n)
+        ) / 2
 
     def distance_to(self, x, y):
         if not self.path_pts:
             return None
+
         if _point_in_polygon(x, y, self.path_pts):
             return 0.0
+
         best, n = float("inf"), len(self.path_pts)
+
         for i in range(n):
-            best = min(best, _point_seg_dist(x, y, *self.path_pts[i],
-                                             *self.path_pts[(i + 1) % n]))
+            best = min(
+                best,
+                _point_seg_dist(
+                    x, y,
+                    *self.path_pts[i],
+                    *self.path_pts[(i + 1) % n]
+                )
+            )
+
         return best
 
     def dump(self):
         pidx = {id(pp): i for i, pp in enumerate(self.parents)}
         spans_data = []
+
         for sp in self.spans:
             curve = None
+
             if sp.curve is not None:
-                curve = {"obj": pidx[id(sp.curve.obj)], "edge": sp.curve.edge}
-            spans_data.append({"from": pidx[id(sp.from_pt)],
-                               "to": pidx[id(sp.to_pt)], "curve": curve})
-        return {"spans": spans_data, "style": self.style.dump()}
+                curve = {
+                    "obj": pidx[id(sp.curve.obj)],
+                    "edge": sp.curve.edge
+                }
+
+            spans_data.append({
+                "from": pidx[id(sp.from_pt)],
+                "to": pidx[id(sp.to_pt)],
+                "curve": curve,
+                "arc": getattr(sp, "arc", "auto"),
+            })
+
+        return {
+            "spans": spans_data,
+            "style": self.style.dump(),
+        }
 
     @classmethod
     def build(cls, parents, params):
         spans = []
+
         for sd in params["spans"]:
             curve = None
+
             if sd.get("curve") is not None:
-                curve = CurveRef(parents[sd["curve"]["obj"]], sd["curve"]["edge"])
-            spans.append(Span(parents[sd["from"]], parents[sd["to"]], curve))
+                curve = CurveRef(
+                    parents[sd["curve"]["obj"]],
+                    sd["curve"]["edge"]
+                )
+
+            spans.append(
+                Span(
+                    parents[sd["from"]],
+                    parents[sd["to"]],
+                    curve,
+                    sd.get("arc", "auto"),
+                )
+            )
+
         return cls(spans, FillStyle.from_dump(params["style"]))
 
 
@@ -1005,45 +2851,76 @@ class ChainFill(GeoObject):
 def draw_chain_fill(p, obj, view):
     if not obj.exists or len(obj.path_pts) < 3:
         return
-    path = QPainterPath()
-    path.moveTo(view.to_screen(*obj.path_pts[0]))
-    for pt in obj.path_pts[1:]:
-        path.lineTo(view.to_screen(*pt))
-    path.closeSubpath()
-    st = obj.style
-    color = QColor(st.color)
-    if st.kind == "gradient":
-        bbox = path.boundingRect()
-        g = QLinearGradient(bbox.topLeft(), bbox.bottomRight())
-        c1 = QColor(color); c1.setAlphaF(st.opacity)
-        c2 = QColor(color); c2.setAlphaF(st.opacity * 0.12)
-        g.setColorAt(0, c1); g.setColorAt(1, c2)
-        p.setBrush(QBrush(g)); p.setPen(Qt.PenStyle.NoPen)
-        p.drawPath(path)
-    elif st.kind in ("hatch", "crosshatch"):
-        p.save()
-        p.setClipPath(path)
-        hatch_lines(p, path.boundingRect(), color, st.opacity, 8, 45)
-        if st.kind == "crosshatch":
-            hatch_lines(p, path.boundingRect(), color, st.opacity, 8, -45)
+
+    p.save()
+
+    try:
+        path = QPainterPath()
+        path.moveTo(view.to_screen(*obj.path_pts[0]))
+
+        for pt in obj.path_pts[1:]:
+            path.lineTo(view.to_screen(*pt))
+
+        path.closeSubpath()
+
+        st = obj.style
+
+        # ★ 填充规则
+        path.setFillRule(
+            Qt.FillRule.WindingFill
+            if getattr(st, "fill_rule", "evenodd") == "winding"
+            else Qt.FillRule.OddEvenFill
+        )
+
+        color = QColor(st.color)
+
+        if st.kind == "gradient":
+            bbox = path.boundingRect()
+            g = QLinearGradient(bbox.topLeft(), bbox.bottomRight())
+
+            c1 = QColor(color)
+            c1.setAlphaF(st.opacity)
+
+            c2 = QColor(color)
+            c2.setAlphaF(st.opacity * 0.12)
+
+            g.setColorAt(0, c1)
+            g.setColorAt(1, c2)
+
+            p.setBrush(QBrush(g))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPath(path)
+
+        elif st.kind in ("hatch", "crosshatch"):
+            p.save()
+            p.setClipPath(path)
+
+            hatch_lines(p, path.boundingRect(), color, st.opacity, 8, 45)
+
+            if st.kind == "crosshatch":
+                hatch_lines(p, path.boundingRect(), color, st.opacity, 8, -45)
+
+            p.restore()
+
+        else:
+            color.setAlphaF(st.opacity)
+            p.setBrush(theme.brush(color))
+            p.setPen(Qt.PenStyle.NoPen)
+            p.drawPath(path)
+
+    finally:
         p.restore()
-    else:                                   # 纯色
-        color.setAlphaF(st.opacity)
-        p.setBrush(theme.brush(color))
-        p.setPen(Qt.PenStyle.NoPen)         # 无描边
-        p.drawPath(path)
 
 
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\circles.py
 鏂囦欢鍚?   circles.py
-淇敼鏃堕棿: 07/25/2026 23:05:31
+淇敼鏃堕棿: 08/05/2026 22:29:43
 ============================================================
 
 import math
 
 from PySide6.QtCore import Qt
-
 from core.registry import register_geo, register_renderer
 from geo.base import GeoObject
 from ui import theme
@@ -1051,8 +2928,9 @@ from ui import theme
 
 @register_geo("Circle")
 class Circle(GeoObject):
-    """圆：圆心 + 圆周上一点。实现 point_at/project →
-    "点吸附到圆周""沿圆周拖动"等能力自动获得。"""
+    """圆：圆心 + 圆周上一点。"""
+
+    closed = True  # ★ 新增：圆是闭合曲线
 
     def __init__(self, center, through):
         super().__init__(parents=[center, through])
@@ -1061,17 +2939,23 @@ class Circle(GeoObject):
         self.recompute()
 
     def recompute(self):
-        self.r = math.hypot(self.through.x - self.center.x,
-                            self.through.y - self.center.y)
+        self.r = math.hypot(
+            self.through.x - self.center.x,
+            self.through.y - self.center.y
+        )
 
-    def point_at(self, t):                    # t ∈ [0,1) → 圆周
+    def point_at(self, t):
         ang = 2 * math.pi * t
-        return (self.center.x + self.r * math.cos(ang),
-                self.center.y + self.r * math.sin(ang))
+        return (
+            self.center.x + self.r * math.cos(ang),
+            self.center.y + self.r * math.sin(ang)
+        )
 
     def project(self, x, y):
-        return (math.atan2(y - self.center.y, x - self.center.x)
-                / (2 * math.pi)) % 1.0
+        return (
+            math.atan2(y - self.center.y, x - self.center.x)
+            / (2 * math.pi)
+        ) % 1.0
 
     def distance_to(self, x, y):
         return abs(math.hypot(x - self.center.x, y - self.center.y) - self.r)
@@ -1085,6 +2969,7 @@ class Circle(GeoObject):
 def draw_circle(p, obj, view):
     p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.CIRCLE, 2.0))
     p.setBrush(Qt.BrushStyle.NoBrush)
+
     c = view.to_screen(obj.center.x, obj.center.y)
     p.drawEllipse(c, obj.r * view.scale, obj.r * view.scale)
 
@@ -1092,25 +2977,26 @@ def draw_circle(p, obj, view):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\constraints.py
 鏂囦欢鍚?   constraints.py
-淇敼鏃堕棿: 08/01/2026 23:28:24
+淇敼鏃堕棿: 08/05/2026 22:30:23
 ============================================================
 
-"""表达式约束：把线段长度 / 角度度数锁定为变量的代数式。
-变量变化时由 Document.refresh_variables 驱动重算。"""
-import math
-from PySide6.QtCore import Qt
+"""表达式约束：把线段长度 / 角度度数 / 圆半径 / 点坐标锁定为变量的代数式。"""
 
+import math
+
+from PySide6.QtCore import Qt
 from core.registry import register_geo, register_renderer
 from ui import theme
 from ui.math import draw_math
 from core.variables import eval_expr
 from geo.base import GeoObject
 from geo.points import AbstractPoint
-from core.variables import eval_expr
+
 
 @register_geo("ExprSegment")
 class ExprSegment(GeoObject):
     """表达式线段：长度恒等于 eval(expr)；拖动端点只改方向，长度不变。"""
+
     def __init__(self, segment, expr):
         super().__init__(parents=(segment,))
         self.segment = segment
@@ -1120,11 +3006,13 @@ class ExprSegment(GeoObject):
         L = eval_expr(self.expr)
         if L is None or L <= 1e-9:
             return
+
         a, b = self.segment.a, self.segment.b
         dx, dy = b.x - a.x, b.y - a.y
         d = math.hypot(dx, dy)
         if d < 1e-9:
             return
+
         k = L / d
         b.x = a.x + dx * k
         b.y = a.y + dy * k
@@ -1142,12 +3030,13 @@ class ExprSegment(GeoObject):
 
 @register_geo("ExprAngle")
 class ExprAngle(GeoObject):
-    """表达式角：角度数恒等于 eval(expr)；拖动 p2 只改臂长，角度不变。
-    angle 为鸭子类型：任何带 vertex/p1/p2 的角对象（AngleMeasure）。"""
+    """表达式角：角度数恒等于 eval(expr)；拖动 p2 只改臂长，角度不变。"""
+
     def __init__(self, angle, expr):
         super().__init__(parents=(angle,))
         self.angle = angle
         self.expr = expr
+
         v, p1, p2 = angle.vertex, angle.p1, angle.p2
         a1 = math.atan2(p1.y - v.y, p1.x - v.x)
         a2 = math.atan2(p2.y - v.y, p2.x - v.x)
@@ -1158,15 +3047,19 @@ class ExprAngle(GeoObject):
         target = eval_expr(self.expr)
         if target is None:
             return
+
         v, p1, p2 = self.angle.vertex, self.angle.p1, self.angle.p2
         base = math.atan2(p1.y - v.y, p1.x - v.x)
         new_a2 = base + self.sign * math.radians(target)
+
         dist = math.hypot(p2.x - v.x, p2.y - v.y)
         if dist < 1e-9:
             return
+
         p2.x = v.x + dist * math.cos(new_a2)
         p2.y = v.y + dist * math.sin(new_a2)
-        self.angle.degrees = target % 360        # 同步角度显示
+
+        self.angle.degrees = target % 360
 
     def moved_points(self):
         return [self.angle.p2]
@@ -1180,6 +3073,7 @@ class ExprAngle(GeoObject):
         obj.sign = params.get("sign", obj.sign)
         return obj
 
+
 def expr_driver(obj):
     """返回对象身上的表达式约束（ExprSegment / ExprAngle），没有则 None。"""
     for c in obj.children:
@@ -1187,9 +3081,13 @@ def expr_driver(obj):
             return c
     return None
 
+
 @register_geo("ExprCircle")
 class ExprCircle(GeoObject):
     """表达式圆：圆心 + 表达式半径，变量变化时半径实时更新。"""
+
+    closed = True  # ★ 新增：表达式圆也是闭合曲线
+
     def __init__(self, center, expr):
         super().__init__(parents=(center,))
         self.center = center
@@ -1203,17 +3101,22 @@ class ExprCircle(GeoObject):
 
     def point_at(self, t):
         ang = 2 * math.pi * t
-        return (self.center.x + self.r * math.cos(ang),
-                self.center.y + self.r * math.sin(ang))
+        return (
+            self.center.x + self.r * math.cos(ang),
+            self.center.y + self.r * math.sin(ang)
+        )
 
     def project(self, x, y):
-        return (math.atan2(y - self.center.y, x - self.center.x) / (2 * math.pi)) % 1.0
+        return (
+            math.atan2(y - self.center.y, x - self.center.x)
+            / (2 * math.pi)
+        ) % 1.0
 
     def distance_to(self, x, y):
         return abs(math.hypot(x - self.center.x, y - self.center.y) - self.r)
 
     def moved_points(self):
-        return [self]          # 半径变了 → 自身重绘，依赖它的对象随之重算
+        return [self]
 
     def dump(self):
         return {"expr": self.expr}
@@ -1226,6 +3129,7 @@ class ExprCircle(GeoObject):
 @register_geo("ExprPoint")
 class ExprPoint(AbstractPoint):
     """表达式点：坐标由表达式决定，随变量变化，不可拖动。"""
+
     def __init__(self, expr_x, expr_y):
         super().__init__(parents=())
         self.expr_x = expr_x
@@ -1239,7 +3143,7 @@ class ExprPoint(AbstractPoint):
         self.y = y if y is not None else 0.0
 
     def moved_points(self):
-        return [self]          # 坐标变了 → 自己就是那个点
+        return [self]
 
     def dump(self):
         return {"expr_x": self.expr_x, "expr_y": self.expr_y}
@@ -1252,11 +3156,19 @@ class ExprPoint(AbstractPoint):
 @register_renderer(ExprCircle)
 def draw_expr_circle(p, obj, view):
     c = view.to_screen(obj.center.x, obj.center.y)
+
     p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.CIRCLE, 2))
     p.setBrush(Qt.BrushStyle.NoBrush)
     p.drawEllipse(c, obj.r * view.scale, obj.r * view.scale)
-    draw_math(p, c.x() + obj.r * view.scale * 0.7, c.y(),
-              f"r={obj.expr}", 12, theme.MEASURE)
+
+    draw_math(
+        p,
+        c.x() + obj.r * view.scale * 0.7,
+        c.y(),
+        f"r={obj.expr}",
+        12,
+        theme.MEASURE
+    )
 
 
 ============================================================
@@ -2304,7 +4216,7 @@ def draw_intersect(p, obj, view):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\points.py
 鏂囦欢鍚?   points.py
-淇敼鏃堕棿: 07/29/2026 14:19:43
+淇敼鏃堕棿: 08/06/2026 15:55:58
 ============================================================
 
 """几何点对象库：自由点、吸附点，以及磁吸查询。
@@ -2434,8 +4346,17 @@ def draw_point(p, obj, view):
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
-    draw_math(p, qpt.x() + 9, qpt.y() - 8, _point_label(obj, view), 13,
-              theme.SELECTED if obj.selected else theme.LABEL)
+    # ★ 优先使用对象名；没有名字时回退到旧规则
+    label = getattr(obj, "name", "") or _point_label(obj, view)
+
+    draw_math(
+        p,
+        qpt.x() + 9,
+        qpt.y() - 8,
+        label,
+        13,
+        theme.SELECTED if obj.selected else theme.LABEL
+    )
 
 
 # ───────────────────────────── 磁吸 ─────────────────────────────
@@ -2551,7 +4472,7 @@ for _m in pkgutil.iter_modules(__path__):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\media\base.py
 鏂囦欢鍚?   base.py
-淇敼鏃堕棿: 08/04/2026 22:50:48
+淇敼鏃堕棿: 08/05/2026 21:58:20
 ============================================================
 
 """媒体对象基类：位置/尺寸/拾取/拖动/缩放/编辑按钮。"""
@@ -2577,14 +4498,34 @@ class MediaObject(GeoObject):
         self.rotation = 0.0
 
     def distance_to(self, x, y):
-        # self.x, self.y 是左上角；
-        # 高度向世界坐标下方延伸，所以底边是 self.y - self.height
-        if self.x <= x <= self.x + self.width and self.y - self.height <= y <= self.y:
-            return 0.0
+     """
+     支持 rotation 的媒体对象拾取。
+      把世界点转换到媒体对象的局部坐标系，再判断是否在矩形内。
+     """
+     cx = self.x + self.width / 2.0
+     cy = self.y - self.height / 2.0
 
-        dx = max(self.x - x, 0.0, x - (self.x + self.width))
-        dy = max((self.y - self.height) - y, 0.0, y - self.y)
-        return math.hypot(dx, dy)
+     ang = math.radians(getattr(self, "rotation", 0.0))
+     c = math.cos(ang)
+     s = math.sin(ang)
+
+     dx = x - cx
+     dy = y - cy
+
+    # 逆变换到局部坐标
+     lx = dx * c - dy * s
+     ly = dx * s + dy * c
+
+     hw = self.width / 2.0
+     hh = self.height / 2.0
+
+     if -hw <= lx <= hw and -hh <= ly <= hh:
+        return 0.0
+
+     ox = max(abs(lx) - hw, 0.0)
+     oy = max(abs(ly) - hh, 0.0)
+
+     return math.hypot(ox, oy)
 
     def screen_rect(self, view):
         tl = view.to_screen(self.x, self.y)
@@ -3225,6 +5166,176 @@ class PieChartWizard(QWizard):
 
     def get_data(self):
         return self._data_page.get_data()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\script_button.py
+鏂囦欢鍚?   script_button.py
+淇敼鏃堕棿: 08/06/2026 15:58:54
+============================================================
+
+"""脚本按钮对象：画布上的可点击按钮，单击运行脚本。"""
+
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QColor, QPainterPath
+
+from core.registry import register_geo, register_renderer
+from media.base import MediaObject, draw_media_decorations
+from ui import theme
+
+
+@register_geo("ScriptButtonObject")
+class ScriptButtonObject(MediaObject):
+    """脚本按钮。
+
+    - x,y：左上角世界坐标
+    - width/height：世界尺寸，手动调整
+    - text：按钮文字
+    - script：脚本内容
+    - color：按钮背景色
+    - text_color：文字颜色
+    - readonly：预留只读属性
+    """
+
+    def __init__(
+        self,
+        x,
+        y,
+        width=4.0,
+        height=1.2,
+        text="运行",
+        script="",
+        color="#1971c2",
+        text_color="#ffffff",
+        readonly=False
+    ):
+        super().__init__(x, y, width, height)
+
+        self.text = text
+        self.script = script
+        self.color = color
+        self.text_color = text_color
+        self.readonly = bool(readonly)
+
+    def dump(self):
+        d = super().dump()
+        d.update({
+            "text": self.text,
+            "script": self.script,
+            "color": self.color,
+            "text_color": self.text_color,
+            "readonly": self.readonly,
+        })
+        return d
+
+    @classmethod
+    def build(cls, parents, params):
+        obj = cls(
+            params["x"],
+            params["y"],
+            params.get("width", 4.0),
+            params.get("height", 1.2),
+            params.get("text", "运行"),
+            params.get("script", ""),
+            params.get("color", "#1971c2"),
+            params.get("text_color", "#ffffff"),
+            params.get("readonly", False),
+        )
+        obj.rotation = params.get("rotation", 0.0)
+        return obj
+
+    def edit(self, canvas):
+        """双击 / ✎ 按钮打开脚本编辑器。"""
+        from ui.script_editor import edit_script_button
+        edit_script_button(canvas, self)
+
+    def run(self, canvas):
+        """单击运行脚本。"""
+        from core.scripting import run_script
+        run_script(
+            canvas.doc,
+            self.script,
+            owner_id=self.id,
+            canvas=canvas
+        )
+
+
+@register_renderer(ScriptButtonObject)
+def draw_script_button(p, obj, view):
+    rect = obj.screen_rect(view)
+
+    path = QPainterPath()
+    path.addRoundedRect(rect, 10, 10)
+
+    p.save()
+
+    p.setBrush(theme.brush(QColor(obj.color)))
+    p.setPen(theme.pen(theme.SELECTED if obj.selected else theme.SUBINK, 1.2))
+    p.drawPath(path)
+
+    font = p.font()
+    font.setPixelSize(max(10, int(rect.height() * 0.42)))
+    font.setBold(True)
+    p.setFont(font)
+
+    p.setPen(theme.pen(QColor(obj.text_color)))
+    p.drawText(rect, Qt.AlignmentFlag.AlignCenter, obj.text)
+
+    p.restore()
+
+    draw_media_decorations(p, obj, view)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\script_button_tool.py
+鏂囦欢鍚?   script_button_tool.py
+淇敼鏃堕棿: 08/06/2026 15:59:31
+============================================================
+
+"""插入脚本按钮工具：注册到「插入」菜单。"""
+
+from PySide6.QtWidgets import QFileDialog  # noqa: F401  保持和其他 insert 工具一致
+from core.registry import register_tool
+from tools.base import Tool
+
+from media.script_button import ScriptButtonObject
+
+
+def _finish_insert(canvas, obj):
+    canvas.doc.add(obj)
+    canvas.doc.set_selection([obj])
+
+    from tools.select import SelectTool
+    canvas.set_tool(SelectTool())
+
+
+@register_tool(
+    name="插入脚本按钮",
+    order=5,
+    panel="insert",
+    icon="insert_table",
+    hint="点击画布插入脚本按钮"
+)
+class InsertScriptButtonTool(Tool):
+    def press(self, canvas, wpt, hit):
+        obj = ScriptButtonObject(
+            wpt[0],
+            wpt[1],
+            width=4.0,
+            height=1.2,
+            text="运行",
+            script="""# 示例脚本
+set n = 3
+
+repeat n {
+    print("GeoSketch 脚本运行")
+}
+
+__keep = true
+"""
+        )
+
+        _finish_insert(canvas, obj)
 
 
 ============================================================
@@ -6239,6 +8350,220 @@ def test_box_select_overlay_visible():
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\tests\test_scripting.py
+鏂囦欢鍚?   test_scripting.py
+淇敼鏃堕棿: 08/06/2026 16:47:39
+============================================================
+
+"""脚本系统单元测试。
+运行方式：pytest tests/test_scripting.py -v
+"""
+import pytest
+from core.document import Document
+from core.scripting import run_script, parse
+from core.scripting.errors import ScriptError
+from core.variables import get_store
+from geo.points import FreePoint
+
+@pytest.fixture(autouse=True)
+def clean_env():
+    """每个测试前清空全局变量状态，避免测试间污染"""
+    store = get_store()
+    store._vars.clear()
+    store.version = 0
+    yield
+
+@pytest.fixture
+def doc():
+    return Document()
+
+# ═══════════════ 1. 解析器 (Parser) 测试 ═══════════════
+
+class TestParser:
+    def test_tokenize_and_parse_basic(self):
+        src = """
+        set a = 10
+        repeat 3 {
+            add point P at (a, a)
+        }
+        """
+        prog = parse(src)
+        assert len(prog.statements) == 2
+
+    def test_parse_if_else(self):
+        src = """
+        if x > 5 {
+            y = 1
+        } else if x == 5 {
+            y = 2
+        } else {
+            y = 3
+        }
+        """
+        prog = parse(src)
+        assert len(prog.statements) == 1
+        assert len(prog.statements[0].branches) == 2
+        assert prog.statements[0].else_body is not None
+
+# ═══════════════ 2. 运行时 (Runtime) 变量与控制流 ═══════════════
+
+class TestRuntimeVariables:
+    def test_local_and_global_vars(self, doc):
+        src = """
+        x = 5
+        global y = 10
+        set z = 15
+        """
+        rt = run_script(doc, src)
+        assert rt is not None
+        assert rt.error is None
+        assert rt.locals.get("x") == 5.0
+        
+        store = get_store()
+        assert store.get_var("y").value == 10.0
+        assert store.get_var("z").value == 15.0
+
+    def test_for_loop(self, doc):
+        src = """
+        sum = 0
+        for i from 1 to 5 {
+            sum = sum + i
+        }
+        """
+        rt = run_script(doc, src)
+        assert rt.error is None
+        assert rt.locals.get("sum") == 15.0
+
+    def test_if_else_logic(self, doc):
+        src = """
+        a = 10
+        if a > 5 {
+            res = 1
+        } else {
+            res = 0
+        }
+        """
+        rt = run_script(doc, src)
+        assert rt.error is None
+        assert rt.locals.get("res") == 1.0
+
+    def test_math_functions(self, doc):
+        src = """
+        val = sqrt(16) + abs(-5)
+        """
+        rt = run_script(doc, src)
+        assert rt.error is None
+        assert rt.locals.get("val") == 9.0
+
+# ═══════════════ 3. 几何对象创建与 __keep 机制 ═══════════════
+
+class TestRuntimeGeometry:
+    def test_add_point_keep_true(self, doc):
+        src = """
+        add point A at (1, 2)
+        __keep = true
+        """
+        initial_count = len(doc.objects)
+        rt = run_script(doc, src, owner_id=999)
+        
+        assert rt.error is None
+        assert len(doc.objects) == initial_count + 1
+        pt = doc.objects[-1]
+        assert pt.x == 1.0 and pt.y == 2.0
+        assert getattr(pt, "script_owner", None) == 999
+        assert doc.names.get("A") is pt
+
+    def test_add_point_keep_false_cleanup(self, doc):
+        """测试 __keep = false 时，临时对象被自动清理"""
+        src = """
+        add point B at (3, 4)
+        __keep = false
+        """
+        initial_count = len(doc.objects)
+        rt = run_script(doc, src, owner_id=999)
+        
+        assert rt.error is None
+        # 对象应该在执行结束后被移除
+        assert len(doc.objects) == initial_count
+
+    def test_add_segment(self, doc):
+        src = """
+        add point P1 at (0, 0)
+        add point P2 at (5, 5)
+        add segment S1 from P1 to P2
+        __keep = true
+        """
+        rt = run_script(doc, src, owner_id=999)
+        assert rt.error is None
+        assert len(doc.objects) == 3
+        assert doc.names.get("P1") is not None
+        assert doc.names.get("S1") is not None
+
+    def test_delete_script_created_object(self, doc):
+        """测试删除脚本自己创建的对象"""
+        src_keep = """
+        add point C at (1, 1)
+        __keep = true
+        """
+        run_script(doc, src_keep, owner_id=999)
+        assert len(doc.objects) == 1
+        
+        src_del = """
+        delete point C
+        __keep = true
+        """
+        rt = run_script(doc, src_del, owner_id=999)
+        assert rt.error is None
+        assert len(doc.objects) == 0
+
+    def test_delete_user_object_fails_without_keep(self, doc):
+        """测试：如果没有 __keep=true，脚本不能删除用户手动创建的对象"""
+        user_pt = FreePoint(10, 10)
+        user_pt.name = "UserPt"
+        doc.add(user_pt)
+        
+        src = """
+        delete point UserPt
+        """
+        rt = run_script(doc, src, owner_id=999)
+        # 应该报错，且对象未被删除
+        assert rt.error is not None
+        assert "不能删除已有对象" in str(rt.error)
+        assert len(doc.objects) == 1
+
+# ═══════════════ 4. 错误拦截与边界情况 ═══════════════
+
+class TestRuntimeErrors:
+    def test_undefined_variable(self, doc):
+        src = "x = unknown_var + 1"
+        rt = run_script(doc, src)
+        assert rt.error is not None
+        assert "未定义变量" in str(rt.error)
+
+    def test_max_steps_exceeded(self, doc):
+        """测试死循环/超大循环拦截"""
+        src = """
+        repeat 200000 {
+            x = 1
+        }
+        """
+        rt = run_script(doc, src)
+        assert rt.error is not None
+        assert "最大执行步数" in str(rt.error)
+
+    def test_division_by_zero(self, doc):
+        src = "x = 1 / 0"
+        rt = run_script(doc, src)
+        assert rt.error is not None
+        assert "除数为 0" in str(rt.error)
+
+    def test_syntax_error(self, doc):
+        src = "if x > {"
+        rt = run_script(doc, src)
+        assert rt.error is not None
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\base.py
 鏂囦欢鍚?   base.py
 淇敼鏃堕棿: 08/01/2026 23:29:52
@@ -6394,30 +8719,40 @@ class BoxSelectTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\chain_fill_tool.py
 鏂囦欢鍚?   chain_fill_tool.py
-淇敼鏃堕棿: 07/28/2026 14:21:00
+淇敼鏃堕棿: 08/05/2026 22:30:55
 ============================================================
 
-"""自由填充工具：点→线段→点→线段… 描出闭合区域并填充。
-- 智能拾取：描边时优先选中线段（不再被端点抢点击），闭合/选点时优先点。
-- 自动闭合：当所选线段接回起点时，自动闭合并填充。
-- 实时预览：描边过程中半透明显示将要填充的区域。"""
+"""自由填充工具：点→曲线→点→曲线… 描出闭合区域并填充。
+
+新增：
+- 弧段条件：自动 / 短弧 / 长弧 / 逆时针 / 顺时针
+- 填充规则：偶数 / 非零环绕
+- 点击闭合曲线时，根据点击位置自动选择期望弧段
+"""
+
 import math
 
 from PySide6.QtCore import Qt, QRectF
 from PySide6.QtGui import QColor, QPainter, QPainterPath
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-                               QPushButton, QToolButton, QButtonGroup, QSlider,
-                               QColorDialog, QGraphicsDropShadowEffect)
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QPushButton, QToolButton, QButtonGroup, QSlider,
+    QColorDialog, QGraphicsDropShadowEffect
+)
 
 from core.registry import register_tool
-from geo.chain_fill import (ChainFill, CurveRef, Span, FillStyle, sample_span,
-                            polygon_edge, hatch_lines, _point_seg_dist)
+from geo.chain_fill import (
+    ChainFill, CurveRef, Span, FillStyle, sample_span,
+    polygon_edge, hatch_lines, _point_seg_dist,
+    choose_closed_arc
+)
 from geo.points import AbstractPoint, nearest_point
 from tools.base import Tool, point_or_snap
 from ui import theme
 
 
 # ───────────── 样式迷你预览 ─────────────
+
 class StylePreview(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -6431,43 +8766,91 @@ class StylePreview(QWidget):
     def paintEvent(self, ev):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+
         path = QPainterPath()
-        path.addRoundedRect(QRectF(2, 2, self.width() - 4, self.height() - 4), 8, 8)
+        path.addRoundedRect(
+            QRectF(2, 2, self.width() - 4, self.height() - 4),
+            8,
+            8
+        )
+
         st = self.style_obj
         color = QColor(st.color)
+
         if st.kind == "gradient":
             from PySide6.QtGui import QLinearGradient, QBrush
+
             g = QLinearGradient(0, 0, self.width(), self.height())
-            c1 = QColor(color); c1.setAlphaF(st.opacity)
-            c2 = QColor(color); c2.setAlphaF(st.opacity * 0.12)
-            g.setColorAt(0, c1); g.setColorAt(1, c2)
-            p.setBrush(QBrush(g)); p.setPen(Qt.PenStyle.NoPen)
+
+            c1 = QColor(color)
+            c1.setAlphaF(st.opacity)
+
+            c2 = QColor(color)
+            c2.setAlphaF(st.opacity * 0.12)
+
+            g.setColorAt(0, c1)
+            g.setColorAt(1, c2)
+
+            p.setBrush(QBrush(g))
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawPath(path)
+
         elif st.kind in ("hatch", "crosshatch"):
-            p.save(); p.setClipPath(path)
-            hatch_lines(p, QRectF(0, 0, self.width(), self.height()), color, st.opacity, 6, 45)
+            p.save()
+            p.setClipPath(path)
+
+            hatch_lines(
+                p,
+                QRectF(0, 0, self.width(), self.height()),
+                color,
+                st.opacity,
+                6,
+                45
+            )
+
             if st.kind == "crosshatch":
-                hatch_lines(p, QRectF(0, 0, self.width(), self.height()), color, st.opacity, 6, -45)
+                hatch_lines(
+                    p,
+                    QRectF(0, 0, self.width(), self.height()),
+                    color,
+                    st.opacity,
+                    6,
+                    -45
+                )
+
             p.restore()
+
         else:
             color.setAlphaF(st.opacity)
-            p.setBrush(theme.brush(color)); p.setPen(Qt.PenStyle.NoPen)
+            p.setBrush(theme.brush(color))
+            p.setPen(Qt.PenStyle.NoPen)
             p.drawPath(path)
-        p.setPen(theme.pen(theme.SUBINK, 1)); p.setBrush(Qt.BrushStyle.NoBrush)
+
+        p.setPen(theme.pen(theme.SUBINK, 1))
+        p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(path)
 
 
 # ───────────── 填充配置面板 ─────────────
+
 class FillConfigPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("fillConfigPanel")
+
         self._color = QColor("#4dabf7")
         self._opacity = 0.6
         self._kind = "solid"
+
+        # ★ 新增条件
+        self._arc = "auto"
+        self._fill_rule = "evenodd"
+
         self._build()
+
         shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(22); shadow.setOffset(0, 5)
+        shadow.setBlurRadius(22)
+        shadow.setOffset(0, 5)
         shadow.setColor(QColor(0, 0, 0, 60))
         self.setGraphicsEffect(shadow)
 
@@ -6475,22 +8858,92 @@ class FillConfigPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(8)
+
         title = QLabel("填充设置")
         title.setStyleSheet("font-weight:700;font-size:13px;")
         layout.addWidget(title)
 
+        # 填充样式
         style_row = QHBoxLayout()
-        group = QButtonGroup(self); group.setExclusive(True)
-        for kind, label in [("solid", "纯色"), ("gradient", "渐变"),
-                            ("hatch", "斜线"), ("crosshatch", "交叉线")]:
-            b = QToolButton(); b.setText(label); b.setCheckable(True)
+        style_group = QButtonGroup(self)
+        style_group.setExclusive(True)
+
+        for kind, label in [
+            ("solid", "纯色"),
+            ("gradient", "渐变"),
+            ("hatch", "斜线"),
+            ("crosshatch", "交叉线"),
+        ]:
+            b = QToolButton()
+            b.setText(label)
+            b.setCheckable(True)
+
             if kind == self._kind:
                 b.setChecked(True)
+
             b.clicked.connect(lambda _=False, k=kind: self._set_kind(k))
-            group.addButton(b); style_row.addWidget(b)
+
+            style_group.addButton(b)
+            style_row.addWidget(b)
+
         layout.addLayout(style_row)
 
+        # ★ 弧段条件
+        arc_row = QHBoxLayout()
+        arc_row.addWidget(QLabel("弧段"))
+
+        arc_group = QButtonGroup(self)
+        arc_group.setExclusive(True)
+
+        for arc, label in [
+            ("auto", "自动"),
+            ("short", "短弧"),
+            ("long", "长弧"),
+            ("ccw", "逆时针"),
+            ("cw", "顺时针"),
+        ]:
+            b = QToolButton()
+            b.setText(label)
+            b.setCheckable(True)
+
+            if arc == self._arc:
+                b.setChecked(True)
+
+            b.clicked.connect(lambda _=False, a=arc: self._set_arc(a))
+
+            arc_group.addButton(b)
+            arc_row.addWidget(b)
+
+        layout.addLayout(arc_row)
+
+        # ★ 填充规则
+        rule_row = QHBoxLayout()
+        rule_row.addWidget(QLabel("填充规则"))
+
+        rule_group = QButtonGroup(self)
+        rule_group.setExclusive(True)
+
+        for rule, label in [
+            ("evenodd", "偶数"),
+            ("winding", "非零环绕"),
+        ]:
+            b = QToolButton()
+            b.setText(label)
+            b.setCheckable(True)
+
+            if rule == self._fill_rule:
+                b.setChecked(True)
+
+            b.clicked.connect(lambda _=False, r=rule: self._set_fill_rule(r))
+
+            rule_group.addButton(b)
+            rule_row.addWidget(b)
+
+        layout.addLayout(rule_row)
+
+        # 颜色 / 透明度
         row2 = QHBoxLayout()
+
         self._color_btn = QPushButton()
         self._color_btn.setFixedSize(38, 24)
         self._color_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -6498,12 +8951,17 @@ class FillConfigPanel(QWidget):
         self._color_btn.clicked.connect(self._pick_color)
         self._update_color_btn()
         row2.addWidget(self._color_btn)
+
         self._slider = QSlider(Qt.Orientation.Horizontal)
-        self._slider.setRange(5, 100); self._slider.setValue(60)
+        self._slider.setRange(5, 100)
+        self._slider.setValue(60)
         self._slider.valueChanged.connect(self._on_opacity)
         row2.addWidget(self._slider, 1)
-        self._opacity_lbl = QLabel("60%"); self._opacity_lbl.setFixedWidth(36)
+
+        self._opacity_lbl = QLabel("60%")
+        self._opacity_lbl.setFixedWidth(36)
         row2.addWidget(self._opacity_lbl)
+
         layout.addLayout(row2)
 
         self._preview = StylePreview()
@@ -6513,6 +8971,7 @@ class FillConfigPanel(QWidget):
         self._hint.setWordWrap(True)
         self._hint.setStyleSheet("font-size:11px;")
         layout.addWidget(self._hint)
+
         self._sync_preview()
 
     def set_hint(self, text):
@@ -6520,16 +8979,36 @@ class FillConfigPanel(QWidget):
         self._hint.setStyleSheet(f"color:{theme.SUBINK.name()};font-size:11px;")
 
     def _set_kind(self, kind):
-        self._kind = kind; self._sync_preview()
+        self._kind = kind
+        self._sync_preview()
+
+    def _set_arc(self, arc):
+        self._arc = arc
+        self._sync_preview()
+
+    def _set_fill_rule(self, rule):
+        self._fill_rule = rule
+        self._sync_preview()
+
+    def get_arc(self):
+        return self._arc
+
+    def get_fill_rule(self):
+        return self._fill_rule
 
     def _pick_color(self):
         c = QColorDialog.getColor(self._color, self, "选择填充颜色")
         if c.isValid():
-            self._color = c; self._update_color_btn(); self._sync_preview()
+            self._color = c
+            self._update_color_btn()
+            self._sync_preview()
 
     def _update_color_btn(self):
         self._color_btn.setStyleSheet(
-            f"background:{self._color.name()};border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
+            f"background:{self._color.name()};"
+            f"border:1px solid rgba(0,0,0,0.3);"
+            f"border-radius:5px;"
+        )
 
     def _on_opacity(self, v):
         self._opacity = v / 100
@@ -6537,67 +9016,119 @@ class FillConfigPanel(QWidget):
         self._sync_preview()
 
     def _sync_preview(self):
-        self._preview.set_style(FillStyle(self._color, self._opacity, self._kind))
+        self._preview.set_style(
+            FillStyle(
+                self._color,
+                self._opacity,
+                self._kind,
+                self._fill_rule
+            )
+        )
 
     def get_style(self):
-        return FillStyle(QColor(self._color), self._opacity, self._kind)
+        return FillStyle(
+            QColor(self._color),
+            self._opacity,
+            self._kind,
+            self._fill_rule
+        )
 
 
 # ───────────── 自由填充工具 ─────────────
-@register_tool(name="自由填充", shortcut="W", order=9, icon="freefill", panel="rail",
-               hint="点→线段→点→线段… 描出区域，线段接回起点自动填充；Esc 重来")
+
+@register_tool(
+    name="自由填充",
+    shortcut="W",
+    order=9,
+    icon="freefill",
+    panel="rail",
+    hint="点→曲线→点→曲线… 描出区域；闭合曲线可点击期望弧段；Esc 重来"
+)
 class ChainFillTool(Tool):
     def __init__(self):
         self.chain_points = []
         self.spans = []
         self.pending_curve = None
+        self.pending_prefer = None
         self._panel = None
 
     def activated(self, canvas):
         self._clear()
+
         self._panel = FillConfigPanel(canvas)
         self._panel.adjustSize()
         self._panel.move((canvas.width() - self._panel.width()) // 2, 14)
-        self._panel.show(); self._panel.raise_()
+        self._panel.show()
+        self._panel.raise_()
+
         self._update_hint()
 
     def deactivated(self, canvas):
         self._clear()
+
         if self._panel is not None:
-            self._panel.hide(); self._panel.deleteLater()
-            self._panel = None
+            self._panel.hide()
+            self._panel.deleteLater()
+
+        self._panel = None
 
     def _clear(self):
         self.chain_points = []
         self.spans = []
         self.pending_curve = None
+        self.pending_prefer = None
 
-    # ───── 智能拾取：点与曲线分开找，各带距离 ─────
+    # ───── 拾取 ─────
+
     def _pick_point(self, canvas, wpt):
         pt = nearest_point(canvas.doc, canvas.scale, wpt)
+
         if pt is None:
             return None, float("inf")
+
         return pt, math.hypot(pt.x - wpt[0], pt.y - wpt[1])
 
     def _pick_curve(self, canvas, wpt):
         tol = 10.0 / canvas.scale
         best, best_d = None, tol
+
         for o in canvas.doc.objects:
             if not (o.visible and o.exists) or isinstance(o, AbstractPoint):
                 continue
+
             if type(o).__name__ == "RegularPolygon":
                 k = polygon_edge(o, wpt[0], wpt[1])
-                a = o.verts[k]; b = o.verts[(k + 1) % o.n]
+                a = o.verts[k]
+                b = o.verts[(k + 1) % o.n]
+
                 d = _point_seg_dist(wpt[0], wpt[1], a[0], a[1], b[0], b[1])
+
                 if d < best_d:
                     best, best_d = CurveRef(o, k), d
+
             elif hasattr(o, "point_at") and hasattr(o, "project"):
                 d = o.distance_to(wpt[0], wpt[1])
+
                 if d is not None and d < best_d:
                     best, best_d = CurveRef(o), d
+
         return best, best_d
 
+    # ───── 弧段条件 ─────
+
+    def _resolve_arc(self, curve, from_pt, to_pt, prefer=None):
+        arc = self._panel.get_arc() if self._panel else "auto"
+
+        if arc == "auto" and curve is not None and getattr(curve, "closed", False):
+            p = prefer if prefer is not None else self.pending_prefer
+
+            if p is not None:
+                return choose_closed_arc(curve, from_pt, to_pt, p)
+
+        return arc
+
     # ───── 点击分发 ─────
+
     def press(self, canvas, wpt, hit):
         pt, pt_d = self._pick_point(canvas, wpt)
         curve, curve_d = self._pick_curve(canvas, wpt)
@@ -6605,98 +9136,192 @@ class ChainFillTool(Tool):
         expecting_point = (self.pending_curve is not None) or (not self.chain_points)
 
         if expecting_point:
-            # 该选点了：优先点（闭合/续点）
-            self._on_point(canvas, pt if pt is not None else point_or_snap(canvas, wpt, hit))
+            self._on_point(
+                canvas,
+                pt if pt is not None else point_or_snap(canvas, wpt, hit)
+            )
         else:
-            # 该选线段了：只要线段明显更近就选线段（解决"点抢线段"），
-            # 点在起点上（要闭合）或点更近时选点
-            clicking_start = (pt is not None and len(self.chain_points) >= 2
-                              and pt is self.chain_points[0])
+            clicking_start = (
+                pt is not None
+                and len(self.chain_points) >= 2
+                and pt is self.chain_points[0]
+            )
+
             if curve is not None and not clicking_start and curve_d < pt_d:
-                self._on_curve(canvas, curve)
+                self._on_curve(canvas, curve, wpt)
             elif pt is not None:
                 self._on_point(canvas, pt)
             else:
                 self._on_point(canvas, point_or_snap(canvas, wpt, hit))
+
         self._update_hint()
         canvas.update()
 
     def _on_point(self, canvas, pt):
         if pt is None:
             return
+
         if not self.chain_points:
             self.chain_points = [pt]
             return
+
+        # 已有待选曲线时，点击当前点视为取消待选曲线
+        if self.pending_curve is not None and pt is self.chain_points[-1]:
+            self.pending_curve = None
+            self.pending_prefer = None
+            return
+
+        # 没有待选曲线时，点击当前点撤销上一个顶点
         if pt is self.chain_points[-1]:
-            # 取消：移除最后一个顶点
             self.chain_points.pop()
+
             if self.spans:
                 self.spans.pop()
+
             return
+
+        # 手动闭合：点回起点
         if pt is self.chain_points[0] and len(self.chain_points) >= 2:
-            # 手动闭合：点回起点
-            self.spans.append(Span(self.chain_points[-1], pt, self.pending_curve))
+            arc = self._resolve_arc(
+                self.pending_curve,
+                self.chain_points[-1],
+                pt
+            )
+
+            self.spans.append(
+                Span(
+                    self.chain_points[-1],
+                    pt,
+                    self.pending_curve,
+                    arc
+                )
+            )
+
             self.pending_curve = None
+            self.pending_prefer = None
             self._finish(canvas)
             return
-        self.spans.append(Span(self.chain_points[-1], pt, self.pending_curve))
+
+        arc = self._resolve_arc(
+            self.pending_curve,
+            self.chain_points[-1],
+            pt
+        )
+
+        self.spans.append(
+            Span(
+                self.chain_points[-1],
+                pt,
+                self.pending_curve,
+                arc
+            )
+        )
+
         self.pending_curve = None
+        self.pending_prefer = None
         self.chain_points.append(pt)
 
-    def _on_curve(self, canvas, curve):
+    def _on_curve(self, canvas, curve, wpt=None):
         # 再点同一曲线 = 取消
-        if self.pending_curve is not None \
-                and self.pending_curve.obj is curve.obj \
-                and self.pending_curve.edge == curve.edge:
+        if (
+            self.pending_curve is not None
+            and self.pending_curve.obj is curve.obj
+            and self.pending_curve.edge == curve.edge
+        ):
             self.pending_curve = None
+            self.pending_prefer = None
             return
-        # 自动闭合：这条线段恰好接回起点 → 直接填充
+
+        # 自动闭合：这条曲线恰好接回起点 → 直接填充
         if len(self.chain_points) >= 2:
             cur, start = self.chain_points[-1], self.chain_points[0]
+
             if self._curve_connects(canvas, curve, cur, start):
-                self.spans.append(Span(cur, start, curve))
+                arc = self._resolve_arc(curve, cur, start, wpt)
+
+                self.spans.append(
+                    Span(
+                        cur,
+                        start,
+                        curve,
+                        arc
+                    )
+                )
+
                 self.pending_curve = None
+                self.pending_prefer = None
                 self._finish(canvas)
                 return
+
         self.pending_curve = curve
+        self.pending_prefer = wpt
 
     @staticmethod
     def _curve_connects(canvas, curve, pt_a, pt_b):
-        """曲线的两个端点是否分别与 pt_a、pt_b 重合（接回起点判定）。"""
+        """曲线的两个端点是否分别与 pt_a、pt_b 重合。"""
         obj = curve.obj
         tol = 8.0 / canvas.scale
 
         def near(p1, p2):
             return p1 is p2 or math.hypot(p1.x - p2.x, p1.y - p2.y) < tol
 
-        if curve.edge is not None:                      # 多边形边：端点是坐标
+        if curve.edge is not None:
             a = obj.verts[curve.edge]
             b = obj.verts[(curve.edge + 1) % obj.n]
+
             def cnear(p, x, y):
                 return math.hypot(p.x - x, p.y - y) < tol
-            return ((cnear(pt_a, *a) and cnear(pt_b, *b)) or
-                    (cnear(pt_a, *b) and cnear(pt_b, *a)))
-        if hasattr(obj, "a") and hasattr(obj, "b"):     # 线段/直线/射线
+
+            return (
+                (cnear(pt_a, *a) and cnear(pt_b, *b)) or
+                (cnear(pt_a, *b) and cnear(pt_b, *a))
+            )
+
+        if hasattr(obj, "a") and hasattr(obj, "b"):
             a, b = obj.a, obj.b
-            return ((near(a, pt_a) and near(b, pt_b)) or
-                    (near(a, pt_b) and near(b, pt_a)))
-        return False                                    # 圆/椭圆/贝塞尔无端点，不自动闭合
+
+            return (
+                (near(a, pt_a) and near(b, pt_b)) or
+                (near(a, pt_b) and near(b, pt_a))
+            )
+
+        return False
 
     def _finish(self, canvas):
         if self.spans and len(self.chain_points) >= 2:
-            style = self._panel.get_style() if self._panel \
-                else FillStyle(QColor("#4dabf7"), 0.6, "solid")
+            style = (
+                self._panel.get_style()
+                if self._panel
+                else FillStyle(QColor("#4dabf7"), 0.6, "solid", "evenodd")
+            )
+
             canvas.doc.add(ChainFill(self.spans, style))
+
         self._clear()
 
-    def confirm(self, canvas):                        # 回车闭合
+    def confirm(self, canvas):
         if len(self.chain_points) >= 2:
-            self.spans.append(Span(self.chain_points[-1], self.chain_points[0],
-                                   self.pending_curve))
+            arc = self._resolve_arc(
+                self.pending_curve,
+                self.chain_points[-1],
+                self.chain_points[0]
+            )
+
+            self.spans.append(
+                Span(
+                    self.chain_points[-1],
+                    self.chain_points[0],
+                    self.pending_curve,
+                    arc
+                )
+            )
+
             self.pending_curve = None
+            self.pending_prefer = None
             self._finish(canvas)
-            self._update_hint()
-            canvas.update()
+
+        self._update_hint()
+        canvas.update()
 
     def cancel(self, canvas):
         self._clear()
@@ -6706,71 +9331,112 @@ class ChainFillTool(Tool):
     def _update_hint(self):
         if self._panel is None:
             return
+
+        arc_name = {
+            "auto": "自动",
+            "short": "短弧",
+            "long": "长弧",
+            "ccw": "逆时针",
+            "cw": "顺时针",
+        }.get(self._panel.get_arc(), "自动")
+
         if not self.chain_points:
             self._panel.set_hint("① 点点选起点")
-        elif self.pending_curve is not None:
-            self._panel.set_hint("③ 点下一个点（点回起点即闭合填充）")
-        else:
-            self._panel.set_hint("② 点选线段作为边界（也可直接点下一点走直线）")
 
-    # ───── 覆盖层：高亮 + 橡皮筋 + 实时填充预览 ─────
+        elif self.pending_curve is not None:
+            self._panel.set_hint(
+                f"③ 点下一个点（当前弧段：{arc_name}；点击曲线时靠近想要的弧可自动选择）"
+            )
+
+        else:
+            self._panel.set_hint(
+                f"② 点选线段/圆弧作为边界（当前弧段：{arc_name}；也可直接点下一点走直线）"
+            )
+
+    # ───── 覆盖层 ─────
+
     def draw_overlay(self, p, view):
         # 待选曲线高亮
         if self.pending_curve is not None:
             c = self.pending_curve
+
             p.setPen(theme.dashed_pen(theme.PREVIEW, 2.5))
             p.setBrush(Qt.BrushStyle.NoBrush)
+
             path = QPainterPath()
             n = 60 if c.closed else 40
+
             for i in range(n + 1):
                 sp = view.to_screen(*c.point_at(i / n))
                 path.moveTo(sp) if i == 0 else path.lineTo(sp)
+
             if c.closed:
                 path.closeSubpath()
+
             p.drawPath(path)
 
         if not self.chain_points:
             return
 
-        # 实时填充预览：已选边界 + 直线收口到起点，半透明填充
+        # 实时填充预览
         prev = []
+
         for sp in self.spans:
             prev.extend(sample_span(sp)[:-1])
+
         prev.append((self.chain_points[-1].x, self.chain_points[-1].y))
+
         if len(prev) >= 2:
             prev.append((self.chain_points[0].x, self.chain_points[0].y))
-            fpath = QPainterPath()
-            fpath.moveTo(view.to_screen(*prev[0]))
-            for q in prev[1:]:
-                fpath.lineTo(view.to_screen(*q))
-            fpath.closeSubpath()
-            style = self._panel.get_style() if self._panel \
-                else FillStyle(QColor("#4dabf7"), 0.6, "solid")
-            fc = QColor(style.color)
-            fc.setAlphaF(style.opacity * 0.35)
-            p.setBrush(theme.brush(fc))
-            p.setPen(theme.dashed_pen(theme.ACCENT, 1.2))
-            p.drawPath(fpath)
+
+        fpath = QPainterPath()
+        fpath.moveTo(view.to_screen(*prev[0]))
+
+        for q in prev[1:]:
+            fpath.lineTo(view.to_screen(*q))
+
+        fpath.closeSubpath()
+
+        style = (
+            self._panel.get_style()
+            if self._panel
+            else FillStyle(QColor("#4dabf7"), 0.6, "solid", "evenodd")
+        )
+
+        fc = QColor(style.color)
+        fc.setAlphaF(style.opacity * 0.35)
+
+        p.setBrush(theme.brush(fc))
+        p.setPen(theme.dashed_pen(theme.ACCENT, 1.2))
+        p.drawPath(fpath)
 
         # 已选链 + 到光标的橡皮筋
         pts = []
+
         for sp in self.spans:
             pts.extend(sample_span(sp)[:-1])
+
         pts.append((self.chain_points[-1].x, self.chain_points[-1].y))
+
         lpath = QPainterPath()
         lpath.moveTo(view.to_screen(*pts[0]))
+
         for q in pts[1:]:
             lpath.lineTo(view.to_screen(*q))
+
         lpath.lineTo(view.to_screen(*view.cursor_wpt))
+
         p.setPen(theme.dashed_pen(theme.ACCENT, 1.5))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawPath(lpath)
 
-        # 顶点标记（起点大环 = 点它闭合）
+        # 顶点标记
         for i, pt in enumerate(self.chain_points):
             sp = view.to_screen(pt.x, pt.y)
+
             p.setPen(theme.pen(theme.PREVIEW if i == 0 else theme.ACCENT, 2))
             p.setBrush(Qt.BrushStyle.NoBrush)
+
             r = 7 if i == 0 else 5
             p.drawEllipse(sp, r, r)
 
@@ -7151,7 +9817,7 @@ class InkTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\intersect_tool.py
 鏂囦欢鍚?   intersect_tool.py
-淇敼鏃堕棿: 07/26/2026 17:54:32
+淇敼鏃堕棿: 08/05/2026 22:03:05
 ============================================================
 
 """交点工具：依次点两个几何图形 → 生成它们的全部交点。
@@ -7195,8 +9861,7 @@ class IntersectTool(Tool):
         canvas.update()
 
     def draw_overlay(self, p, view):
-        if self.first is not None:
-            view.doc.set_selection([self.first])         # 保持高亮
+        return     # 保持高亮
 
 
 ============================================================
@@ -7364,7 +10029,7 @@ class SegmentTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\select.py
 鏂囦欢鍚?   select.py
-淇敼鏃堕棿: 08/04/2026 22:53:01
+淇敼鏃堕棿: 08/06/2026 16:01:49
 ============================================================
 
 """选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
@@ -7411,7 +10076,11 @@ class SelectTool(Tool):
         self._orig_pos: list[Tuple[FreePoint, float, float]] = []
         self._grab_wpt: Optional[Tuple[float, float]] = None
         self._drag_undo_begun = False
-        self._guides: List[Tuple[str, float]] = []   # ★ 智能参考线
+        self._guides: List[Tuple[str, float]] = [] 
+            # ★ 脚本按钮点击/拖动判断
+        self._click_media = None
+        self._press_wpt = None
+        self._moved = False# ★ 智能参考线
 
     def _detect_snap(self, canvas, x, y) -> Tuple[float, float, List[Tuple[str, float]]]:
         """检测对齐吸附：坐标轴 / 其他点。返回 (吸附后x, 吸附后y, 参考线列表)。"""
@@ -7455,14 +10124,20 @@ class SelectTool(Tool):
 
     def press(self, canvas, wpt, hit):
         self._reset()
+
         target = snap_target(canvas, wpt, hit)
+
         if target is None:
             canvas.doc.set_selection([])
             return
 
+        # ★ 延迟导入，避免循环依赖
+        from media.script_button import ScriptButtonObject
+
         if isinstance(target, MediaObject):
             was_selected = target.selected
             canvas.doc.set_selection([target])
+
             if was_selected:
                 sp = canvas.to_screen(wpt[0], wpt[1])
 
@@ -7474,40 +10149,64 @@ class SelectTool(Tool):
                         self._grab_wpt = wpt
                         return
 
+                # ★ 编辑按钮
                 if target.edit_button_rect(canvas).contains(sp):
                     target.edit(canvas)
                     self._reset()
                     return
 
+                # ★ 缩放手柄
                 if target.resize_handle_rect(canvas).contains(sp):
                     self.resize_media = target
                     self._grab_wpt = wpt
                     return
 
+            # ★ 媒体对象本体可拖动
+            self.drag_media = target
+            self._media_orig = (target.x, target.y)
+            self._grab_wpt = wpt
+
+            # ★ 脚本按钮：如果没有明显拖动，则视为单击运行
+            if isinstance(target, ScriptButtonObject):
+                self._click_media = target
+                self._press_wpt = wpt
+                self._moved = False
+
+            return
+
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
+
         if multi:
             canvas.doc.set_selection(selected)
+
             pts: list[FreePoint] = []
             seen = set()
+
             for o in selected:
                 _free_points_of(o, pts, seen)
+
             self.drag_pts = pts
+
         elif isinstance(target, PointOnObject):
             canvas.doc.set_selection([target])
             self.drag_poo = target
+
         elif isinstance(target, FreePoint):
             canvas.doc.set_selection([target])
             self.drag_pts = [target]
+
         elif isinstance(target, AbstractPoint):
             canvas.doc.set_selection([target])
+
         else:
             canvas.doc.set_selection([target])
+
             pts = []
             seen = set()
             _free_points_of(target, pts, seen)
             self.drag_pts = pts
-            
+
         self._grab_wpt = wpt
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
@@ -7516,11 +10215,23 @@ class SelectTool(Tool):
                 and self.drag_media is None and self.resize_media is None
                 and self.rotate_media is None):
             return
+
+        # ★ 判断脚本按钮是单击还是拖动
+        if self._click_media is not None and self._press_wpt is not None:
+            dx = wpt[0] - self._press_wpt[0]
+            dy = wpt[1] - self._press_wpt[1]
+
+            if math.hypot(dx, dy) > 5.0 / canvas.scale:
+                self._moved = True
+            elif not self._moved:
+                #  ainda 没超过阈值，不启动拖动
+                return
+
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
 
-        self._guides = []  # 每次移动清空参考线
+        self._guides = []
 
         # ★ 旋转媒体对象
         if self.rotate_media is not None:
@@ -7531,7 +10242,6 @@ class SelectTool(Tool):
                 math.atan2(cur.y() - center.y(), cur.x() - center.x())
             )
 
-            # 旋转手柄默认在对象正上方，所以 +90°
             ang += 90.0
 
             self.rotate_media.rotation = (ang + 360.0) % 360.0
@@ -7541,39 +10251,55 @@ class SelectTool(Tool):
         if self.resize_media is not None:
             self.resize_media.resize_to(wpt)
             canvas.doc.changed.emit()
-            
+
         elif self.drag_media is not None and self._grab_wpt is not None:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
+
             nx = self._media_orig[0] + dx
             ny = self._media_orig[1] + dy
-            # ★ 媒体对象左上角吸附
+
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
+
             self.drag_media.x = nx
             self.drag_media.y = ny
+
             canvas.doc.changed.emit()
-            
+
         elif self.drag_poo is not None:
             self.drag_poo.drag_to(wpt)
             canvas.doc.recompute_from(self.drag_poo)
-            
+
         elif self._grab_wpt is not None and self.drag_pts:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
+
             base_p, base_ox, base_oy = self._orig_pos[0]
+
             nx = base_ox + dx
             ny = base_oy + dy
-            # ★ 自由点吸附
+
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
+
             actual_dx = nx - base_ox
             actual_dy = ny - base_oy
+
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
+
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
+        # ★ 脚本按钮：没有明显移动则运行
+        if self._click_media is not None and not self._moved:
+            try:
+                self._click_media.run(canvas)
+            except Exception as e:
+                canvas.cursor_info.emit(f"脚本错误：{e}")
+
         if self._drag_undo_begun:
             canvas.doc.end_action()
+
         self._reset()
 
     def cancel(self, canvas):
@@ -7976,7 +10702,7 @@ def solve_affine(src, dst):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\objects.py
 鏂囦欢鍚?   objects.py
-淇敼鏃堕棿: 08/04/2026 23:14:39
+淇敼鏃堕棿: 08/05/2026 22:05:40
 ============================================================
 
 """变换对象：TransformDriver / TransformPoint / IterPoint / InvertedCircle 等。"""
@@ -8476,7 +11202,7 @@ class IterPoint(AbstractPoint):
         self.exists = True
 
     def moved_points(self):
-        return []
+        return [self]
 
     def dump(self):
         return {
@@ -9142,7 +11868,7 @@ for _m in pkgutil.iter_modules(__path__):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
 鏂囦欢鍚?   canvas.py
-淇敼鏃堕棿: 08/05/2026 14:38:09
+淇敼鏃堕棿: 08/06/2026 16:02:36
 ============================================================
 
 import math
@@ -9556,8 +12282,17 @@ class Canvas(QWidget):
             self.doc._commit_undo_if_changed()
 
     def mouseDoubleClickEvent(self, ev):
+        # ★ 双击脚本按钮打开脚本编辑器
+        from media.script_button import ScriptButtonObject
+
+        hit = self.pick(ev.position())
+
+        if isinstance(hit, ScriptButtonObject):
+            hit.edit(self)
+            return
+
         super().mouseDoubleClickEvent(ev)
-            
+        
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
         self.cursor_info.emit(
@@ -9778,7 +12513,7 @@ def content_bbox(doc):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\export_courseware.py
 鏂囦欢鍚?   export_courseware.py
-淇敼鏃堕棿: 08/04/2026 20:28:09
+淇敼鏃堕棿: 08/06/2026 16:03:38
 ============================================================
 
 """导出到课件：一键生成课件包（含向导）。
@@ -9803,6 +12538,7 @@ from PySide6.QtGui import QImage, QPainter
 from PySide6.QtCore import QByteArray, QBuffer, QPointF, Qt
 from core.registry import RENDER_REGISTRY
 from media.base import MediaObject
+from core.variables import render_template
 
 JSX_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraphcore.js"
 JSX_CSS_URL = "https://cdn.jsdelivr.net/npm/jsxgraph@1.8.0/distrib/jsxgraph.css"
@@ -9939,6 +12675,17 @@ def _jsx_export(doc, include_vars=True):
     def nv():
         counter[0] += 1
         return f"o{counter[0]}"
+    
+    def add_static_point(o, fixed=True):
+        n = nv()
+        names[o.id] = n
+        fixed_js = "true" if fixed else "false"
+        lines.append(
+            f"var {n} = board.create('point', "
+            f"[{o.x:.4f}, {o.y:.4f}], "
+            f"{{name: '', size: 2, fixed: {fixed_js}}});"
+        )
+        return n    
 
     # 导出变量为 slider
     for vname in all_var_names:
@@ -9976,6 +12723,10 @@ def _jsx_export(doc, include_vars=True):
     for obj in doc.objects:
         if not (obj.visible and obj.exists):
             continue
+    # ★ 导出课件时禁用脚本按钮
+        if type(obj).__name__ == "ScriptButtonObject":
+            continue
+        
         tn = type(obj).__name__
 
         if tn in ("FreePoint", "ExprPoint"):
@@ -9990,7 +12741,33 @@ def _jsx_export(doc, include_vars=True):
                 lines.append(f"var {n} = board.create('glider', "
                              f"[{obj.x:.4f}, {obj.y:.4f}, {host_name}], "
                              f"{{name: 'P{obj.id}', size: 2}});")
+                
+        elif tn == "DivisionPoint":
+            a = names.get(obj.a.id)
+            b = names.get(obj.b.id)
 
+            n = nv()
+            names[obj.id] = n
+
+            if a and b:
+                t = float(obj.t)
+
+                lines.append(
+                    f"var {n} = board.create('point', ["
+                    f"function() {{ return {a}.X() + {t} * ({b}.X() - {a}.X()); }},"
+                    f"function() {{ return {a}.Y() + {t} * ({b}.Y() - {a}.Y()); }}"
+                    f"], {{name: '', size: 2}});"
+                )
+            else:
+                lines.append(
+                    f"var {n} = board.create('point', "
+                    f"[{obj.x:.4f}, {obj.y:.4f}], "
+                    f"{{name: '', size: 2, fixed: true}});"
+                )
+
+        elif tn in ("PolygonVertex", "TransformPoint", "IterPoint"):
+            add_static_point(obj, fixed=True)
+            
         elif tn == "Segment":
             a, b = names.get(obj.a.id), names.get(obj.b.id)
             if a and b:
@@ -10042,7 +12819,33 @@ def _jsx_export(doc, include_vars=True):
                 n = nv(); names[obj.id] = n
                 lines.append(f"var {n} = board.create('intersection', [{a}, {b}, {obj.branch}], "
                              f"{{name: '', size: 2}});")
+                
+        elif tn in (
+            "PerpLine",
+            "ParallelLine",
+            "AngleBisector",
+            "AngleDivLine",
+            "DirectedLine"
+        ):
+            if hasattr(obj, "point") and hasattr(obj, "dx") and hasattr(obj, "dy"):
+                x0, y0 = obj.point.x, obj.point.y
+                dx, dy = obj.dx, obj.dy
 
+                L = math.hypot(dx, dy)
+                if L > 1e-12:
+                    dx /= L
+                    dy /= L
+
+                    x1 = x0 + dx * 50.0
+                    y1 = y0 + dy * 50.0
+
+                    lines.append(
+                        f"board.create('line', "
+                        f"[[{x0:.4f}, {y0:.4f}], [{x1:.4f}, {y1:.4f}]], "
+                        f"{{strokeColor: '#495057', strokeWidth: 2, "
+                        f"straightFirst: true, straightLast: true}});"
+                    )
+                    
         elif tn == "Ellipse":
             c_name = names.get(obj.center.id)
             a_name = names.get(obj.axis_a.id)
@@ -10058,7 +12861,23 @@ def _jsx_export(doc, include_vars=True):
                     f"0, 2 * Math.PI], {{strokeColor: '#862e9c', strokeWidth: 2}});"
                 )
                 lines.append(code)
+                
+        elif tn == "TextObject":
+            wx, wy = obj.world_pos()
 
+            txt = render_template(obj.text)
+            txt_js = (
+                txt.replace("\\", "\\\\")
+                   .replace("'", "\\'")
+                   .replace("\n", "\\n")
+            )
+
+            lines.append(
+                f"board.create('text', "
+                f"[{wx:.4f}, {wy:.4f}, '{txt_js}'], "
+                f"{{fontSize: {obj.size}, cssStyle: 'color:{obj.color};'}});"
+            )
+            
         elif tn == "CubicBezier":
             p0 = names.get(obj.p0.id)
             p1 = names.get(obj.p1.id)
@@ -10137,17 +12956,23 @@ def _jsx_export(doc, include_vars=True):
         # ★ 新增：媒体对象（表格/图表/图像）转图片渲染
         elif isinstance(obj, MediaObject):
             b64 = _render_media_to_base64(obj)
+
             if b64:
-                n = nv(); names[obj.id] = n
-                # JSXGraph 的 image 坐标是左下角，且高度向上延伸
+                n = nv()
+                names[obj.id] = n
+
+                # ★ 修复：MediaObject 的底边是 y - height
                 x_bl = obj.x
-                y_bl = obj.y + obj.height
-                # 替换 Base64 中的换行符以防 JS 报错
+                y_bl = obj.y - obj.height
+
                 b64_clean = b64.replace("\n", "")
-                lines.append(f"var {n} = board.create('image', "
-                             f"['data:image/png;base64,{b64_clean}', "
-                             f"[{x_bl}, {y_bl}], [{obj.width}, {obj.height}]], "
-                             f"{{fixed: false, highlight: false}});")
+
+                lines.append(
+                    f"var {n} = board.create('image', "
+                    f"['data:image/png;base64,{b64_clean}', "
+                    f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
+                    f"{{fixed: false, highlight: false}});"
+                )
 
     return "\n".join(lines), bb
 
@@ -11635,6 +14460,171 @@ class MainWindow(QMainWindow):
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\script_editor.py
+鏂囦欢鍚?   script_editor.py
+淇敼鏃堕棿: 08/06/2026 16:27:53
+============================================================
+
+"""脚本编辑器基础版。
+
+当前支持：
+- 多行编辑
+- 简单关键字高亮
+- 运行
+- 保存
+
+后续步骤会加：
+- 行号
+- 自动补全
+- 函数提醒
+- 错误红线
+"""
+
+import re
+
+from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QPushButton
+)
+
+from core.scripting import run_script
+
+
+KEYWORD_PATTERNS = [
+    r"repeat", r"重复",
+    r"for", r"遍历",
+    r"from", r"从",
+    r"to", r"到",
+    r"if", r"如果",
+    r"elif", r"否则如果",
+    r"else", r"否则",
+    r"global", r"全局",
+    r"set", r"设置",
+    r"true", r"真",
+    r"false", r"假",
+    r"and", r"并且", r"且",
+    r"or", r"或者",
+    r"not", r"非",
+    r"add", r"新增", r"添加",
+    r"delete", r"删除",
+    r"print", r"打印",
+    r"point", r"点",
+    r"segment", r"线段",
+    r"line", r"直线",
+    r"circle", r"圆",
+    r"polygon", r"多边形",
+    r"text", r"文本",
+    r"at", r"在",
+    r"center", r"圆心",
+    r"radius", r"半径",
+    r"points", r"点集",
+    r"object", r"对象",
+]
+
+
+class ScriptHighlighter(QSyntaxHighlighter):
+    def __init__(self, document):
+        super().__init__(document)
+
+        self.rules = []
+
+        # 关键字
+        kw_format = QTextCharFormat()
+        kw_format.setForeground(QColor("#1971c2"))
+        kw_format.setFontWeight(QFont.Weight.Bold)
+
+        for pat in KEYWORD_PATTERNS:
+            self.rules.append((re.compile(pat), kw_format))
+
+        # 数字
+        num_format = QTextCharFormat()
+        num_format.setForeground(QColor("#2f9e44"))
+        self.rules.append((re.compile(r"\b\d+\.?\d*\b"), num_format))
+
+        # 字符串
+        str_format = QTextCharFormat()
+        str_format.setForeground(QColor("#e8590c"))
+        self.rules.append((re.compile(r"\"[^\"]*\""), str_format))
+        self.rules.append((re.compile(r"'[^']*'"), str_format))
+
+        # 注释
+        comment_format = QTextCharFormat()
+        comment_format.setForeground(QColor("#868e96"))
+        self.rules.append((re.compile(r"#.*"), comment_format))
+
+    def highlightBlock(self, text):
+        for pattern, fmt in self.rules:
+            # ★ 修复：使用 Python re 模块的 finditer，而不是 Qt 的 globalMatch
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(), fmt)
+
+
+class ScriptEditorDialog(QDialog):
+    def __init__(self, canvas, button_obj, parent=None):
+        super().__init__(parent)
+
+        self.canvas = canvas
+        self.button_obj = button_obj
+
+        self.setWindowTitle(f"脚本编辑器 · {getattr(button_obj, 'name', '') or 'ScriptButton'}")
+        self.resize(760, 560)
+
+        layout = QVBoxLayout(self)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setPlainText(button_obj.script)
+        self.editor.setTabStopDistance(28)
+
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        font.setPointSize(11)
+        self.editor.setFont(font)
+
+        self.highlighter = ScriptHighlighter(self.editor.document())
+
+        layout.addWidget(self.editor, 1)
+
+        btn_row = QHBoxLayout()
+
+        run_btn = QPushButton("运行")
+        save_btn = QPushButton("保存")
+        cancel_btn = QPushButton("取消")
+
+        run_btn.clicked.connect(self._run)
+        save_btn.clicked.connect(self._save)
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_row.addStretch(1)
+        btn_row.addWidget(run_btn)
+        btn_row.addWidget(save_btn)
+        btn_row.addWidget(cancel_btn)
+
+        layout.addLayout(btn_row)
+
+    def _save(self):
+        self.button_obj.script = self.editor.toPlainText()
+        self.canvas.doc.changed.emit()
+        self.accept()
+
+    def _run(self):
+        # 运行时先保存当前文本
+        self.button_obj.script = self.editor.toPlainText()
+        self.canvas.doc.changed.emit()
+
+        run_script(
+            self.canvas.doc,
+            self.button_obj.script,
+            owner_id=self.button_obj.id,
+            canvas=self.canvas
+        )
+
+
+def edit_script_button(canvas, button_obj):
+    dlg = ScriptEditorDialog(canvas, button_obj, canvas)
+    dlg.exec()
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\theme.py
 鏂囦欢鍚?   theme.py
 淇敼鏃堕棿: 08/05/2026 12:30:36
@@ -12511,16 +15501,23 @@ def family_name():
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\layout.py
 鏂囦欢鍚?   layout.py
-淇敼鏃堕棿: 07/29/2026 14:09:05
+淇敼鏃堕棿: 08/05/2026 22:32:00
 ============================================================
 
 """布局引擎：两遍走 AST——measure 算出 (宽, 升, 降)，draw 按基线矢量绘制。
-全部 QPainter 输出，任意缩放锐利；上下标缩小 0.7 倍、分式 0.8 倍并堆叠。"""
+
+新增：
+- 支持 Paren 节点
+- 支持 x^(2*a)
+"""
+
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QPainterPath, QPen
 
 from . import font as mfont
-from .parser import (Ord, Bin, Sup, Sub, SubSup, Frac, Sqrt, Over, Row, is_cjk)
+from .parser import (
+    Ord, Bin, Sup, Sub, SubSup, Frac, Sqrt, Over, Paren, Row, is_cjk
+)
 
 
 class MathLayout:
@@ -12531,226 +15528,413 @@ class MathLayout:
         self._mcache = {}
 
     # ── 字体与度量 ──
+
     def _metrics(self, size, italic, cjk):
         key = (round(size), italic, cjk)
+
         if key not in self._mcache:
             from PySide6.QtGui import QFontMetricsF
             self._mcache[key] = QFontMetricsF(mfont.math_font(size, italic, cjk))
+
         return self._mcache[key]
 
     def _text_dim(self, text, size, italic):
         cjk = any(is_cjk(c) for c in text)
         m = self._metrics(size, italic and not cjk, cjk)
-        return m.horizontalAdvance(text), m.ascent(), m.descent(), cjk
+
+        return (
+            m.horizontalAdvance(text),
+            m.ascent(),
+            m.descent(),
+            cjk
+        )
 
     # ── 度量：返回 (宽, 升, 降) ──
+
     def measure(self, n):
         S = self.size
+
         if isinstance(n, Ord):
             w, a, d, _ = self._text_dim(n.text, S, n.kind == "var")
             return w, a, d
+
         if isinstance(n, Bin):
             w, a, d, _ = self._text_dim(n.op, S, False)
             return w + 2 * n.space * S, a, d
+
         if isinstance(n, Row):
             W = A = D = 0.0
+
             for c in n.children:
                 w, a, d = self.measure(c)
-                W += w; A = max(A, a); D = max(D, d)
+                W += w
+                A = max(A, a)
+                D = max(D, d)
+
             return W, A, D
+
+        if isinstance(n, Paren):
+            lw, la, ld, _ = self._text_dim("(", S, False)
+            rw, ra, rd, _ = self._text_dim(")", S, False)
+
+            cw, ca, cd = self.measure(n.content)
+
+            return (
+                lw + cw + rw,
+                max(la, ca, ra),
+                max(ld, cd, rd)
+            )
+
         if isinstance(n, Sup):
             bw, ba, bd = self.measure(n.base)
             sw, sa, sd = self._sub_measure(n.script)
+
             raise_h = max(0.5 * S, ba * 0.6)
-            return bw + sw, max(ba, raise_h + sa), bd
+
+            return (
+                bw + sw,
+                max(ba, raise_h + sa),
+                bd
+            )
+
         if isinstance(n, Sub):
             bw, ba, bd = self.measure(n.base)
             sw, sa, sd = self._sub_measure(n.script)
+
             drop = max(0.15 * S, bd * 0.3)
-            return bw + sw, ba, max(bd, drop + sd)
+
+            return (
+                bw + sw,
+                ba,
+                max(bd, drop + sd)
+            )
+
         if isinstance(n, SubSup):
             bw, ba, bd = self.measure(n.base)
+
             ubw, uba, ubd = self._sub_measure(n.sub)
             upw, upa, upd = self._sub_measure(n.sup)
-            return (bw + max(ubw, upw),
-                    max(ba, max(0.5*S, ba*0.6) + upa),
-                    max(bd, max(0.15*S, bd*0.3) + ubd))
+
+            return (
+                bw + max(ubw, upw),
+                max(ba, max(0.5 * S, ba * 0.6) + upa),
+                max(bd, max(0.15 * S, bd * 0.3) + ubd)
+            )
+
         if isinstance(n, Frac):
-            axis, bar, gap, fs = 0.26*S, max(1.0, 0.05*S), 0.12*S, 0.8*S
+            axis = 0.26 * S
+            bar = max(1.0, 0.05 * S)
+            gap = 0.12 * S
+            fs = 0.8 * S
+
+            old = self.size
             self.size = fs
+
             nw, na, nd = self.measure(n.num)
             dw, da, dd = self.measure(n.den)
-            self.size = S
-            num_base = axis + bar/2 + gap + nd
-            den_base = axis - bar/2 - gap - da
-            return (max(nw, dw) + 0.24*S, num_base + na, -den_base + dd)
+
+            self.size = old
+
+            num_base = axis + bar / 2 + gap + nd
+            den_base = axis - bar / 2 - gap - da
+
+            return (
+                max(nw, dw) + 0.24 * S,
+                num_base + na,
+                -den_base + dd
+            )
+
         if isinstance(n, Sqrt):
             w, a, d = self.measure(n.content)
-            over = 0.12*S + max(1.0, 0.05*S)
+            over = 0.12 * S + max(1.0, 0.05 * S)
             rw = 0.6 * (a + d + over)
-            return rw + w + 0.1*S, a + over, d
+
+            return (
+                rw + w + 0.1 * S,
+                a + over,
+                d
+            )
+
         if isinstance(n, Over):
             w, a, d = self.measure(n.content)
-            return w, a + 0.22*S, d
+            return w, a + 0.22 * S, d
+
         return 0.0, 0.0, 0.0
 
     def _sub_measure(self, n):
         old = self.size
         self.size = old * 0.7
+
         r = self.measure(n)
+
         self.size = old
         return r
 
     # ── 绘制：从 (x, 基线y) 开始，返回消耗宽度 ──
+
     def draw(self, n, x, y):
         S = self.size
         p = self.p
+
         if isinstance(n, Ord):
             w, a, d, cjk = self._text_dim(n.text, S, n.kind == "var")
+
             p.setFont(mfont.math_font(S, n.kind == "var" and not cjk, cjk))
             p.setPen(QPen(self.color, 1.0))
             p.drawText(QPointF(x, y), n.text)
+
             return w
+
         if isinstance(n, Bin):
             sp = n.space * S
             w, a, d, _ = self._text_dim(n.op, S, False)
+
             p.setFont(mfont.math_font(S, False, False))
             p.setPen(QPen(self.color, 1.0))
             p.drawText(QPointF(x + sp, y), n.op)
+
             return w + 2 * sp
+
         if isinstance(n, Row):
             cx = x
+
             for c in n.children:
                 cx += self.draw(c, cx, y)
+
             return cx - x
+
+        if isinstance(n, Paren):
+            lw, _, _, _ = self._text_dim("(", S, False)
+
+            p.setFont(mfont.math_font(S, False, False))
+            p.setPen(QPen(self.color, 1.0))
+            p.drawText(QPointF(x, y), "(")
+
+            cw = self.draw(n.content, x + lw, y)
+
+            rw, _, _, _ = self._text_dim(")", S, False)
+
+            p.setFont(mfont.math_font(S, False, False))
+            p.setPen(QPen(self.color, 1.0))
+            p.drawText(QPointF(x + lw + cw, y), ")")
+
+            return lw + cw + rw
+
         if isinstance(n, Sup):
             bw, ba, bd = self.measure(n.base)
             bw = self.draw(n.base, x, y)
+
             sw, sa, sd = self._sub_measure(n.script)
-            raise_h = max(0.5*S, ba*0.6)
+
+            raise_h = max(0.5 * S, ba * 0.6)
             sw = self._sub_draw(n.script, x + bw, y - raise_h)
+
             return bw + sw
+
         if isinstance(n, Sub):
             bw, ba, bd = self.measure(n.base)
             bw = self.draw(n.base, x, y)
+
             sw, sa, sd = self._sub_measure(n.script)
-            drop = max(0.15*S, bd*0.3)
+
+            drop = max(0.15 * S, bd * 0.3)
             sw = self._sub_draw(n.script, x + bw, y + drop)
+
             return bw + sw
+
         if isinstance(n, SubSup):
             bw, ba, bd = self.measure(n.base)
             bw = self.draw(n.base, x, y)
+
             ubw, uba, ubd = self._sub_measure(n.sub)
             upw, upa, upd = self._sub_measure(n.sup)
-            self._sub_draw(n.sup, x + bw, y - max(0.5*S, ba*0.6))
-            self._sub_draw(n.sub, x + bw, y + max(0.15*S, bd*0.3))
+
+            self._sub_draw(n.sup, x + bw, y - max(0.5 * S, ba * 0.6))
+            self._sub_draw(n.sub, x + bw, y + max(0.15 * S, bd * 0.3))
+
             return bw + max(ubw, upw)
+
         if isinstance(n, Frac):
             return self._draw_frac(n, x, y)
+
         if isinstance(n, Sqrt):
             return self._draw_sqrt(n, x, y)
+
         if isinstance(n, Over):
             w, a, d = self.measure(n.content)
+
             self.draw(n.content, x, y)
-            p.setPen(QPen(self.color, max(1.0, 0.05*S)))
-            p.drawLine(QPointF(x, y - a - 0.1*S), QPointF(x + w, y - a - 0.1*S))
+
+            p.setPen(QPen(self.color, max(1.0, 0.05 * S)))
+            p.drawLine(
+                QPointF(x, y - a - 0.1 * S),
+                QPointF(x + w, y - a - 0.1 * S)
+            )
+
             return w
+
         return 0.0
 
     def _sub_draw(self, n, x, y):
         old = self.size
         self.size = old * 0.7
+
         w = self.draw(n, x, y)
+
         self.size = old
         return w
 
     def _draw_frac(self, n, x, y):
         S = self.size
-        axis, bar, gap, fs = 0.26*S, max(1.0, 0.05*S), 0.12*S, 0.8*S
+
+        axis = 0.26 * S
+        bar = max(1.0, 0.05 * S)
+        gap = 0.12 * S
+        fs = 0.8 * S
+
+        old = self.size
         self.size = fs
+
         nw, na, nd = self.measure(n.num)
         dw, da, dd = self.measure(n.den)
+
         inner = max(nw, dw)
         pad = 0.12 * S
-        num_base = axis + bar/2 + gap + nd
-        den_base = axis - bar/2 - gap - da
-        self.draw(n.num, x + pad + (inner - nw)/2, y - num_base)
-        self.draw(n.den, x + pad + (inner - dw)/2, y - den_base)
-        self.size = S
+
+        num_base = axis + bar / 2 + gap + nd
+        den_base = axis - bar / 2 - gap - da
+
+        self.draw(n.num, x + pad + (inner - nw) / 2, y - num_base)
+        self.draw(n.den, x + pad + (inner - dw) / 2, y - den_base)
+
+        self.size = old
+
         self.p.setPen(QPen(self.color, bar))
-        self.p.drawLine(QPointF(x, y - axis), QPointF(x + inner + 2*pad, y - axis))
+        self.p.drawLine(
+            QPointF(x, y - axis),
+            QPointF(x + inner + 2 * pad, y - axis)
+        )
+
         return inner + 2 * pad
 
     def _draw_sqrt(self, n, x, y):
         S = self.size
+
         cw, ca, cd = self.measure(n.content)
-        over = 0.12*S + max(1.0, 0.05*S)
+
+        over = 0.12 * S + max(1.0, 0.05 * S)
         H = ca + cd + over
         rw = 0.6 * H
+
         top = y - (ca + over)
         bot = y + cd + over * 0.3
+
         path = QPainterPath()
-        path.moveTo(x + rw*0.05, top + (bot - top)*0.55)
-        path.lineTo(x + rw*0.40, bot)
-        path.lineTo(x + rw*0.95, top)
-        path.lineTo(x + rw + cw + 0.1*S, top)
-        self.p.setPen(QPen(self.color, max(1.0, 0.06*S)))
+
+        path.moveTo(x + rw * 0.05, top + (bot - top) * 0.55)
+        path.lineTo(x + rw * 0.40, bot)
+        path.lineTo(x + rw * 0.95, top)
+        path.lineTo(x + rw + cw + 0.1 * S, top)
+
+        self.p.setPen(QPen(self.color, max(1.0, 0.06 * S)))
         self.p.setBrush(Qt.BrushStyle.NoBrush)
         self.p.drawPath(path)
+
         w = self.draw(n.content, x + rw, y)
-        return rw + w + 0.1*S
+
+        return rw + w + 0.1 * S
 
 
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\parser.py
 鏂囦欢鍚?   parser.py
-淇敼鏃堕棿: 07/30/2026 21:16:33
+淇敼鏃堕棿: 08/05/2026 22:31:50
 ============================================================
 
 """迷你数学排版器：词法/语法分析，输出 AST。
-支持：斜体变量、数字、上下标(x^2 / a_1 / x²)、堆叠分式(\\frac{}{} 或 a/b)、
-根号(\\sqrt{})、上划线(\\overline{})、希腊字母、∠ ⊥ ∥ ° 等几何符号、中文变量名。"""
+
+新增：
+- 支持圆括号分组
+- 支持 x^(2*a) 这类上标
+- 支持 sin(x) 保留括号
+- 支持 (x+1)^2
+"""
 
 # ───────── AST 节点 ─────────
-class Ord:      # 普通符号
-    def __init__(self, text, kind):     # kind: var/num/func/text/sym
+
+class Ord:
+    def __init__(self, text, kind):
         self.text, self.kind = text, kind
 
-class Bin:      # 二元运算符（自带左右留白）
+
+class Bin:
     def __init__(self, op, space=0.18):
         self.op, self.space = op, space
 
+
 class Sup:
-    def __init__(self, base, script): self.base, self.script = base, script
+    def __init__(self, base, script):
+        self.base, self.script = base, script
+
+
 class Sub:
-    def __init__(self, base, script): self.base, self.script = base, script
+    def __init__(self, base, script):
+        self.base, self.script = base, script
+
+
 class SubSup:
-    def __init__(self, base, sub, sup): self.base, self.sub, self.sup = sub and sub, sup
+    def __init__(self, base, sub, sup):
+        self.base, self.sub, self.sup = base, sub, sup
+
+
 class Frac:
-    def __init__(self, num, den): self.num, self.den = num, den
+    def __init__(self, num, den):
+        self.num, self.den = num, den
+
+
 class Sqrt:
-    def __init__(self, content): self.content = content
+    def __init__(self, content):
+        self.content = content
+
+
 class Over:
-    def __init__(self, content): self.content = content
+    def __init__(self, content):
+        self.content = content
+
+
+class Paren:
+    def __init__(self, content):
+        self.content = content
+
+
 class Row:
-    def __init__(self, children): self.children = children
+    def __init__(self, children):
+        self.children = children
 
 
-FUNCS = {"sin", "cos", "tan", "cot", "sqrt", "log", "ln", "abs", "exp",
-         "lim", "max", "min", "arcsin", "arccos", "arctan"}
+FUNCS = {
+    "sin", "cos", "tan", "cot", "sqrt", "log", "ln", "abs", "exp",
+    "lim", "max", "min", "arcsin", "arccos", "arctan"
+}
 
-GREEK = {"alpha":"α","beta":"β","gamma":"γ","delta":"δ","epsilon":"ε","zeta":"ζ",
-         "eta":"η","theta":"θ","iota":"ι","kappa":"κ","lambda":"λ","mu":"μ",
-         "nu":"ν","xi":"ξ","pi":"π","rho":"ρ","sigma":"σ","tau":"τ",
-         "upsilon":"υ","phi":"φ","chi":"χ","psi":"ψ","omega":"ω",
-         "Gamma":"Γ","Delta":"Δ","Theta":"Θ","Lambda":"Λ","Xi":"Ξ","Pi":"Π",
-         "Sigma":"Σ","Phi":"Φ","Psi":"Ψ","Omega":"Ω"}
+GREEK = {
+    "alpha": "α", "beta": "β", "gamma": "γ", "delta": "δ", "epsilon": "ε",
+    "zeta": "ζ", "eta": "η", "theta": "θ", "iota": "ι", "kappa": "κ",
+    "lambda": "λ", "mu": "μ", "nu": "ν", "xi": "ξ", "pi": "π",
+    "rho": "ρ", "sigma": "σ", "tau": "τ", "upsilon": "υ", "phi": "φ",
+    "chi": "χ", "psi": "ψ", "omega": "ω",
+    "Gamma": "Γ", "Delta": "Δ", "Theta": "Θ", "Lambda": "Λ", "Xi": "Ξ",
+    "Pi": "Π", "Sigma": "Σ", "Phi": "Φ", "Psi": "Ψ", "Omega": "Ω"
+}
 
-SYMBOLS = {"angle":"∠","perp":"⊥","parallel":"∥","degree":"°","circ":"°",
-           "cdot":"·","times":"×","div":"÷","pm":"±","infty":"∞","partial":"∂",
-           "le":"≤","ge":"≥","ne":"≠","approx":"≈","equiv":"≡","sim":"∼",
-           "rightarrow":"→","leftarrow":"←","in":"∈","subset":"⊂","cup":"∪",
-           "cap":"∩","forall":"∀","exists":"∃","therefore":"∴","because":"∵"}
+SYMBOLS = {
+    "angle": "∠", "perp": "⊥", "parallel": "∥", "degree": "°", "circ": "°",
+    "cdot": "·", "times": "×", "div": "÷", "pm": "±", "infty": "∞",
+    "partial": "∂", "le": "≤", "ge": "≥", "ne": "≠", "approx": "≈",
+    "equiv": "≡", "sim": "∼", "rightarrow": "→", "leftarrow": "←",
+    "in": "∈", "subset": "⊂", "cup": "∪", "cap": "∩",
+    "forall": "∀", "exists": "∃", "therefore": "∴", "because": "∵"
+}
 
 _SUP = str.maketrans("⁰¹²³⁴⁵⁶⁷⁸⁹", "0123456789")
 _SUB = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
@@ -12758,147 +15942,299 @@ _SUB = str.maketrans("₀₁₂₃₄₅₆₇₈₉", "0123456789")
 
 def is_cjk(ch):
     o = ord(ch)
-    return (0x4E00 <= o <= 0x9FFF or 0x3400 <= o <= 0x4DBF or
-            0xF900 <= o <= 0xFAFF or 0x3040 <= o <= 0x30FF)
+    return (
+        0x4E00 <= o <= 0x9FFF
+        or 0x3400 <= o <= 0x4DBF
+        or 0xF900 <= o <= 0xFAFF
+        or 0x3040 <= o <= 0x30FF
+    )
 
 
 # ───────── 词法 ─────────
+
 def tokenize(s):
     toks, i, n = [], 0, len(s)
+
     while i < n:
         c = s[i]
+
         if c.isspace():
             i += 1
+
         elif c == "\\":
             j, name = i + 1, ""
+
             while j < n and s[j].isalpha():
-                name += s[j]; j += 1
-            toks.append(("CMD", name)); i = j
-        elif c == "{": toks.append(("LB", c)); i += 1
-        elif c == "}": toks.append(("RB", c)); i += 1
-        elif c == "^": toks.append(("SUP", c)); i += 1
-        elif c == "_": toks.append(("SUB", c)); i += 1
-        elif c.isdigit() or (c == "." and i + 1 < n and s[i+1].isdigit()):
+                name += s[j]
+                j += 1
+
+            toks.append(("CMD", name))
+            i = j
+
+        elif c == "{":
+            toks.append(("LB", c))
+            i += 1
+
+        elif c == "}":
+            toks.append(("RB", c))
+            i += 1
+
+        elif c == "(":
+            toks.append(("LP", c))
+            i += 1
+
+        elif c == ")":
+            toks.append(("RP", c))
+            i += 1
+
+        elif c == "^":
+            toks.append(("SUP", c))
+            i += 1
+
+        elif c == "_":
+            toks.append(("SUB", c))
+            i += 1
+
+        elif c.isdigit() or (c == "." and i + 1 < n and s[i + 1].isdigit()):
             j, num = i, ""
+
             while j < n and (s[j].isdigit() or s[j] == "."):
-                num += s[j]; j += 1
-            toks.append(("NUM", num)); i = j
+                num += s[j]
+                j += 1
+
+            toks.append(("NUM", num))
+            i = j
+
         elif c in "⁰¹²³⁴⁵⁶⁷⁸⁹":
-            toks.append(("SUP", "^")); toks.append(("NUM", c.translate(_SUP))); i += 1
+            toks.append(("SUP", "^"))
+            toks.append(("NUM", c.translate(_SUP)))
+            i += 1
+
         elif c in "₀₁₂₃₄₅₆₇₈₉":
-            toks.append(("SUB", "_")); toks.append(("NUM", c.translate(_SUB))); i += 1
-        elif c in "+-*/=·×÷−()°,":
-            toks.append(("OP", c)); i += 1
+            toks.append(("SUB", "_"))
+            toks.append(("NUM", c.translate(_SUB)))
+            i += 1
+
+        elif c in "+-*/=·×÷−°,":
+            toks.append(("OP", c))
+            i += 1
+
         elif is_cjk(c):
             j, name = i, ""
+
             while j < n and is_cjk(s[j]):
-                name += s[j]; j += 1
-            toks.append(("ID", name)); i = j
+                name += s[j]
+                j += 1
+
+            toks.append(("ID", name))
+            i = j
+
         elif c.isalpha():
             j, name = i, ""
+
             while j < n and s[j].isalpha():
-                name += s[j]; j += 1
-            toks.append(("ID", name)); i = j
+                name += s[j]
+                j += 1
+
+            toks.append(("ID", name))
+            i = j
+
         else:
-            toks.append(("ID", c)); i += 1
+            toks.append(("ID", c))
+            i += 1
+
     toks.append(("EOF", ""))
     return toks
 
 
 # ───────── 语法 ─────────
+
 class _Parser:
     def __init__(self, toks):
         self.toks, self.i = toks, 0
 
-    def peek(self): return self.toks[self.i]
+    def peek(self):
+        return self.toks[self.i]
+
     def take(self):
-        t = self.toks[self.i]; self.i += 1
+        t = self.toks[self.i]
+        self.i += 1
         return t
 
     def parse(self):
-        return self.row(False)
+        return self.row(False, False)
 
-    def row(self, in_group):
+    def row(self, in_group, paren=False):
         nodes = []
+        stop = "RP" if paren else "RB"
+
         while True:
             ty, v = self.peek()
-            if ty == "EOF" or (in_group and ty == "RB"):
+
+            if ty == "EOF" or (in_group and ty == stop):
                 break
+
             node = self.atom()
+
             if node is None:
-                self.take()
                 continue
+
             node = self.scripts(node)
+
             while self.peek() == ("OP", "/"):
                 self.take()
+
                 right = self.atom()
                 if right is None:
                     break
+
                 node = Frac(node, self.scripts(right))
+
             nodes.append(node)
-        if in_group and self.peek()[0] == "RB":
+
+        if in_group and self.peek()[0] == stop:
             self.take()
+
         if not nodes:
             return Row([])
+
         return nodes[0] if len(nodes) == 1 else Row(nodes)
+
     def scripts(self, base):
         sub = sup = None
+
         while self.peek()[0] in ("SUP", "SUB"):
             ty = self.take()[0]
-            arg = self.group() if self.peek()[0] == "LB" else self.atom()
-            if ty == "SUP": sup = arg
-            else: sub = arg
-        if sub and sup: return SubSup(base, sub, sup)
-        if sup: return Sup(base, sup)
-        if sub: return Sub(base, sub)
+
+            if self.peek()[0] == "LB":
+                arg = self.group()
+            elif self.peek()[0] == "LP":
+                arg = self.paren()
+            else:
+                arg = self.atom()
+
+            if arg is None:
+                arg = Row([])
+
+            if ty == "SUP":
+                sup = arg
+            else:
+                sub = arg
+
+        if sub and sup:
+            return SubSup(base, sub, sup)
+
+        if sup:
+            return Sup(base, sup)
+
+        if sub:
+            return Sub(base, sub)
+
         return base
 
     def group(self):
-        self.take()                     # 吃掉 {
-        return self.row(True)
+        self.take()  # {
+        return self.row(True, False)
+
+    def paren(self):
+        self.take()  # (
+        inner = self.row(True, True)
+        return Paren(inner)
 
     def atom(self):
         ty, v = self.peek()
+
         if ty == "NUM":
-            self.take(); return Ord(v, "num")
+            self.take()
+            return Ord(v, "num")
+
         if ty == "ID":
-            self.take(); return self._classify(v)
+            self.take()
+            return self._classify(v)
+
         if ty == "CMD":
-            self.take(); return self._cmd(v)
+            self.take()
+            return self._cmd(v)
+
         if ty == "LB":
             return self.group()
+
+        if ty == "LP":
+            return self.paren()
+
+        if ty == "RP":
+            self.take()
+            return None
+
+        if ty == "RB":
+            self.take()
+            return None
+
         if ty == "OP":
-            self.take(); return self._op(v)
+            self.take()
+            return self._op(v)
+
         return None
 
     def _classify(self, v):
-        if v in FUNCS:  return Ord(v, "func")
-        if v in GREEK:  return Ord(GREEK[v], "var")
-        if is_cjk(v[0]): return Ord(v, "text")
-        if len(v) == 1: return Ord(v, "var")     # 单字母 → 斜体
-        return Ord(v, "text")                     # 多字母 → 正体
+        if v in FUNCS:
+            return Ord(v, "func")
+
+        if v in GREEK:
+            return Ord(GREEK[v], "var")
+
+        if is_cjk(v[0]):
+            return Ord(v, "text")
+
+        if len(v) == 1:
+            return Ord(v, "var")
+
+        return Ord(v, "text")
 
     def _cmd(self, name):
         if name == "frac":
             return Frac(self._arg(), self._arg())
+
         if name == "sqrt":
             return Sqrt(self._arg())
+
         if name == "overline":
             return Over(self._arg())
-        if name in GREEK:   return Ord(GREEK[name], "var")
-        if name in SYMBOLS: return Ord(SYMBOLS[name], "sym")
+
+        if name in GREEK:
+            return Ord(GREEK[name], "var")
+
+        if name in SYMBOLS:
+            return Ord(SYMBOLS[name], "sym")
+
         return Ord(name, "text")
 
     def _arg(self):
-        return self.group() if self.peek()[0] == "LB" else self.atom()
+        if self.peek()[0] == "LB":
+            return self.group()
+
+        if self.peek()[0] == "LP":
+            return self.paren()
+
+        return self.atom()
 
     def _op(self, v):
-        if v == "*": return Bin("·")
-        if v == "-": return Bin("−")
-        if v == "+": return Bin("+")
-        if v in "·×÷": return Bin(v)
-        if v == "=": return Bin("=", space=0.26)
-        return Ord(v, "sym")              # ( ) , ° /
+        if v == "*":
+            return Bin("·")
+
+        if v == "-":
+            return Bin("−")
+
+        if v == "+":
+            return Bin("+")
+
+        if v in "·×÷":
+            return Bin(v)
+
+        if v == "=":
+            return Bin("=", space=0.26)
+
+        return Ord(v, "sym")
 
 
 def parse(text):

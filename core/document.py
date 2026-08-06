@@ -97,6 +97,14 @@ class Document(QObject):
         if not hasattr(obj, "name"):
             obj.name = ""
 
+        # ★ 点对象默认不固定名字，交回 geo/points.py 的动态点名：
+        # 普通点 A/B/C/D...
+        # 圆心 O₁/O₂/O₃...
+        #
+        # 只有用户/脚本显式给了名字，才注册进 self.names。
+        if isinstance(obj, AbstractPoint) and not getattr(obj, "name", ""):
+            return
+
         obj.name = self._unique_name(getattr(obj, "name", ""), obj)
         self.names[obj.name] = obj
 

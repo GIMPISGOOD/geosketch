@@ -87,11 +87,9 @@ class ScriptHighlighter(QSyntaxHighlighter):
 
     def highlightBlock(self, text):
         for pattern, fmt in self.rules:
-            it = pattern.globalMatch(text)
-
-            while it.hasNext():
-                m = it.next()
-                self.setFormat(m.capturedStart(), m.capturedLength(), fmt)
+            # ★ 修复：使用 Python re 模块的 finditer，而不是 Qt 的 globalMatch
+            for match in pattern.finditer(text):
+                self.setFormat(match.start(), match.end() - match.start(), fmt)
 
 
 class ScriptEditorDialog(QDialog):
