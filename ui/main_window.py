@@ -31,7 +31,12 @@ class MainWindow(QMainWindow):
         self.doc = Document()
         self.canvas = Canvas(self.doc)
         self.setCentralWidget(self.canvas)        # ← 关键：把画布设为中央部件（之前丢了）
+        # ★ 宏系统
+        from core.macro import MacroManager, set_macro_manager
 
+        self.macro_manager = MacroManager(self.doc)
+        set_macro_manager(self.macro_manager)
+        
         self.function_dock = FunctionEditorDock(self.canvas, self)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.function_dock)
         self.doc.changed.connect(self.function_dock.refresh)
@@ -42,6 +47,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
         self._build_var_menu()
+        self._build_macro_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
@@ -300,9 +306,18 @@ class MainWindow(QMainWindow):
         self._coord_label = QLabel("(    0.00 ,    0.00 )")
         self._coord_label.setFont(theme.LABEL_FONT)
         self._count_label = QLabel("0 个对象")
+        self._rec_label = QLabel("")
+        self._rec_label.setStyleSheet("")
+
         sb.addWidget(self._hint_label, 1)
         sb.addPermanentWidget(self._count_label)
         sb.addPermanentWidget(self._coord_label)
+        sb.addPermanentWidget(self._rec_label)
+
+        # ★ 宏状态刷新
+        if hasattr(self, "macro_manager"):
+            self.macro_manager.changed.connect(self._update_macro_actions)
+            self._update_macro_actions()
         self.canvas.cursor_info.connect(self._coord_label.setText)
         self.canvas.tool_changed.connect(self._hint_label.setText)
         self.doc.changed.connect(
@@ -324,7 +339,83 @@ class MainWindow(QMainWindow):
         if path:
             self.doc.load(path)
             self.canvas.update_snow_state()
-            
+
+            # ★ 刷新宏菜单
+            if hasattr(self, "macro_manager"):
+                self.macro_manager.changed.emit()
+                
+    # ================= 宏系统 =================
+
+    def _build_macro_menu(self) -> None:
+        mb = self.menuBar()
+        mm = mb.addMenu("宏(&M)")
+
+        self._record_act = QAction("● 开始录制", self, checkable=True)
+        self._record_act.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self._record_act.triggered.connect(self._toggle_macro_recording)
+        mm.addAction(self._record_act)
+
+        self._play_last_act = QAction("回放最新宏", self)
+        self._play_last_act.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self._play_last_act.triggered.connect(self._play_last_macro)
+        mm.addAction(self._play_last_act)
+
+        mm.addSeparator()
+
+        mgr_act = QAction("宏管理器…", self)
+        mgr_act.triggered.connect(self._open_macro_dialog)
+        mm.addAction(mgr_act)
+
+        self._update_macro_actions()
+
+    def _toggle_macro_recording(self):
+        self.macro_manager.toggle_recording()
+        self._update_macro_actions()
+
+    def _play_last_macro(self):
+        if self.macro_manager.is_recording():
+            QMessageBox.information(
+                self,
+                "宏",
+                "正在录制宏，请先停止录制再回放。"
+            )
+            return
+
+        if not getattr(self.doc, "macros", []):
+            QMessageBox.information(
+                self,
+                "宏",
+                "还没有录制任何宏。"
+            )
+            return
+
+        self.macro_manager.play_last()
+
+    def _open_macro_dialog(self):
+        from ui.macro_dialog import MacroDialog
+
+        MacroDialog(self.macro_manager, self).exec()
+
+    def _update_macro_actions(self):
+        rec = self.macro_manager.is_recording()
+
+        if hasattr(self, "_record_act"):
+            self._record_act.setChecked(rec)
+            self._record_act.setText("■ 停止录制" if rec else "● 开始录制")
+
+        if hasattr(self, "_play_last_act"):
+            self._play_last_act.setEnabled(bool(getattr(self.doc, "macros", [])))
+
+        if hasattr(self, "_rec_label"):
+            if rec:
+                self._rec_label.setText("● 宏录制中")
+                self._rec_label.setStyleSheet(
+                    "color:#e03131;font-weight:700;"
+                )
+            else:
+                self._rec_label.setText("")
+                self._rec_label.setStyleSheet("")
+                           
     def _doc_info(self) -> None:
         title, ok = QInputDialog.getText(
             self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))

@@ -16,7 +16,10 @@ UNDO_LIMIT = 100
 class Document(QObject):
     """持有全部几何对象：增删、增量重算、级联删除、序列化、撤销/重做。"""
     changed = Signal()
-    history_changed = Signal()          # 撤销栈变化 → 更新菜单项可用状态
+    history_changed = Signal()
+    object_added = Signal(object)
+    object_removed = Signal(object)
+    cleared = Signal()    # 撤销栈变化 → 更新菜单项可用状态
 
     def __init__(self):
         super().__init__()
@@ -31,6 +34,8 @@ class Document(QObject):
         self.expr_objects = []
         self._clipboard = None
         self.meta = {"title": "", "author": "", "theme": "纸白", "created": "", "modified": ""}
+        self.macros = []
+        self._macro_suppress = False
         self.names = {}
         
     # ================= 对象命名 =================
@@ -124,14 +129,13 @@ class Document(QObject):
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-        self._register_name(obj)
-        # ★ 修复：表达式约束对象 + 所有 expr_driver 对象都纳入变量刷新系统
-        if (
-            isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint))
-            or getattr(obj, "expr_driver", False)
-        ):
-            if obj not in self.expr_objects:
-                self.expr_objects.append(obj)
+
+        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
+            self.expr_objects.append(obj)
+
+        # ★ 宏录制：通知对象新增
+        if not getattr(self, "_macro_suppress", False):
+            self.object_added.emit(obj)
 
         return obj
 
@@ -214,6 +218,8 @@ class Document(QObject):
             if o in self.expr_objects:
                 self.expr_objects.remove(o)
             self._unregister_name(o)
+        if not getattr(self, "_macro_suppress", False):
+            self.object_removed.emit(obj)
         return doomed
 
     def remove(self, obj):
@@ -240,7 +246,11 @@ class Document(QObject):
 
         self.objects.clear()
         self.expr_objects.clear()
-        self.names.clear()          # ★
+
+        # ★ 宏录制：通知清空
+        if not getattr(self, "_macro_suppress", False):
+            self.cleared.emit()
+
         self.changed.emit()
         
     # ================= 选择 =================
@@ -360,20 +370,26 @@ class Document(QObject):
     # ================= 序列化 =================
     def _load_state(self, data):
         self.objects.clear()
-        self.expr_objects.clear()   # ★ 修复：防止 undo/load 后残留旧表达式对象
-        self.names.clear()          
+        self.expr_objects.clear()
+
         pool = {}
 
-        for item in data:
-            cls = GEO_REGISTRY[item["type"]]
-            parents = [pool[pid] for pid in item["parents"]]
-            obj = cls.build(parents, item["params"])
-            obj.id = item["id"]
-            obj.name = item.get("name", "") 
-            pool[item["id"]] = self._add(obj)
+        # ★ 加载 / 撤销 / 重做期间不录制宏
+        self._macro_suppress = True
 
-        if data:
-            GeoObject.bump_ids(max(item["id"] for item in data))
+        try:
+            for item in data:
+                cls = GEO_REGISTRY[item["type"]]
+                parents = [pool[pid] for pid in item["parents"]]
+                obj = cls.build(parents, item["params"])
+                obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+                pool[item["id"]] = self._add(obj)
+
+            if data:
+                GeoObject.bump_ids(max(item["id"] for item in data))
+
+        finally:
+            self._macro_suppress = False
 
         self.changed.emit()
 
@@ -401,6 +417,11 @@ class Document(QObject):
                 "variables.json",
                 json.dumps(self.vars.to_dict(), ensure_ascii=False, indent=1)
             )
+            # ★ 保存宏
+            zf.writestr(
+                "macros.json",
+                json.dumps(getattr(self, "macros", []), ensure_ascii=False, indent=1)
+            )
 
     def load(self, path):
         import zipfile
@@ -415,7 +436,7 @@ class Document(QObject):
             else:
                 # 旧文件没有变量时，清空当前变量，避免文档间污染
                 self.vars.load_dict({})
-
+                
             self._load_state(json.loads(zf.read("sketch.json")))
 
             if "meta.data" in names:
@@ -423,6 +444,13 @@ class Document(QObject):
 
             if self.meta.get("theme") in _theme.theme_names():
                 _theme.set_theme(self.meta["theme"])
-
+                
+            if "macros.json" in names:
+                try:
+                    self.macros = json.loads(zf.read("macros.json"))
+                except Exception:
+                    self.macros = []
+            else:
+                self.macros = []
         # 载入后统一刷新表达式约束与依赖对象
         self.refresh_variables()

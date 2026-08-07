@@ -256,14 +256,28 @@ class SelectTool(Tool):
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
-        # ★ 脚本按钮：没有明显移动则运行
-        if self._click_media is not None and not self._moved:
-            try:
-                self._click_media.run(canvas)
-            except Exception as e:
-                canvas.cursor_info.emit(f"脚本错误：{e}")
-
         if self._drag_undo_begun:
+            # ★ 宏录制：记录拖动结果
+            from core.macro import get_macro_manager
+
+            mm = get_macro_manager()
+
+            if mm is not None and mm.is_recording():
+                if self.drag_poo is not None:
+                    mm.recorder.record_move(self.drag_poo)
+
+                for p in self.drag_pts:
+                    mm.recorder.record_move(p)
+
+                if self.drag_media is not None:
+                    mm.recorder.record_move(self.drag_media)
+
+                if self.resize_media is not None:
+                    mm.recorder.record_move(self.resize_media)
+
+                if self.rotate_media is not None:
+                    mm.recorder.record_move(self.rotate_media)
+
             canvas.doc.end_action()
 
         self._reset()

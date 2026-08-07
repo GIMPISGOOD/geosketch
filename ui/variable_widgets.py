@@ -139,7 +139,21 @@ class VariableSliderPanel(QWidget):
         self._rows.setSpacing(4)
         layout.addLayout(self._rows)
         self._dragging = False 
+        
+    def _macro_record_var(self, name):
+        """滑杆释放时调用，把变量值录入宏。"""
+        from core.macro import get_macro_manager
 
+        mm = get_macro_manager()
+
+        if mm is None:
+            return
+
+        var = self.canvas.doc.vars.get_var(name)
+
+        if var is not None:
+            mm.recorder.record_set_var(name, var.value)
+            
     def refresh(self):
         if self._dragging:              # ★ 新增：拖动时不重建滑杆
             return
@@ -189,7 +203,11 @@ class VariableSliderPanel(QWidget):
                 lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax:
                     self._on_slide(n, v, l, a, b)
             )
-
+            # ★ 宏录制：滑杆释放时记录变量值
+            slider.sliderReleased.connect(
+                lambda n=name: self._macro_record_var(n)
+            )
+            
             # ★ 拖动结束后刷新一次，从动变量的值会跟着更新
             slider.sliderReleased.connect(self.refresh)
 

@@ -1,7 +1,7 @@
 ﻿============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\main.py
 鏂囦欢鍚?   main.py
-淇敼鏃堕棿: 08/04/2026 20:29:10
+淇敼鏃堕棿: 08/06/2026 23:14:17
 ============================================================
 
 import sys
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import QApplication
 
 from ui.main_window import MainWindow
 from ui import theme
+
+from geo.function_sampler import shutdown_sampler
 
 
 def main() -> None:
@@ -25,13 +27,16 @@ def main() -> None:
 
     app.setStyleSheet(theme.app_stylesheet())
 
+    # ★ 应用退出前安全终止后台采样线程
+    app.aboutToQuit.connect(shutdown_sampler)
+
     win = MainWindow()
 
-    # ★ 命令行第一个参数若为 .wgeo，直接载入（启动器靠这个打开课件草图）
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo") and os.path.exists(sys.argv[1]):
         win.doc.load(sys.argv[1])
 
     win.show()
+
     sys.exit(app.exec())
 
 
@@ -42,7 +47,7 @@ if __name__ == "__main__":
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\document.py
 鏂囦欢鍚?   document.py
-淇敼鏃堕棿: 08/06/2026 15:55:13
+淇敼鏃堕棿: 08/07/2026 12:24:26
 ============================================================
 
 import json
@@ -63,7 +68,10 @@ UNDO_LIMIT = 100
 class Document(QObject):
     """持有全部几何对象：增删、增量重算、级联删除、序列化、撤销/重做。"""
     changed = Signal()
-    history_changed = Signal()          # 撤销栈变化 → 更新菜单项可用状态
+    history_changed = Signal()
+    object_added = Signal(object)
+    object_removed = Signal(object)
+    cleared = Signal()    # 撤销栈变化 → 更新菜单项可用状态
 
     def __init__(self):
         super().__init__()
@@ -78,6 +86,8 @@ class Document(QObject):
         self.expr_objects = []
         self._clipboard = None
         self.meta = {"title": "", "author": "", "theme": "纸白", "created": "", "modified": ""}
+        self.macros = []
+        self._macro_suppress = False
         self.names = {}
         
     # ================= 对象命名 =================
@@ -144,6 +154,14 @@ class Document(QObject):
         if not hasattr(obj, "name"):
             obj.name = ""
 
+        # ★ 点对象默认不固定名字，交回 geo/points.py 的动态点名：
+        # 普通点 A/B/C/D...
+        # 圆心 O₁/O₂/O₃...
+        #
+        # 只有用户/脚本显式给了名字，才注册进 self.names。
+        if isinstance(obj, AbstractPoint) and not getattr(obj, "name", ""):
+            return
+
         obj.name = self._unique_name(getattr(obj, "name", ""), obj)
         self.names[obj.name] = obj
 
@@ -163,14 +181,13 @@ class Document(QObject):
     def _add(self, obj):
         self._mutation_count += 1
         self.objects.append(obj)
-        self._register_name(obj)
-        # ★ 修复：表达式约束对象 + 所有 expr_driver 对象都纳入变量刷新系统
-        if (
-            isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint))
-            or getattr(obj, "expr_driver", False)
-        ):
-            if obj not in self.expr_objects:
-                self.expr_objects.append(obj)
+
+        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
+            self.expr_objects.append(obj)
+
+        # ★ 宏录制：通知对象新增
+        if not getattr(self, "_macro_suppress", False):
+            self.object_added.emit(obj)
 
         return obj
 
@@ -253,6 +270,8 @@ class Document(QObject):
             if o in self.expr_objects:
                 self.expr_objects.remove(o)
             self._unregister_name(o)
+        if not getattr(self, "_macro_suppress", False):
+            self.object_removed.emit(obj)
         return doomed
 
     def remove(self, obj):
@@ -279,7 +298,11 @@ class Document(QObject):
 
         self.objects.clear()
         self.expr_objects.clear()
-        self.names.clear()          # ★
+
+        # ★ 宏录制：通知清空
+        if not getattr(self, "_macro_suppress", False):
+            self.cleared.emit()
+
         self.changed.emit()
         
     # ================= 选择 =================
@@ -399,20 +422,26 @@ class Document(QObject):
     # ================= 序列化 =================
     def _load_state(self, data):
         self.objects.clear()
-        self.expr_objects.clear()   # ★ 修复：防止 undo/load 后残留旧表达式对象
-        self.names.clear()          
+        self.expr_objects.clear()
+
         pool = {}
 
-        for item in data:
-            cls = GEO_REGISTRY[item["type"]]
-            parents = [pool[pid] for pid in item["parents"]]
-            obj = cls.build(parents, item["params"])
-            obj.id = item["id"]
-            obj.name = item.get("name", "") 
-            pool[item["id"]] = self._add(obj)
+        # ★ 加载 / 撤销 / 重做期间不录制宏
+        self._macro_suppress = True
 
-        if data:
-            GeoObject.bump_ids(max(item["id"] for item in data))
+        try:
+            for item in data:
+                cls = GEO_REGISTRY[item["type"]]
+                parents = [pool[pid] for pid in item["parents"]]
+                obj = cls.build(parents, item["params"])
+                obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+                pool[item["id"]] = self._add(obj)
+
+            if data:
+                GeoObject.bump_ids(max(item["id"] for item in data))
+
+        finally:
+            self._macro_suppress = False
 
         self.changed.emit()
 
@@ -440,6 +469,11 @@ class Document(QObject):
                 "variables.json",
                 json.dumps(self.vars.to_dict(), ensure_ascii=False, indent=1)
             )
+            # ★ 保存宏
+            zf.writestr(
+                "macros.json",
+                json.dumps(getattr(self, "macros", []), ensure_ascii=False, indent=1)
+            )
 
     def load(self, path):
         import zipfile
@@ -454,7 +488,7 @@ class Document(QObject):
             else:
                 # 旧文件没有变量时，清空当前变量，避免文档间污染
                 self.vars.load_dict({})
-
+                
             self._load_state(json.loads(zf.read("sketch.json")))
 
             if "meta.data" in names:
@@ -462,9 +496,564 @@ class Document(QObject):
 
             if self.meta.get("theme") in _theme.theme_names():
                 _theme.set_theme(self.meta["theme"])
-
+                
+            if "macros.json" in names:
+                try:
+                    self.macros = json.loads(zf.read("macros.json"))
+                except Exception:
+                    self.macros = []
+            else:
+                self.macros = []
         # 载入后统一刷新表达式约束与依赖对象
         self.refresh_variables()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\macro.py
+鏂囦欢鍚?   macro.py
+淇敼鏃堕棿: 08/07/2026 12:18:54
+============================================================
+
+"""宏录制与回放系统。
+
+宏命令类型：
+- add      创建对象
+- move     移动对象
+- delete   删除对象
+- set_var  设置变量
+- clear    清空文档
+"""
+
+from PySide6.QtCore import QObject, Signal
+
+from core.registry import GEO_REGISTRY
+
+
+# ------------------------------------------------------------
+# 全局宏管理器访问入口
+# ------------------------------------------------------------
+
+_macro_manager = None
+
+
+def set_macro_manager(manager):
+    global _macro_manager
+    _macro_manager = manager
+
+
+def get_macro_manager():
+    return _macro_manager
+
+
+# ------------------------------------------------------------
+# 宏数据结构
+# ------------------------------------------------------------
+
+class Macro:
+    def __init__(self, name, commands):
+        self.name = name
+        self.commands = list(commands)
+
+    def to_dict(self):
+        return {
+            "name": self.name,
+            "commands": self.commands,
+        }
+
+    @classmethod
+    def from_dict(cls, d):
+        return cls(
+            d.get("name", "宏"),
+            d.get("commands", []),
+        )
+
+
+# ------------------------------------------------------------
+# 宏录制器
+# ------------------------------------------------------------
+
+class MacroRecorder(QObject):
+    """监听 Document 的对象增删与外部调用，录制宏命令。"""
+
+    def __init__(self, doc, manager):
+        super().__init__(doc)
+
+        self.doc = doc
+        self.manager = manager
+
+        self.active = False
+        self.paused = False
+
+        self.commands = []
+        self.aliases = {}
+        self.counter = 0
+
+    # ================= 启停 =================
+
+    def start(self):
+        if self.active:
+            return
+
+        self.active = True
+        self.paused = False
+        self.commands = []
+        self.aliases = {}
+        self.counter = 0
+
+        self.doc.object_added.connect(self._on_object_added)
+        self.doc.object_removed.connect(self._on_object_removed)
+
+        if hasattr(self.doc, "cleared"):
+            self.doc.cleared.connect(self._on_cleared)
+
+    def stop(self):
+        if not self.active:
+            return None
+
+        self._disconnect_doc()
+
+        self.active = False
+        self.paused = False
+
+        if not self.commands:
+            return None
+
+        name = f"宏 {len(getattr(self.doc, 'macros', [])) + 1}"
+        return Macro(name, self.commands)
+
+    def pause(self):
+        self.paused = True
+
+    def resume(self):
+        self.paused = False
+
+    def _disconnect_doc(self):
+        try:
+            self.doc.object_added.disconnect(self._on_object_added)
+        except Exception:
+            pass
+
+        try:
+            self.doc.object_removed.disconnect(self._on_object_removed)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.doc, "cleared"):
+                self.doc.cleared.disconnect(self._on_cleared)
+        except Exception:
+            pass
+
+    # ================= 工具 =================
+
+    def _enabled(self):
+        return (
+            self.active
+            and not self.paused
+            and not getattr(self.doc, "_macro_suppress", False)
+        )
+
+    def _new_alias(self):
+        self.counter += 1
+        return f"o{self.counter}"
+
+    def _can_record(self, obj):
+        tn = getattr(obj, "type_name", None)
+        if not tn:
+            return False
+
+        if tn not in GEO_REGISTRY:
+            return False
+
+        cls = GEO_REGISTRY[tn]
+
+        return hasattr(cls, "build")
+
+    # ================= 对象录制 =================
+
+    def ensure_recorded(self, obj):
+        """确保对象已被录制，返回宏别名。"""
+
+        if obj is None:
+            return None
+
+        alias = self.aliases.get(obj)
+        if alias is not None:
+            return alias
+
+        if not self._can_record(obj):
+            return None
+
+        parent_aliases = []
+
+        for p in obj.parents:
+            pa = self.ensure_recorded(p)
+
+            if pa is None:
+                return None
+
+            parent_aliases.append(pa)
+
+        try:
+            params = obj.dump()
+        except Exception:
+            return None
+
+        alias = self._new_alias()
+        self.aliases[obj] = alias
+
+        self.commands.append({
+            "type": "add",
+            "class": obj.type_name,
+            "alias": alias,
+            "parents": parent_aliases,
+            "params": params,
+        })
+
+        return alias
+
+    # ================= Document 信号 =================
+
+    def _on_object_added(self, obj):
+        if not self._enabled():
+            return
+
+        self.ensure_recorded(obj)
+
+    def _on_object_removed(self, obj):
+        if not self._enabled():
+            return
+
+        alias = self.aliases.get(obj)
+
+        # 如果删除的是录制前已经存在的对象，
+        # 为保证宏自包含，先补录该对象，再录删除。
+        if alias is None:
+            alias = self.ensure_recorded(obj)
+
+        if alias is not None:
+            self.commands.append({
+                "type": "delete",
+                "alias": alias,
+            })
+
+    def _on_cleared(self):
+        if not self._enabled():
+            return
+
+        self.commands.append({
+            "type": "clear",
+        })
+
+        # 清空后旧对象别名全部失效
+        self.aliases.clear()
+
+    # ================= 外部调用录制 =================
+
+    def record_move(self, obj):
+        """由 SelectTool 拖动结束后调用。"""
+
+        if not self._enabled():
+            return
+
+        alias = self.aliases.get(obj)
+
+        if alias is None:
+            alias = self.ensure_recorded(obj)
+
+        if alias is None:
+            return
+
+        try:
+            params = obj.dump()
+        except Exception:
+            return
+
+        # 如果连续移动同一个对象，只保留最后一次状态
+        if (
+            self.commands
+            and self.commands[-1].get("type") == "move"
+            and self.commands[-1].get("alias") == alias
+        ):
+            self.commands[-1]["params"] = params
+        else:
+            self.commands.append({
+                "type": "move",
+                "alias": alias,
+                "params": params,
+            })
+
+    def record_set_var(self, name, value):
+        """变量滑杆 / 编辑变量后调用。"""
+
+        if not self._enabled():
+            return
+
+        var = self.doc.vars.get_var(name)
+
+        # 从动变量不能被手动设置
+        if var is not None and getattr(var, "expr", ""):
+            return
+
+        try:
+            value = float(value)
+        except Exception:
+            return
+
+        # 如果连续修改同一个变量，只保留最后一次值
+        if (
+            self.commands
+            and self.commands[-1].get("type") == "set_var"
+            and self.commands[-1].get("name") == name
+        ):
+            self.commands[-1]["value"] = value
+        else:
+            self.commands.append({
+                "type": "set_var",
+                "name": name,
+                "value": value,
+            })
+
+
+# ------------------------------------------------------------
+# 宏回放器
+# ------------------------------------------------------------
+
+class MacroPlayer(QObject):
+    def __init__(self, doc, manager):
+        super().__init__(doc)
+
+        self.doc = doc
+        self.manager = manager
+
+    def play(self, macro):
+        if self.manager.is_recording():
+            return False
+
+        if isinstance(macro, Macro):
+            macro = macro.to_dict()
+
+        commands = macro.get("commands", [])
+
+        if not commands:
+            return False
+
+        self.manager.recorder.pause()
+
+        old_suppress = getattr(self.doc, "_macro_suppress", False)
+        self.doc._macro_suppress = True
+
+        # 整个宏作为一个撤销动作
+        self.doc.begin_action()
+
+        aliases = {}
+        vars_changed = False
+
+        try:
+            for cmd in commands:
+                try:
+                    t = cmd.get("type")
+
+                    if t == "add":
+                        self._add(cmd, aliases)
+
+                    elif t == "move":
+                        self._move(cmd, aliases)
+
+                    elif t == "delete":
+                        self._delete(cmd, aliases)
+
+                    elif t == "set_var":
+                        self._set_var(cmd)
+                        vars_changed = True
+
+                    elif t == "clear":
+                        self._clear(aliases)
+
+                except Exception:
+                    import traceback
+                    traceback.print_exc()
+
+            if vars_changed:
+                self.doc.refresh_variables()
+
+            self.doc.changed.emit()
+
+        finally:
+            self.doc.end_action()
+            self.doc._macro_suppress = old_suppress
+            self.manager.recorder.resume()
+
+        return True
+
+    # ================= 命令执行 =================
+
+    def _add(self, cmd, aliases):
+        cls = GEO_REGISTRY.get(cmd.get("class"))
+
+        if cls is None:
+            return
+
+        parent_aliases = cmd.get("parents", [])
+        parents = []
+
+        for a in parent_aliases:
+            obj = aliases.get(a)
+
+            if obj is None:
+                return
+
+            parents.append(obj)
+
+        obj = cls.build(parents, cmd.get("params", {}))
+
+        alias = cmd.get("alias")
+
+        if alias:
+            aliases[alias] = obj
+
+        self.doc._add(obj)
+
+    def _move(self, cmd, aliases):
+        obj = aliases.get(cmd.get("alias"))
+
+        if obj is None:
+            return
+
+        params = cmd.get("params", {})
+
+        for k, v in params.items():
+            if hasattr(obj, k):
+                setattr(obj, k, v)
+
+        self.doc.recompute_from(obj)
+
+    def _delete(self, cmd, aliases):
+        obj = aliases.get(cmd.get("alias"))
+
+        if obj is None:
+            return
+
+        if obj in self.doc.objects:
+            self.doc._remove(obj)
+
+    def _set_var(self, cmd):
+        name = cmd.get("name")
+        value = float(cmd.get("value", 0.0))
+
+        store = self.doc.vars
+        var = store.get_var(name)
+
+        if var is not None and getattr(var, "expr", ""):
+            return
+
+        store.blockSignals(True)
+
+        try:
+            if var is not None:
+                store.set(name, value)
+            else:
+                store.define(
+                    name=name,
+                    value=value,
+                    vmin=value - 10.0,
+                    vmax=value + 10.0,
+                    expr="",
+                )
+        finally:
+            store.blockSignals(False)
+
+    def _clear(self, aliases):
+        self.doc.objects.clear()
+        self.doc.expr_objects.clear()
+
+        if hasattr(self.doc, "names"):
+            self.doc.names.clear()
+
+        aliases.clear()
+
+        self.doc._mutation_count += 1
+
+
+# ------------------------------------------------------------
+# 宏管理器
+# ------------------------------------------------------------
+
+class MacroManager(QObject):
+    changed = Signal()
+
+    def __init__(self, doc):
+        super().__init__(doc)
+
+        self.doc = doc
+
+        if not hasattr(self.doc, "macros"):
+            self.doc.macros = []
+
+        self.recorder = MacroRecorder(doc, self)
+        self.player = MacroPlayer(doc, self)
+
+    # ================= 录制 =================
+
+    def is_recording(self):
+        return self.recorder.active
+
+    def toggle_recording(self):
+        if self.is_recording():
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def start_recording(self):
+        if self.is_recording():
+            return
+
+        self.recorder.start()
+        self.changed.emit()
+
+    def stop_recording(self):
+        if not self.is_recording():
+            return None
+
+        macro = self.recorder.stop()
+
+        if macro is not None and macro.commands:
+            self.doc.macros.append(macro.to_dict())
+            self.changed.emit()
+
+        return macro
+
+    # ================= 回放 =================
+
+    def play_last(self):
+        macros = getattr(self.doc, "macros", [])
+
+        if not macros:
+            return False
+
+        return self.play(macros[-1])
+
+    def play(self, macro):
+        if self.is_recording():
+            return False
+
+        return self.player.play(macro)
+
+    # ================= 管理 =================
+
+    def delete_macro(self, index):
+        macros = getattr(self.doc, "macros", [])
+
+        if 0 <= index < len(macros):
+            macros.pop(index)
+            self.changed.emit()
+
+    def rename_macro(self, index, name):
+        macros = getattr(self.doc, "macros", [])
+
+        if 0 <= index < len(macros):
+            macros[index]["name"] = name
+            self.changed.emit()
 
 
 ============================================================
@@ -832,10 +1421,182 @@ def render_template(text: str) -> str:
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\ast_nodes.py
+鏂囦欢鍚?   ast_nodes.py
+淇敼鏃堕棿: 08/07/2026 13:23:18
+============================================================
+
+"""脚本 AST 节点。"""
+
+
+class Node:
+    line = 0
+
+
+# ------------------------------------------------------------
+# 程序结构
+# ------------------------------------------------------------
+
+class Program(Node):
+    def __init__(self, statements):
+        self.statements = statements
+
+
+class Import(Node):
+    def __init__(self, name, line=0):
+        self.name = name
+        self.line = line
+
+
+class GlobalAssign(Node):
+    def __init__(self, name, expr, line=0):
+        self.name = name
+        self.expr = expr
+        self.line = line
+
+
+class Assign(Node):
+    def __init__(self, name, expr, line=0):
+        self.name = name
+        self.expr = expr
+        self.line = line
+
+
+class FuncDef(Node):
+    def __init__(self, name, params, body, line=0):
+        self.name = name
+        self.params = params
+        self.body = body
+        self.line = line
+
+
+class Param(Node):
+    def __init__(self, name, default=None, line=0):
+        self.name = name
+        self.default = default
+        self.line = line
+
+
+class Return(Node):
+    def __init__(self, expr=None, line=0):
+        self.expr = expr
+        self.line = line
+
+
+class If(Node):
+    def __init__(self, branches, else_body=None, line=0):
+        self.branches = branches
+        self.else_body = else_body
+        self.line = line
+
+
+class Repeat(Node):
+    def __init__(self, count, body, line=0):
+        self.count = count
+        self.body = body
+        self.line = line
+
+
+class ForRange(Node):
+    def __init__(self, var, start, end, body, line=0):
+        self.var = var
+        self.start = start
+        self.end = end
+        self.body = body
+        self.line = line
+
+
+class Wait(Node):
+    def __init__(self, expr, line=0):
+        self.expr = expr
+        self.line = line
+
+
+class DeleteAll(Node):
+    """target: all / points / circles / created"""
+
+    def __init__(self, target, line=0):
+        self.target = target
+        self.line = line
+
+
+class DeleteExpr(Node):
+    def __init__(self, expr, line=0):
+        self.expr = expr
+        self.line = line
+
+
+class ExprStmt(Node):
+    def __init__(self, expr, line=0):
+        self.expr = expr
+        self.line = line
+
+
+# ------------------------------------------------------------
+# 表达式
+# ------------------------------------------------------------
+
+class Num(Node):
+    def __init__(self, value, line=0):
+        self.value = value
+        self.line = line
+
+
+class Str(Node):
+    def __init__(self, value, line=0):
+        self.value = value
+        self.line = line
+
+
+class Bool(Node):
+    def __init__(self, value, line=0):
+        self.value = value
+        self.line = line
+
+
+class Var(Node):
+    def __init__(self, name, line=0):
+        self.name = name
+        self.line = line
+
+
+class Member(Node):
+    def __init__(self, obj, name, line=0):
+        self.obj = obj
+        self.name = name
+        self.line = line
+
+
+class Call(Node):
+    def __init__(self, callee, args, line=0):
+        self.callee = callee
+        self.args = args
+        self.line = line
+
+
+class Bin(Node):
+    def __init__(self, op, left, right, line=0):
+        self.op = op
+        self.left = left
+        self.right = right
+        self.line = line
+
+
+class Unary(Node):
+    def __init__(self, op, operand, line=0):
+        self.op = op
+        self.operand = operand
+        self.line = line
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\errors.py
 鏂囦欢鍚?   errors.py
-淇敼鏃堕棿: 08/06/2026 15:57:24
+淇敼鏃堕棿: 08/07/2026 13:22:45
 ============================================================
+
+"""脚本错误类型。"""
+
 
 class ScriptError(Exception):
     """脚本错误：带行号。"""
@@ -843,50 +1604,1708 @@ class ScriptError(Exception):
     def __init__(self, message, line=None):
         if line is not None:
             message = f"第 {line} 行：{message}"
+
         super().__init__(message)
         self.line = line
+
+
+class ScriptReturn(Exception):
+    """函数 return 控制流。"""
+
+    def __init__(self, value=None):
+        super().__init__("script return")
+        self.value = value
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\functions.py
+鏂囦欢鍚?   functions.py
+淇敼鏃堕棿: 08/07/2026 13:24:39
+============================================================
+
+"""脚本全局内置函数。"""
+
+import math
+
+
+def build_global_env(interp):
+    factory = interp.factory
+
+    def _print(*args):
+        text = " ".join(interp._format_value(a) for a in args)
+        interp.logs.append(text)
+
+        if interp.canvas is not None and hasattr(interp.canvas, "cursor_info"):
+            interp.canvas.cursor_info.emit(text)
+
+        return None
+
+    env = {
+        # 常量
+        "pi": math.pi,
+        "π": math.pi,
+        "e": math.e,
+
+        # 输出 / 等待
+        "print": _print,
+        "打印": _print,
+
+        # 几何构造
+        "point": factory.point,
+        "点": factory.point,
+
+        "segment": factory.segment,
+        "线段": factory.segment,
+
+        "line": factory.line,
+        "直线": factory.line,
+
+        "ray": factory.ray,
+        "射线": factory.ray,
+
+        "circle": factory.circle,
+        "圆": factory.circle,
+
+        "ellipse": factory.ellipse,
+        "椭圆": factory.ellipse,
+
+        "regular_polygon": factory.regular_polygon,
+        "正多边形": factory.regular_polygon,
+
+        "polygon": factory.polygon,
+        "多边形": factory.polygon,
+
+        "midpoint": factory.midpoint,
+        "中点": factory.midpoint,
+
+        "division_point": factory.division_point,
+        "等分点": factory.division_point,
+
+        "intersect": factory.intersect,
+        "交点": factory.intersect,
+
+        "text": factory.text,
+        "文本": factory.text,
+
+        # 函数曲线
+        "function_curve": factory.function_curve,
+        "函数曲线": factory.function_curve,
+
+        "function": factory.function,
+        "parametric": factory.parametric,
+        "polar": factory.polar,
+    }
+
+    return env
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\interpreter.py
+鏂囦欢鍚?   interpreter.py
+淇敼鏃堕棿: 08/07/2026 13:25:54
+============================================================
+
+"""脚本解释器。"""
+
+import sys
+import time
+
+from PySide6.QtWidgets import QApplication
+
+from .errors import ScriptError, ScriptReturn
+from .scope import Scope, UserFunction, MISSING
+from .object_factory import ObjectFactory, get_object_property
+from .object_destructor import ObjectDestructor
+from .functions import build_global_env
+from .parser import parse
+
+
+class Interpreter:
+    def __init__(self, doc, canvas=None, owner_id="script"):
+        self.doc = doc
+        self.canvas = canvas
+        self.owner_id = owner_id or "script"
+
+        self.steps = 0
+        self.max_steps = 100000
+
+        self.call_depth = 0
+        self.max_call_depth = 1000
+
+        self.special = {
+            "__keep": False,
+            "__allow_delete_user": False,
+        }
+
+        self.logs = []
+        self.created = []
+        self.error = None
+
+        self.imported_modules = {}
+        self.importing = set()
+
+        if not hasattr(doc, "script_libs"):
+            doc.script_libs = {}
+
+        self.factory = ObjectFactory(self)
+        self.destructor = ObjectDestructor(self)
+
+        self.global_scope = Scope()
+
+        for k, v in build_global_env(self).items():
+            self.global_scope.vars[k] = v
+
+        # 用户自定义函数可能递归较深
+        sys.setrecursionlimit(max(sys.getrecursionlimit(), 5000))
+
+    # ------------------------------------------------------------
+    # 对外入口
+    # ------------------------------------------------------------
+
+    def run(self, program):
+        self._var_backup = self.doc.vars.to_dict()
+
+        self.doc.begin_action()
+
+        try:
+            self.exec_block(program.statements, self.global_scope)
+            self._finalize_success()
+
+        except ScriptReturn:
+            self._finalize_success()
+
+        except ScriptError as e:
+            self.error = e
+            self._rollback()
+
+        except Exception as e:
+            self.error = ScriptError(str(e))
+            self._rollback()
+
+        finally:
+            self.doc.end_action()
+
+        return self.error is None
+
+    # ------------------------------------------------------------
+    # 事务 / 回滚
+    # ------------------------------------------------------------
+
+    def add_created_object(self, obj, name=None):
+        obj.script_owner = self.owner_id
+        obj.script_created = True
+
+        if name:
+            obj.script_name = name
+
+            try:
+                obj.name = name
+            except Exception:
+                pass
+
+        self.created.append(obj)
+        self.doc.add(obj)
+
+        return obj
+
+    def _finalize_success(self):
+        keep = self._truth(self.special.get("__keep", False))
+
+        if not keep:
+            for obj in reversed(self.created):
+                if obj in self.doc.objects:
+                    self.doc._remove(obj)
+
+            self.created = []
+            self.doc.changed.emit()
+
+    def _rollback(self):
+        for obj in reversed(self.created):
+            if obj in self.doc.objects:
+                self.doc._remove(obj)
+
+        try:
+            self.doc.vars.load_dict(self._var_backup)
+        except Exception:
+            pass
+
+        self.doc.changed.emit()
+
+    # ------------------------------------------------------------
+    # 执行语句
+    # ------------------------------------------------------------
+
+    def exec_block(self, stmts, scope):
+        for stmt in stmts:
+            self._step(stmt)
+            self.exec_stmt(stmt, scope)
+
+    def exec_stmt(self, stmt, scope):
+        from .ast_nodes import (
+            Import, GlobalAssign, Assign, FuncDef, Return,
+            If, Repeat, ForRange, Wait, DeleteAll, DeleteExpr, ExprStmt
+        )
+
+        if isinstance(stmt, Import):
+            module = self._import_module(stmt.name, scope, stmt.line)
+            scope.set_local(stmt.name, module)
+            return
+
+        if isinstance(stmt, GlobalAssign):
+            value = self.eval_expr(stmt.expr, scope)
+            self._assign_special(stmt.name, value)
+            scope.set_global(stmt.name, value)
+            self._set_store_var(stmt.name, value)
+            return
+
+        if isinstance(stmt, Assign):
+            value = self.eval_expr(stmt.expr, scope)
+            self._assign_special(stmt.name, value)
+            scope.set_local(stmt.name, value)
+
+            # 如果赋值的是几何对象，尝试同步对象名
+            if hasattr(value, "script_name"):
+                value.script_name = stmt.name
+
+                try:
+                    value.name = stmt.name
+                except Exception:
+                    pass
+
+            return
+
+        if isinstance(stmt, FuncDef):
+            func = UserFunction(stmt.name, stmt.params, stmt.body, scope)
+            scope.set_local(stmt.name, func)
+            return
+
+        if isinstance(stmt, Return):
+            value = None
+
+            if stmt.expr is not None:
+                value = self.eval_expr(stmt.expr, scope)
+
+            raise ScriptReturn(value)
+
+        if isinstance(stmt, If):
+            for cond, body in stmt.branches:
+                if self._truth(self.eval_expr(cond, scope)):
+                    self.exec_block(body, scope)
+                    return
+
+            if stmt.else_body is not None:
+                self.exec_block(stmt.else_body, scope)
+
+            return
+
+        if isinstance(stmt, Repeat):
+            count = int(self._as_number(self.eval_expr(stmt.count, scope), stmt.line))
+
+            if count < 0:
+                raise ScriptError("repeat 次数不能为负数", stmt.line)
+
+            for _ in range(count):
+                self.exec_block(stmt.body, scope)
+
+            return
+
+        if isinstance(stmt, ForRange):
+            start = int(self._as_number(self.eval_expr(stmt.start, scope), stmt.line))
+            end = int(self._as_number(self.eval_expr(stmt.end, scope), stmt.line))
+
+            if start <= end:
+                it = range(start, end + 1)
+            else:
+                it = range(start, end - 1, -1)
+
+            for i in it:
+                scope.set_local(stmt.var, float(i))
+                self.exec_block(stmt.body, scope)
+
+            return
+
+        if isinstance(stmt, Wait):
+            seconds = self._as_number(self.eval_expr(stmt.expr, scope), stmt.line)
+            self._wait(seconds)
+            return
+
+        if isinstance(stmt, DeleteAll):
+            self.destructor.delete_all(stmt.target, stmt.line)
+            return
+
+        if isinstance(stmt, DeleteExpr):
+            obj = self.eval_expr(stmt.expr, scope)
+            self.destructor.delete_object(obj, stmt.line)
+            return
+
+        if isinstance(stmt, ExprStmt):
+            self.eval_expr(stmt.expr, scope)
+            return
+
+        raise ScriptError("未知语句", getattr(stmt, "line", None))
+
+    # ------------------------------------------------------------
+    # import
+    # ------------------------------------------------------------
+
+    def _import_module(self, name, scope, line=None):
+        if name in self.imported_modules:
+            return self.imported_modules[name]
+
+        from .libraries import get_builtin_library
+
+        lib = get_builtin_library(name, self)
+
+        if lib is not None:
+            self.imported_modules[name] = lib
+            return lib
+
+        source = getattr(self.doc, "script_libs", {}).get(name)
+
+        if source is None:
+            raise ScriptError(f"找不到库：{name}", line)
+
+        if name in self.importing:
+            raise ScriptError(f"循环导入：{name}", line)
+
+        self.importing.add(name)
+
+        try:
+            prog = parse(source)
+            module_scope = Scope(self.global_scope)
+
+            self._load_library(prog, module_scope)
+
+            module = {
+                k: v
+                for k, v in module_scope.vars.items()
+                if not k.startswith("__")
+            }
+
+            self.imported_modules[name] = module
+            return module
+
+        finally:
+            self.importing.discard(name)
+
+    def _load_library(self, program, scope):
+        from .ast_nodes import FuncDef, Import
+
+        for stmt in program.statements:
+            if isinstance(stmt, FuncDef):
+                func = UserFunction(stmt.name, stmt.params, stmt.body, scope)
+                scope.set_local(stmt.name, func)
+
+            elif isinstance(stmt, Import):
+                module = self._import_module(stmt.name, scope, stmt.line)
+                scope.set_local(stmt.name, module)
+
+            else:
+                raise ScriptError("库文件只能包含 func 定义和 import", getattr(stmt, "line", None))
+
+    # ------------------------------------------------------------
+    # 表达式
+    # ------------------------------------------------------------
+
+    def eval_expr(self, node, scope):
+        self._step(node)
+
+        from .ast_nodes import (
+            Num, Str, Bool, Var, Member, Call, Bin, Unary
+        )
+
+        if isinstance(node, Num):
+            return float(node.value)
+
+        if isinstance(node, Str):
+            return node.value
+
+        if isinstance(node, Bool):
+            return node.value
+
+        if isinstance(node, Var):
+            return self._lookup_var(node.name, scope, node.line)
+
+        if isinstance(node, Member):
+            left = self.eval_expr(node.obj, scope)
+
+            if isinstance(left, dict):
+                if node.name in left:
+                    return left[node.name]
+
+                raise ScriptError(f"模块没有成员：{node.name}", node.line)
+
+            if hasattr(left, "type_name"):
+                return get_object_property(left, node.name, node.line)
+
+            raise ScriptError("无法访问成员", node.line)
+
+        if isinstance(node, Call):
+            return self.eval_call(node, scope)
+
+        if isinstance(node, Unary):
+            return self.eval_unary(node, scope)
+
+        if isinstance(node, Bin):
+            return self.eval_bin(node, scope)
+
+        raise ScriptError("未知表达式", getattr(node, "line", None))
+
+    def _lookup_var(self, name, scope, line=None):
+        value = scope.find(name)
+
+        if value is not MISSING:
+            return value
+
+        # 文档变量
+        try:
+            d = self.doc.vars.as_dict()
+
+            if name in d:
+                return float(d[name])
+        except Exception:
+            pass
+
+        raise ScriptError(f"未定义变量：{name}", line)
+
+    def eval_unary(self, node, scope):
+        value = self.eval_expr(node.operand, scope)
+
+        if node.op == "not":
+            return not self._truth(value)
+
+        value = self._as_number(value, node.line)
+
+        if node.op == "-":
+            return -value
+
+        if node.op == "+":
+            return value
+
+        raise ScriptError(f"未知一元运算符：{node.op}", node.line)
+
+    def eval_bin(self, node, scope):
+        op = node.op
+
+        if op == "and":
+            left = self.eval_expr(node.left, scope)
+
+            if not self._truth(left):
+                return False
+
+            return self._truth(self.eval_expr(node.right, scope))
+
+        if op == "or":
+            left = self.eval_expr(node.left, scope)
+
+            if self._truth(left):
+                return True
+
+            return self._truth(self.eval_expr(node.right, scope))
+
+        left = self.eval_expr(node.left, scope)
+        right = self.eval_expr(node.right, scope)
+
+        # 比较
+        if op in ("==", "!=", "<", "<=", ">", ">="):
+            return self._compare(op, left, right, node.line)
+
+        # 字符串拼接
+        if op == "+" and (isinstance(left, str) or isinstance(right, str)):
+            return self._format_value(left) + self._format_value(right)
+
+        a = self._as_number(left, node.line)
+        b = self._as_number(right, node.line)
+
+        if op == "+":
+            return a + b
+
+        if op == "-":
+            return a - b
+
+        if op == "*":
+            return a * b
+
+        if op == "/":
+            if abs(b) < 1e-12:
+                raise ScriptError("除数为 0", node.line)
+
+            return a / b
+
+        if op == "%":
+            if abs(b) < 1e-12:
+                raise ScriptError("模运算除数为 0", node.line)
+
+            return a % b
+
+        if op == "^":
+            return a ** b
+
+        raise ScriptError(f"未知运算符：{op}", node.line)
+
+    def _compare(self, op, left, right, line=None):
+        # 对象比较
+        if hasattr(left, "type_name") or hasattr(right, "type_name"):
+            if op == "==":
+                return left is right
+
+            if op == "!=":
+                return left is not right
+
+            raise ScriptError("对象只能使用 == 或 !=", line)
+
+        # 字符串比较
+        if isinstance(left, str) or isinstance(right, str):
+            if op == "==":
+                return str(left) == str(right)
+
+            if op == "!=":
+                return str(left) != str(right)
+
+            raise ScriptError("字符串只能使用 == 或 !=", line)
+
+        a = self._as_number(left, line)
+        b = self._as_number(right, line)
+
+        if op == "==":
+            return abs(a - b) < 1e-12
+
+        if op == "!=":
+            return abs(a - b) >= 1e-12
+
+        if op == "<":
+            return a < b
+
+        if op == "<=":
+            return a <= b
+
+        if op == ">":
+            return a > b
+
+        if op == ">=":
+            return a >= b
+
+        raise ScriptError(f"未知比较运算符：{op}", line)
+
+    def eval_call(self, node, scope):
+        callee = self.eval_expr(node.callee, scope)
+
+        args = [self.eval_expr(a, scope) for a in node.args]
+
+        if isinstance(callee, UserFunction):
+            return self.call_user_function(callee, args, node.line)
+
+        if callable(callee):
+            try:
+                return callee(*args)
+            except ScriptError:
+                raise
+            except Exception as e:
+                raise ScriptError(str(e), node.line)
+
+        raise ScriptError("不可调用对象", node.line)
+
+    def call_user_function(self, func, args, line=None):
+        self.call_depth += 1
+
+        if self.call_depth > self.max_call_depth:
+            raise ScriptError(f"超过最大递归深度 {self.max_call_depth}", line)
+
+        scope = Scope(func.closure_scope)
+
+        if len(args) > len(func.params):
+            raise ScriptError(f"函数 {func.name} 参数过多", line)
+
+        for i, param in enumerate(func.params):
+            if i < len(args):
+                value = args[i]
+            elif param.default is not None:
+                value = self.eval_expr(param.default, scope)
+            else:
+                raise ScriptError(f"函数 {func.name} 缺少参数 {param.name}", line)
+
+            scope.set_local(param.name, value)
+
+        try:
+            self.exec_block(func.body, scope)
+            return None
+
+        except ScriptReturn as r:
+            return r.value
+
+        finally:
+            self.call_depth -= 1
+
+    # ------------------------------------------------------------
+    # 特殊变量 / 变量系统
+    # ------------------------------------------------------------
+
+    def _assign_special(self, name, value):
+        if name == "__keep":
+            self.special["__keep"] = self._truth(value)
+
+        elif name == "__allow_delete_user":
+            self.special["__allow_delete_user"] = self._truth(value)
+
+        elif name == "__max_steps":
+            try:
+                v = int(self._as_number(value))
+                self.max_steps = min(max(v, 1), 100000)
+            except Exception:
+                pass
+
+    def _set_store_var(self, name, value):
+        if name.startswith("__"):
+            return
+
+        if isinstance(value, bool):
+            value = 1.0 if value else 0.0
+
+        if not isinstance(value, (int, float)):
+            return
+
+        value = float(value)
+
+        store = self.doc.vars
+
+        if store.get_var(name) is not None:
+            store.set(name, value)
+        else:
+            store.define(name, value, value - 10.0, value + 10.0)
+
+    # ------------------------------------------------------------
+    # wait
+    # ------------------------------------------------------------
+
+    def _wait(self, seconds):
+        seconds = float(seconds)
+
+        if seconds <= 0:
+            return
+
+        # 单次等待最长 60 秒，避免脚本卡死
+        seconds = min(seconds, 60.0)
+
+        app = QApplication.instance()
+
+        if app is None:
+            time.sleep(seconds)
+            return
+
+        try:
+            from PySide6.QtCore import QEventLoop, QTimer
+
+            loop = QEventLoop()
+            QTimer.singleShot(int(seconds * 1000), loop.quit)
+            loop.exec()
+
+        except Exception:
+            time.sleep(seconds)
+
+    # ------------------------------------------------------------
+    # 基础工具
+    # ------------------------------------------------------------
+
+    def _step(self, node=None):
+        self.steps += 1
+
+        if self.steps > self.max_steps:
+            raise ScriptError(f"超过最大执行步数 {self.max_steps}", getattr(node, "line", None))
+
+    def _truth(self, value):
+        if isinstance(value, bool):
+            return value
+
+        if isinstance(value, (int, float)):
+            return float(value) != 0.0
+
+        if isinstance(value, str):
+            return len(value) > 0
+
+        if value is None:
+            return False
+
+        return True
+
+    def _as_number(self, value, line=None):
+        if isinstance(value, bool):
+            return 1.0 if value else 0.0
+
+        if isinstance(value, (int, float)):
+            return float(value)
+
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except Exception:
+                raise ScriptError(f"无法转换为数字：{value}", line)
+
+        raise ScriptError("此处需要数字", line)
+
+    def _format_value(self, value):
+        if value is None:
+            return "none"
+
+        if isinstance(value, bool):
+            return "true" if value else "false"
+
+        if isinstance(value, float):
+            if abs(value - round(value)) < 1e-9:
+                return str(int(round(value)))
+
+            return f"{value:.6g}"
+
+        if isinstance(value, int):
+            return str(value)
+
+        if isinstance(value, str):
+            return value
+
+        if hasattr(value, "type_name"):
+            name = getattr(value, "script_name", None) or getattr(value, "name", None)
+
+            if name:
+                return f"<{value.type_name}:{name}>"
+
+            return f"<{value.type_name}>"
+
+        return str(value)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\object_destructor.py
+鏂囦欢鍚?   object_destructor.py
+淇敼鏃堕棿: 08/07/2026 13:24:18
+============================================================
+
+"""脚本对象销毁器。"""
+
+from geo.points import AbstractPoint
+
+from .errors import ScriptError
+
+
+class ObjectDestructor:
+    def __init__(self, interp):
+        self.interp = interp
+
+    def _is_protected(self, obj):
+        return type(obj).__name__ == "ScriptButtonObject"
+
+    def _can_delete(self, obj):
+        if self._is_protected(obj):
+            return False
+
+        if getattr(obj, "script_owner", None) == self.interp.owner_id:
+            return True
+
+        if getattr(obj, "script_created", False):
+            return True
+
+        return bool(self.interp.special.get("__allow_delete_user", False))
+
+    def delete_object(self, obj, line=None):
+        if obj is None:
+            raise ScriptError("delete 对象为空", line)
+
+        if obj not in self.interp.doc.objects:
+            raise ScriptError("对象不在文档中，无法删除", line)
+
+        if not self._can_delete(obj):
+            raise ScriptError(
+                "默认禁止删除用户对象。若允许，请设置 __allow_delete_user = true",
+                line
+            )
+
+        self.interp.doc._remove(obj)
+        self.interp.doc.changed.emit()
+
+    def delete_all(self, target, line=None):
+        doc = self.interp.doc
+
+        candidates = list(doc.objects)
+
+        if target == "points":
+            candidates = [o for o in candidates if isinstance(o, AbstractPoint)]
+
+        elif target == "circles":
+            candidates = [
+                o for o in candidates
+                if type(o).__name__ in ("Circle", "ExprCircle")
+            ]
+
+        elif target == "created":
+            candidates = [
+                o for o in candidates
+                if getattr(o, "script_created", False)
+                or getattr(o, "script_owner", None) == self.interp.owner_id
+            ]
+
+        changed = False
+
+        for obj in candidates:
+            if obj not in doc.objects:
+                continue
+
+            if not self._can_delete(obj):
+                continue
+
+            doc._remove(obj)
+            changed = True
+
+        if changed:
+            doc.changed.emit()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\object_factory.py
+鏂囦欢鍚?   object_factory.py
+淇敼鏃堕棿: 08/07/2026 13:24:02
+============================================================
+
+"""脚本几何对象工厂。"""
+
+import math
+
+from geo.points import FreePoint, AbstractPoint
+from geo.segments import Segment
+from geo.circles import Circle
+from geo.constraints import ExprCircle
+from geo.division import DivisionPoint
+from geo.intersects import IntersectPoint, INTERSECT_SOLVERS, _seg_circle, _circle_circle
+from geo.function_curve import FunctionCurve
+from geo.chain_fill import ChainFill, Span, FillStyle
+
+from plugins.line_tool import Line
+from plugins.ray_tool import Ray
+from plugins.ellipse_tool import Ellipse
+from plugins.polygon import RegularPolygon
+from plugins.text_tool import TextObject
+
+from .errors import ScriptError
+
+
+# ------------------------------------------------------------
+# 让 ExprCircle 参与交点系统
+# ------------------------------------------------------------
+
+def _register_expr_circle_solvers():
+    INTERSECT_SOLVERS[(ExprCircle, Segment)] = (
+        lambda c, s: _seg_circle(
+            (s.a.x, s.a.y),
+            (s.b.x, s.b.y),
+            (c.center.x, c.center.y),
+            c.r
+        )
+    )
+
+    INTERSECT_SOLVERS[(ExprCircle, Circle)] = (
+        lambda c1, c2: _circle_circle(
+            (c1.center.x, c1.center.y),
+            c1.r,
+            (c2.center.x, c2.center.y),
+            c2.r
+        )
+    )
+
+    INTERSECT_SOLVERS[(ExprCircle, ExprCircle)] = (
+        lambda c1, c2: _circle_circle(
+            (c1.center.x, c1.center.y),
+            c1.r,
+            (c2.center.x, c2.center.y),
+            c2.r
+        )
+    )
+
+
+_register_expr_circle_solvers()
+
+
+# ------------------------------------------------------------
+# 对象属性
+# ------------------------------------------------------------
+
+def get_object_property(obj, name, line=None):
+    if name == "x" and hasattr(obj, "x"):
+        return float(obj.x)
+
+    if name == "y" and hasattr(obj, "y"):
+        return float(obj.y)
+
+    if name in ("radius", "r") and hasattr(obj, "r"):
+        return float(obj.r)
+
+    if name == "length" and hasattr(obj, "length") and callable(obj.length):
+        return float(obj.length())
+
+    if name in ("sides", "n") and hasattr(obj, "n"):
+        return float(obj.n)
+
+    if name == "exists":
+        return bool(getattr(obj, "exists", True))
+
+    if name == "visible":
+        return bool(getattr(obj, "visible", True))
+
+    if name == "name":
+        return getattr(obj, "name", "") or getattr(obj, "script_name", "")
+
+    raise ScriptError(f"对象没有属性：{name}", line)
+
+
+# ------------------------------------------------------------
+# 工厂
+# ------------------------------------------------------------
+
+class ObjectFactory:
+    def __init__(self, interp):
+        self.interp = interp
+
+    # -------------------- 工具 --------------------
+
+    def _num(self, value, line=None):
+        return self.interp._as_number(value, line)
+
+    def _point(self, value, line=None):
+        if isinstance(value, AbstractPoint):
+            return value
+
+        if hasattr(value, "x") and hasattr(value, "y"):
+            return value
+
+        raise ScriptError("此处需要点对象", line)
+
+    def _text(self, value, line=None):
+        if isinstance(value, str):
+            return value
+
+        raise ScriptError("此处需要字符串", line)
+
+    # -------------------- 基础图元 --------------------
+
+    def point(self, x, y):
+        x = self._num(x)
+        y = self._num(y)
+
+        obj = FreePoint(x, y)
+        return self.interp.add_created_object(obj)
+
+    def segment(self, a, b):
+        a = self._point(a)
+        b = self._point(b)
+
+        obj = Segment(a, b)
+        return self.interp.add_created_object(obj)
+
+    def line(self, a, b):
+        a = self._point(a)
+        b = self._point(b)
+
+        obj = Line(a, b)
+        return self.interp.add_created_object(obj)
+
+    def ray(self, a, b):
+        a = self._point(a)
+        b = self._point(b)
+
+        obj = Ray(a, b)
+        return self.interp.add_created_object(obj)
+
+    def circle(self, center, arg):
+        center = self._point(center)
+
+        if isinstance(arg, str):
+            obj = ExprCircle(center, arg)
+        elif isinstance(arg, AbstractPoint):
+            obj = Circle(center, arg)
+        else:
+            r = self._num(arg)
+            obj = ExprCircle(center, str(r))
+
+        return self.interp.add_created_object(obj)
+
+    def ellipse(self, center, axis_a, axis_b):
+        center = self._point(center)
+        axis_a = self._point(axis_a)
+        axis_b = self._point(axis_b)
+
+        obj = Ellipse(center, axis_a, axis_b)
+        return self.interp.add_created_object(obj)
+
+    def regular_polygon(self, center, vertex, sides):
+        center = self._point(center)
+        vertex = self._point(vertex)
+        sides = int(self._num(sides))
+
+        if sides < 3:
+            raise ScriptError("正多边形至少需要 3 条边")
+
+        obj = RegularPolygon(center, vertex, sides)
+        return self.interp.add_created_object(obj)
+
+    def polygon(self, *points):
+        if len(points) < 3:
+            raise ScriptError("多边形至少需要 3 个点")
+
+        pts = [self._point(p) for p in points]
+
+        spans = []
+
+        for i in range(len(pts) - 1):
+            spans.append(Span(pts[i], pts[i + 1], None))
+
+        spans.append(Span(pts[-1], pts[0], None))
+
+        style = FillStyle("#4dabf7", 0.35, "solid")
+        obj = ChainFill(spans, style)
+
+        return self.interp.add_created_object(obj)
+
+    def midpoint(self, a, b):
+        a = self._point(a)
+        b = self._point(b)
+
+        obj = DivisionPoint(a, b, 0.5)
+        return self.interp.add_created_object(obj)
+
+    def division_point(self, a, b, t):
+        a = self._point(a)
+        b = self._point(b)
+        t = self._num(t)
+
+        obj = DivisionPoint(a, b, t)
+        return self.interp.add_created_object(obj)
+
+    def intersect(self, obj1, obj2, branch=0):
+        if obj1 is None or obj2 is None:
+            raise ScriptError("交点需要两个几何对象")
+
+        branch = int(self._num(branch))
+
+        obj = IntersectPoint(obj1, obj2, branch)
+        return self.interp.add_created_object(obj)
+
+    def text(self, x, y, content, size=16, color="#1f2937"):
+        x = self._num(x)
+        y = self._num(y)
+
+        content = self.interp._format_value(content)
+        size = int(self._num(size))
+
+        obj = TextObject(content, color, size, anchor=None, pos=(x, y))
+        return self.interp.add_created_object(obj)
+
+    # -------------------- 函数曲线 --------------------
+
+    def function_curve(self, *args):
+        if not args:
+            raise ScriptError("function_curve 缺少参数")
+
+        if isinstance(args[0], str) and args[0] in ("explicit", "parametric", "polar"):
+            kind = args[0]
+            rest = args[1:]
+        else:
+            kind = "explicit"
+            rest = args
+
+        if kind == "explicit":
+            if len(rest) < 1:
+                raise ScriptError("explicit 函数需要表达式")
+
+            expr = self._text(rest[0])
+
+            domain = None
+            if len(rest) >= 3:
+                domain = (self._num(rest[1]), self._num(rest[2]))
+
+            obj = FunctionCurve("explicit", expr, "", domain)
+            return self.interp.add_created_object(obj)
+
+        if kind == "parametric":
+            if len(rest) < 2:
+                raise ScriptError("parametric 需要 x(t) 和 y(t)")
+
+            expr = self._text(rest[0])
+            expr2 = self._text(rest[1])
+
+            if len(rest) >= 4:
+                domain = (self._num(rest[2]), self._num(rest[3]))
+            else:
+                domain = (0.0, 2.0 * math.pi)
+
+            obj = FunctionCurve("parametric", expr, expr2, domain)
+            return self.interp.add_created_object(obj)
+
+        if kind == "polar":
+            if len(rest) < 1:
+                raise ScriptError("polar 需要 r(t)")
+
+            expr = self._text(rest[0])
+
+            if len(rest) >= 3:
+                domain = (self._num(rest[1]), self._num(rest[2]))
+            else:
+                domain = (0.0, 2.0 * math.pi)
+
+            obj = FunctionCurve("polar", expr, "", domain)
+            return self.interp.add_created_object(obj)
+
+        raise ScriptError(f"未知函数曲线类型：{kind}")
+
+    def function(self, expr):
+        expr = self._text(expr)
+        obj = FunctionCurve("explicit", expr, "", None)
+        return self.interp.add_created_object(obj)
+
+    def parametric(self, expr_x, expr_y, start=0.0, end=None):
+        expr_x = self._text(expr_x)
+        expr_y = self._text(expr_y)
+
+        start = self._num(start)
+
+        if end is None:
+            end = 2.0 * math.pi
+        else:
+            end = self._num(end)
+
+        obj = FunctionCurve("parametric", expr_x, expr_y, (start, end))
+        return self.interp.add_created_object(obj)
+
+    def polar(self, expr, start=0.0, end=None):
+        expr = self._text(expr)
+
+        start = self._num(start)
+
+        if end is None:
+            end = 2.0 * math.pi
+        else:
+            end = self._num(end)
+
+        obj = FunctionCurve("polar", expr, "", (start, end))
+        return self.interp.add_created_object(obj)
 
 
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\parser.py
 鏂囦欢鍚?   parser.py
-淇敼鏃堕棿: 08/06/2026 16:08:02
+淇敼鏃堕棿: 08/07/2026 13:23:31
 ============================================================
 
-"""GeoSketch 脚本解析器。
+"""脚本语法分析器：新语法。"""
 
-支持：
-- repeat N {}
-- for i from A to B {}
-- if cond {} else if cond {} else {}
-- local/global 变量赋值
-- print(...)
-- add point / segment / line / circle / polygon / text
-- delete point / object
-"""
+from .errors import ScriptError
+from .tokens import tokenize
+from .ast_nodes import (
+    Program, Import, GlobalAssign, Assign, FuncDef, Param, Return,
+    If, Repeat, ForRange, Wait, DeleteAll, DeleteExpr, ExprStmt,
+    Num, Str, Bool, Var, Member, Call, Bin, Unary
+)
 
-from typing import Any, List, Optional, Tuple, Union
+
+class Parser:
+    def __init__(self, tokens):
+        self.toks = tokens
+        self.i = 0
+
+    # ------------------------------------------------------------
+    # 基础工具
+    # ------------------------------------------------------------
+
+    def peek(self):
+        return self.toks[self.i]
+
+    def advance(self):
+        t = self.toks[self.i]
+        self.i += 1
+        return t
+
+    def at(self, ty, val=None):
+        t = self.peek()
+
+        if t[0] != ty:
+            return False
+
+        if val is not None and t[1] != val:
+            return False
+
+        return True
+
+    def error(self, msg):
+        t = self.peek()
+        raise ScriptError(msg, t[2])
+
+    def expect(self, ty, val=None):
+        if not self.at(ty, val):
+            t = self.peek()
+
+            if val is None:
+                self.error(f"期望 {ty}，实际得到 {t[0]}:{t[1]}")
+            else:
+                self.error(f"期望 {val}，实际得到 {t[1]}")
+
+        return self.advance()
+
+    def expect_key(self, key):
+        return self.expect("KEY", key)
+
+    # ------------------------------------------------------------
+    # 入口
+    # ------------------------------------------------------------
+
+    def parse_program(self):
+        stmts = []
+
+        while not self.at("EOF"):
+            stmts.append(self.parse_statement())
+
+        return Program(stmts)
+
+    # ------------------------------------------------------------
+    # 语句
+    # ------------------------------------------------------------
+
+    def parse_statement(self):
+        t = self.peek()
+
+        if t[0] == "KEY":
+            key = t[1]
+
+            if key == "import":
+                return self.parse_import()
+
+            if key == "global":
+                return self.parse_global()
+
+            if key == "func":
+                return self.parse_func()
+
+            if key == "return":
+                return self.parse_return()
+
+            if key == "if":
+                return self.parse_if()
+
+            if key == "repeat":
+                return self.parse_repeat()
+
+            if key == "for":
+                return self.parse_for()
+
+            if key == "wait":
+                return self.parse_wait()
+
+            if key == "delete":
+                return self.parse_delete()
+
+        if t[0] == "ID":
+            nxt = self.toks[self.i + 1]
+
+            if nxt[0] == "ASSIGN":
+                return self.parse_assign()
+
+        expr = self.parse_expr()
+        return ExprStmt(expr, expr.line)
+
+    def parse_block(self):
+        self.expect("LBRACE")
+
+        stmts = []
+
+        while not self.at("RBRACE") and not self.at("EOF"):
+            stmts.append(self.parse_statement())
+
+        self.expect("RBRACE")
+        return stmts
+
+    def parse_import(self):
+        line = self.peek()[2]
+        self.expect_key("import")
+
+        name = self.expect("ID")[1]
+        return Import(name, line)
+
+    def parse_global(self):
+        line = self.peek()[2]
+        self.expect_key("global")
+
+        name = self.expect("ID")[1]
+        self.expect("ASSIGN")
+
+        expr = self.parse_expr()
+        return GlobalAssign(name, expr, line)
+
+    def parse_assign(self):
+        line = self.peek()[2]
+
+        name = self.expect("ID")[1]
+        self.expect("ASSIGN")
+
+        expr = self.parse_expr()
+        return Assign(name, expr, line)
+
+    def parse_func(self):
+        line = self.peek()[2]
+        self.expect_key("func")
+
+        name = self.expect("ID")[1]
+
+        params = []
+
+        self.expect("LPAREN")
+
+        while not self.at("RPAREN") and not self.at("EOF"):
+            pname = self.expect("ID")[1]
+            default = None
+
+            if self.at("ASSIGN"):
+                self.advance()
+                default = self.parse_expr()
+
+            params.append(Param(pname, default, line))
+
+            if self.at("COMMA"):
+                self.advance()
+            else:
+                break
+
+        self.expect("RPAREN")
+
+        body = self.parse_block()
+
+        return FuncDef(name, params, body, line)
+
+    def parse_return(self):
+        line = self.peek()[2]
+        self.expect_key("return")
+
+        if self.at("RBRACE") or self.at("EOF"):
+            return Return(None, line)
+
+        expr = self.parse_expr()
+        return Return(expr, line)
+
+    def parse_if(self):
+        line = self.peek()[2]
+        branches = []
+
+        self.expect_key("if")
+        cond = self.parse_expr()
+        body = self.parse_block()
+        branches.append((cond, body))
+
+        else_body = None
+
+        while True:
+            if self.at("KEY", "elif"):
+                self.advance()
+
+                cond = self.parse_expr()
+                body = self.parse_block()
+                branches.append((cond, body))
+                continue
+
+            if self.at("KEY", "else"):
+                self.advance()
+
+                if self.at("KEY", "if"):
+                    self.advance()
+
+                    cond = self.parse_expr()
+                    body = self.parse_block()
+                    branches.append((cond, body))
+                    continue
+
+                else_body = self.parse_block()
+                break
+
+            break
+
+        return If(branches, else_body, line)
+
+    def parse_repeat(self):
+        line = self.peek()[2]
+        self.expect_key("repeat")
+
+        count = self.parse_expr()
+        body = self.parse_block()
+
+        return Repeat(count, body, line)
+
+    def parse_for(self):
+        line = self.peek()[2]
+        self.expect_key("for")
+
+        var = self.expect("ID")[1]
+
+        self.expect_key("from")
+        start = self.parse_expr()
+
+        self.expect_key("to")
+        end = self.parse_expr()
+
+        body = self.parse_block()
+
+        return ForRange(var, start, end, body, line)
+
+    def parse_wait(self):
+        line = self.peek()[2]
+        self.expect_key("wait")
+
+        expr = self.parse_expr()
+        return Wait(expr, line)
+
+    def parse_delete(self):
+        line = self.peek()[2]
+        self.expect_key("delete")
+
+        if self.at("KEY", "all"):
+            self.advance()
+
+            if self.at("ID") and self.peek()[1] in ("points", "点"):
+                self.advance()
+                return DeleteAll("points", line)
+
+            if self.at("ID") and self.peek()[1] in ("circles", "圆"):
+                self.advance()
+                return DeleteAll("circles", line)
+
+            return DeleteAll("all", line)
+
+        if self.at("KEY", "created"):
+            self.advance()
+            return DeleteAll("created", line)
+
+        expr = self.parse_expr()
+        return DeleteExpr(expr, line)
+
+    # ------------------------------------------------------------
+    # 表达式
+    # ------------------------------------------------------------
+
+    def parse_expr(self):
+        return self.parse_or()
+
+    def parse_or(self):
+        left = self.parse_and()
+
+        while self.at("KEY", "or"):
+            line = self.peek()[2]
+            self.advance()
+
+            right = self.parse_and()
+            left = Bin("or", left, right, line)
+
+        return left
+
+    def parse_and(self):
+        left = self.parse_not()
+
+        while self.at("KEY", "and"):
+            line = self.peek()[2]
+            self.advance()
+
+            right = self.parse_not()
+            left = Bin("and", left, right, line)
+
+        return left
+
+    def parse_not(self):
+        if self.at("KEY", "not"):
+            line = self.peek()[2]
+            self.advance()
+
+            operand = self.parse_not()
+            return Unary("not", operand, line)
+
+        return self.parse_comparison()
+
+    def parse_comparison(self):
+        left = self.parse_add()
+
+        while self.at("OP") and self.peek()[1] in (">", "<", ">=", "<=", "==", "!="):
+            op = self.advance()[1]
+            right = self.parse_add()
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_add(self):
+        left = self.parse_mul()
+
+        while self.at("OP") and self.peek()[1] in ("+", "-"):
+            op = self.advance()[1]
+            right = self.parse_mul()
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_mul(self):
+        left = self.parse_power()
+
+        while self.at("OP") and self.peek()[1] in ("*", "/", "%"):
+            op = self.advance()[1]
+            right = self.parse_power()
+            left = Bin(op, left, right, left.line)
+
+        return left
+
+    def parse_power(self):
+        left = self.parse_unary()
+
+        if self.at("OP", "^"):
+            line = self.peek()[2]
+            self.advance()
+
+            right = self.parse_power()
+            return Bin("^", left, right, line)
+
+        return left
+
+    def parse_unary(self):
+        if self.at("OP") and self.peek()[1] in ("+", "-"):
+            op = self.advance()[1]
+            operand = self.parse_unary()
+            return Unary(op, operand, self.peek()[2])
+
+        return self.parse_postfix()
+
+    def parse_postfix(self):
+        node = self.parse_primary()
+
+        while True:
+            if self.at("DOT"):
+                line = self.peek()[2]
+                self.advance()
+
+                name = self.expect("ID")[1]
+                node = Member(node, name, line)
+                continue
+
+            if self.at("LPAREN"):
+                line = self.peek()[2]
+                self.advance()
+
+                args = []
+
+                if not self.at("RPAREN"):
+                    args.append(self.parse_expr())
+
+                    while self.at("COMMA"):
+                        self.advance()
+                        args.append(self.parse_expr())
+
+                self.expect("RPAREN")
+
+                node = Call(node, args, line)
+                continue
+
+            break
+
+        return node
+
+    def parse_primary(self):
+        t = self.peek()
+
+        if t[0] == "NUM":
+            self.advance()
+            return Num(t[1], t[2])
+
+        if t[0] == "STR":
+            self.advance()
+            return Str(t[1], t[2])
+
+        if t[0] == "KEY" and t[1] == "true":
+            self.advance()
+            return Bool(True, t[2])
+
+        if t[0] == "KEY" and t[1] == "false":
+            self.advance()
+            return Bool(False, t[2])
+
+        if t[0] == "ID":
+            self.advance()
+            return Var(t[1], t[2])
+
+        if t[0] == "LPAREN":
+            self.advance()
+            expr = self.parse_expr()
+            self.expect("RPAREN")
+            return expr
+
+        self.error(f"非法表达式：{t[1]}")
+
+
+def parse(src):
+    tokens = tokenize(src)
+    return Parser(tokens).parse_program()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\scope.py
+鏂囦欢鍚?   scope.py
+淇敼鏃堕棿: 08/07/2026 13:23:49
+============================================================
+
+"""脚本作用域与用户函数。"""
+
+MISSING = object()
+
+
+class UserFunction:
+    def __init__(self, name, params, body, closure_scope):
+        self.name = name
+        self.params = params
+        self.body = body
+        self.closure_scope = closure_scope
+
+
+class Scope:
+    def __init__(self, parent=None):
+        self.vars = {}
+        self.parent = parent
+
+    def find(self, name):
+        if name in self.vars:
+            return self.vars[name]
+
+        if self.parent is not None:
+            return self.parent.find(name)
+
+        return MISSING
+
+    def set_local(self, name, value):
+        self.vars[name] = value
+
+    def set_global(self, name, value):
+        root = self
+
+        while root.parent is not None:
+            root = root.parent
+
+        root.vars[name] = value
+
+    def get_global_scope(self):
+        root = self
+
+        while root.parent is not None:
+            root = root.parent
+
+        return root
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\tokens.py
+鏂囦欢鍚?   tokens.py
+淇敼鏃堕棿: 08/07/2026 13:23:04
+============================================================
+
+"""脚本词法分析。"""
+
 from .errors import ScriptError
 
 
-# ------------------------------------------------------------
-# 关键字
-# ------------------------------------------------------------
-
 KEYWORDS = {
     # 控制流
-    "repeat": "repeat",
-    "重复": "repeat",
-
-    "for": "for",
-    "遍历": "for",
-
-    "from": "from",
-    "从": "from",
-
-    "to": "to",
-    "到": "to",
-
     "if": "if",
     "如果": "if",
 
@@ -896,12 +3315,41 @@ KEYWORDS = {
     "else": "else",
     "否则": "else",
 
-    # 变量
+    "repeat": "repeat",
+    "重复": "repeat",
+
+    "for": "for",
+    "遍历": "for",
+    "对于": "for",
+
+    "from": "from",
+    "从": "from",
+
+    "to": "to",
+    "到": "to",
+
+    # 函数
+    "func": "func",
+    "函数": "func",
+
+    "return": "return",
+    "返回": "return",
+
+    # 导入
+    "import": "import",
+    "导入": "import",
+
+    # 等待
+    "wait": "wait",
+    "等待": "wait",
+
+    # 删除
+    "delete": "delete",
+    "删除": "delete",
+
+    # 全局
     "global": "global",
     "全局": "global",
-
-    "set": "set",
-    "设置": "set",
 
     # 布尔
     "true": "true",
@@ -921,212 +3369,19 @@ KEYWORDS = {
     "not": "not",
     "非": "not",
 
-    # 命令
-    "add": "add",
-    "新增": "add",
-    "添加": "add",
+    # 删除范围
+    "all": "all",
+    "所有": "all",
 
-    "delete": "delete",
-    "删除": "delete",
-
-    "print": "print",
-    "打印": "print",
-
-    # 图元
-    "point": "point",
-    "点": "point",
-
-    "segment": "segment",
-    "线段": "segment",
-
-    "line": "line",
-    "直线": "line",
-
-    "circle": "circle",
-    "圆": "circle",
-
-    "polygon": "polygon",
-    "多边形": "polygon",
-
-    "text": "text",
-    "文本": "text",
-
-    # 介词
-    "at": "at",
-    "在": "at",
-
-    "center": "center",
-    "圆心": "center",
-
-    "radius": "radius",
-    "半径": "radius",
-
-    "points": "points",
-    "点集": "points",
-
-    "object": "object",
-    "对象": "object",
+    "created_by_script": "created",
+    "脚本创建": "created",
 }
 
 
-# ------------------------------------------------------------
-# AST 节点
-# ------------------------------------------------------------
+def tokenize(src):
+    """返回 token 列表：(type, value, line)。"""
 
-class Node:
-    line: int = 0
-
-
-class Program(Node):
-    def __init__(self, statements: List[Node]):
-        self.statements = statements
-
-
-class Repeat(Node):
-    def __init__(self, count: Node, body: List[Node], line: int = 0):
-        self.count = count
-        self.body = body
-        self.line = line
-
-
-class ForRange(Node):
-    def __init__(self, var: str, start: Node, end: Node, body: List[Node], line: int = 0):
-        self.var = var
-        self.start = start
-        self.end = end
-        self.body = body
-        self.line = line
-
-
-class If(Node):
-    def __init__(self, branches: List[Tuple[Node, List[Node]]], else_body: Optional[List[Node]], line: int = 0):
-        self.branches = branches
-        self.else_body = else_body
-        self.line = line
-
-
-class Assign(Node):
-    def __init__(self, name: str, expr: Node, scope: str = "local", line: int = 0):
-        self.name = name
-        self.expr = expr
-        self.scope = scope
-        self.line = line
-
-
-class Print(Node):
-    def __init__(self, expr: Optional[Node], line: int = 0):
-        self.expr = expr
-        self.line = line
-
-
-class AddPoint(Node):
-    def __init__(self, name: str, x: Node, y: Node, line: int = 0):
-        self.name = name
-        self.x = x
-        self.y = y
-        self.line = line
-
-
-class AddSegment(Node):
-    def __init__(self, name: str, a: str, b: str, line: int = 0):
-        self.name = name
-        self.a = a
-        self.b = b
-        self.line = line
-
-
-class AddLine(Node):
-    def __init__(self, name: str, a: str, b: str, line: int = 0):
-        self.name = name
-        self.a = a
-        self.b = b
-        self.line = line
-
-
-class AddCircle(Node):
-    def __init__(self, name: str, center: str, radius: Node, line: int = 0):
-        self.name = name
-        self.center = center
-        self.radius = radius
-        self.line = line
-
-
-class AddPolygon(Node):
-    def __init__(self, name: str, point_names: List[str], line: int = 0):
-        self.name = name
-        self.point_names = point_names
-        self.line = line
-
-
-class AddText(Node):
-    def __init__(self, name: str, x: Node, y: Node, text_expr: Node, line: int = 0):
-        self.name = name
-        self.x = x
-        self.y = y
-        self.text_expr = text_expr
-        self.line = line
-
-
-class DeleteObject(Node):
-    def __init__(self, name: str, line: int = 0):
-        self.name = name
-        self.line = line
-
-
-# 表达式节点
-
-class Num(Node):
-    def __init__(self, value: float, line: int = 0):
-        self.value = value
-        self.line = line
-
-
-class Str(Node):
-    def __init__(self, value: str, line: int = 0):
-        self.value = value
-        self.line = line
-
-
-class Bool(Node):
-    def __init__(self, value: bool, line: int = 0):
-        self.value = value
-        self.line = line
-
-
-class Var(Node):
-    def __init__(self, name: str, line: int = 0):
-        self.name = name
-        self.line = line
-
-
-class Bin(Node):
-    def __init__(self, op: str, left: Node, right: Node, line: int = 0):
-        self.op = op
-        self.left = left
-        self.right = right
-        self.line = line
-
-
-class Unary(Node):
-    def __init__(self, op: str, operand: Node, line: int = 0):
-        self.op = op
-        self.operand = operand
-        self.line = line
-
-
-class Call(Node):
-    def __init__(self, name: str, args: List[Node], line: int = 0):
-        self.name = name
-        self.args = args
-        self.line = line
-
-
-# ------------------------------------------------------------
-# 词法分析
-# ------------------------------------------------------------
-
-def tokenize(src: str) -> List[Tuple[str, Any, int]]:
-    tokens: List[Tuple[str, Any, int]] = []
+    tokens = []
     i = 0
     line = 1
     n = len(src)
@@ -1161,12 +3416,14 @@ def tokenize(src: str) -> List[Tuple[str, Any, int]]:
             while i < n and src[i] != quote:
                 if src[i] == "\\" and i + 1 < n:
                     nxt = src[i + 1]
+
                     if nxt == "n":
                         buf.append("\n")
                     elif nxt == "t":
                         buf.append("\t")
                     else:
                         buf.append(nxt)
+
                     i += 2
                     continue
 
@@ -1194,12 +3451,13 @@ def tokenize(src: str) -> List[Tuple[str, Any, int]]:
                 j += 1
 
             text = src[i:j]
+
             try:
-                val = float(text)
+                value = float(text)
             except Exception:
                 raise ScriptError(f"非法数字：{text}", line)
 
-            tokens.append(("NUM", val, line))
+            tokens.append(("NUM", value, line))
             i = j
             continue
 
@@ -1239,6 +3497,8 @@ def tokenize(src: str) -> List[Tuple[str, Any, int]]:
             tokens.append(("RPAREN", ch, line))
         elif ch == ",":
             tokens.append(("COMMA", ch, line))
+        elif ch == ".":
+            tokens.append(("DOT", ch, line))
         elif ch == "=":
             tokens.append(("ASSIGN", ch, line))
         elif ch in single_ops:
@@ -1252,1146 +3512,359 @@ def tokenize(src: str) -> List[Tuple[str, Any, int]]:
     return tokens
 
 
-# ------------------------------------------------------------
-# 语法分析
-# ------------------------------------------------------------
-
-class Parser:
-    def __init__(self, tokens: List[Tuple[str, Any, int]]):
-        self.toks = tokens
-        self.i = 0
-
-    # ---------- 基础 ----------
-
-    def peek(self) -> Tuple[str, Any, int]:
-        return self.toks[self.i]
-
-    def advance(self) -> Tuple[str, Any, int]:
-        t = self.toks[self.i]
-        self.i += 1
-        return t
-
-    def at(self, ty: str, val: Optional[str] = None) -> bool:
-        t = self.peek()
-        if t[0] != ty:
-            return False
-        if val is not None and t[1] != val:
-            return False
-        return True
-
-    def error(self, msg: str):
-        t = self.peek()
-        raise ScriptError(msg, t[2])
-
-    def expect(self, ty: str, val: Optional[str] = None) -> Tuple[str, Any, int]:
-        if not self.at(ty, val):
-            t = self.peek()
-            if val is None:
-                self.error(f"期望 {ty}，实际得到 {t[0]}:{t[1]}")
-            else:
-                self.error(f"期望 {val}，实际得到 {t[1]}")
-        return self.advance()
-
-    def expect_key(self, key: str) -> Tuple[str, Any, int]:
-        return self.expect("KEY", key)
-
-    # ---------- 入口 ----------
-
-    def parse_program(self) -> Program:
-        stmts = []
-
-        while not self.at("EOF"):
-            stmts.append(self.parse_statement())
-
-        return Program(stmts)
-
-    # ---------- 语句 ----------
-
-    def parse_statement(self) -> Node:
-        t = self.peek()
-
-        if t[0] == "KEY":
-            key = t[1]
-
-            if key == "repeat":
-                return self.parse_repeat()
-
-            if key == "for":
-                return self.parse_for()
-
-            if key == "if":
-                return self.parse_if()
-
-            if key == "global":
-                return self.parse_global()
-
-            if key == "set":
-                return self.parse_set()
-
-            if key == "print":
-                return self.parse_print()
-
-            if key == "add":
-                return self.parse_add()
-
-            if key == "delete":
-                return self.parse_delete()
-
-        if t[0] == "ID":
-            nxt = self.toks[self.i + 1]
-            if nxt[0] == "ASSIGN":
-                return self.parse_assign(scope="local")
-
-        self.error(f"无法识别的语句：{t[1]}")
-
-    def parse_block(self) -> List[Node]:
-        self.expect("LBRACE")
-        stmts = []
-
-        while not self.at("RBRACE") and not self.at("EOF"):
-            stmts.append(self.parse_statement())
-
-        self.expect("RBRACE")
-        return stmts
-
-    def parse_repeat(self) -> Repeat:
-        line = self.peek()[2]
-        self.expect_key("repeat")
-        count = self.parse_expr()
-        body = self.parse_block()
-
-        return Repeat(count, body, line)
-
-    def parse_for(self) -> ForRange:
-        line = self.peek()[2]
-        self.expect_key("for")
-
-        var = self.expect("ID")[1]
-
-        self.expect_key("from")
-        start = self.parse_expr()
-
-        self.expect_key("to")
-        end = self.parse_expr()
-
-        body = self.parse_block()
-
-        return ForRange(var, start, end, body, line)
-
-    def parse_if(self) -> If:
-        line = self.peek()[2]
-        branches = []
-
-        self.expect_key("if")
-        cond = self.parse_expr()
-        body = self.parse_block()
-        branches.append((cond, body))
-
-        while self.at("KEY", "elif"):
-            self.advance()
-            cond = self.parse_expr()
-            body = self.parse_block()
-            branches.append((cond, body))
-
-        else_body = None
-
-        if self.at("KEY", "else"):
-            self.advance()
-            else_body = self.parse_block()
-
-        return If(branches, else_body, line)
-
-    def parse_global(self) -> Assign:
-        line = self.peek()[2]
-        self.expect_key("global")
-        name = self.expect("ID")[1]
-        self.expect("ASSIGN")
-        expr = self.parse_expr()
-
-        return Assign(name, expr, scope="global", line=line)
-
-    def parse_set(self) -> Assign:
-        line = self.peek()[2]
-        self.expect_key("set")
-        name = self.expect("ID")[1]
-        self.expect("ASSIGN")
-        expr = self.parse_expr()
-
-        # set 也视为写全局变量
-        return Assign(name, expr, scope="global", line=line)
-
-    def parse_assign(self, scope: str = "local") -> Assign:
-        line = self.peek()[2]
-        name = self.expect("ID")[1]
-        self.expect("ASSIGN")
-        expr = self.parse_expr()
-
-        return Assign(name, expr, scope=scope, line=line)
-
-    def parse_print(self) -> Print:
-        line = self.peek()[2]
-        self.expect_key("print")
-
-        expr = None
-
-        if self.at("LPAREN"):
-            self.advance()
-
-            if not self.at("RPAREN"):
-                expr = self.parse_expr()
-
-            self.expect("RPAREN")
-        else:
-            expr = self.parse_expr()
-
-        return Print(expr, line)
-
-    # ---------- add 命令 ----------
-
-    def parse_add(self) -> Node:
-        line = self.peek()[2]
-        self.expect_key("add")
-
-        t = self.peek()
-
-        if t[0] != "KEY":
-            self.error("add 后需要指定对象类型：point/segment/line/circle/polygon/text")
-
-        kind = t[1]
-
-        if kind == "point":
-            return self.parse_add_point(line)
-
-        if kind == "segment":
-            return self.parse_add_segment(line)
-
-        if kind == "line":
-            return self.parse_add_line(line)
-
-        if kind == "circle":
-            return self.parse_add_circle(line)
-
-        if kind == "polygon":
-            return self.parse_add_polygon(line)
-
-        if kind == "text":
-            return self.parse_add_text(line)
-
-        self.error(f"暂不支持 add {kind}")
-
-    def parse_add_point(self, line: int) -> AddPoint:
-        self.expect_key("point")
-        name = self.expect("ID")[1]
-        self.expect_key("at")
-        self.expect("LPAREN")
-        x = self.parse_expr()
-        self.expect("COMMA")
-        y = self.parse_expr()
-        self.expect("RPAREN")
-
-        return AddPoint(name, x, y, line)
-
-    def parse_add_segment(self, line: int) -> AddSegment:
-        self.expect_key("segment")
-        name = self.expect("ID")[1]
-        self.expect_key("from")
-        a = self.expect("ID")[1]
-        self.expect_key("to")
-        b = self.expect("ID")[1]
-
-        return AddSegment(name, a, b, line)
-
-    def parse_add_line(self, line: int) -> AddLine:
-        self.expect_key("line")
-        name = self.expect("ID")[1]
-        self.expect_key("from")
-        a = self.expect("ID")[1]
-        self.expect_key("to")
-        b = self.expect("ID")[1]
-
-        return AddLine(name, a, b, line)
-
-    def parse_add_circle(self, line: int) -> AddCircle:
-        self.expect_key("circle")
-        name = self.expect("ID")[1]
-        self.expect_key("center")
-        center = self.expect("ID")[1]
-        self.expect_key("radius")
-        radius = self.parse_expr()
-
-        return AddCircle(name, center, radius, line)
-
-    def parse_add_polygon(self, line: int) -> AddPolygon:
-        self.expect_key("polygon")
-        name = self.expect("ID")[1]
-        self.expect_key("points")
-
-        names = [self.expect("ID")[1]]
-
-        while self.at("COMMA"):
-            self.advance()
-            names.append(self.expect("ID")[1])
-
-        return AddPolygon(name, names, line)
-
-    def parse_add_text(self, line: int) -> AddText:
-        self.expect_key("text")
-        name = self.expect("ID")[1]
-        self.expect_key("at")
-        self.expect("LPAREN")
-        x = self.parse_expr()
-        self.expect("COMMA")
-        y = self.parse_expr()
-        self.expect("RPAREN")
-
-        text_expr = self.parse_expr()
-
-        return AddText(name, x, y, text_expr, line)
-
-    # ---------- delete ----------
-
-    def parse_delete(self) -> DeleteObject:
-        line = self.peek()[2]
-        self.expect_key("delete")
-
-        # delete point P / delete object P / delete P 都允许
-        if self.at("KEY", "point") or self.at("KEY", "object"):
-            self.advance()
-
-        name = self.expect("ID")[1]
-
-        return DeleteObject(name, line)
-
-    # ---------- 表达式 ----------
-
-    def parse_expr(self) -> Node:
-        return self.parse_or()
-
-    def parse_or(self) -> Node:
-        left = self.parse_and()
-
-        while self.at("KEY", "or"):
-            line = self.peek()[2]
-            self.advance()
-            right = self.parse_and()
-            left = Bin("or", left, right, line)
-
-        return left
-
-    def parse_and(self) -> Node:
-        left = self.parse_not()
-
-        while self.at("KEY", "and"):
-            line = self.peek()[2]
-            self.advance()
-            right = self.parse_not()
-            left = Bin("and", left, right, line)
-
-        return left
-
-    def parse_not(self) -> Node:
-        if self.at("KEY", "not"):
-            line = self.peek()[2]
-            self.advance()
-            return Unary("not", self.parse_not(), line)
-
-        return self.parse_comparison()
-
-    def parse_comparison(self) -> Node:
-        left = self.parse_addition()  # ★ 改名
-
-        while self.at("OP") and self.peek()[1] in (">", "<", ">=", "<=", "==", "!="):
-            op = self.advance()[1]
-            right = self.parse_addition()  # ★ 改名
-            left = Bin(op, left, right, left.line)
-
-        return left
-
-    def parse_addition(self) -> Node:  # ★ 改名，避免与语句解析的 parse_add 冲突
-        left = self.parse_mul()
-
-        while self.at("OP") and self.peek()[1] in ("+", "-"):
-            op = self.advance()[1]
-            right = self.parse_mul()
-            left = Bin(op, left, right, left.line)
-
-        return left
-
-    def parse_mul(self) -> Node:
-        left = self.parse_power()
-
-        while self.at("OP") and self.peek()[1] in ("*", "/", "%"):
-            op = self.advance()[1]
-            right = self.parse_power()
-            left = Bin(op, left, right, left.line)
-
-        return left
-
-    def parse_power(self) -> Node:
-        left = self.parse_unary()
-
-        if self.at("OP", "^"):
-            line = self.peek()[2]
-            self.advance()
-            right = self.parse_power()
-            return Bin("^", left, right, line)
-
-        return left
-
-    def parse_unary(self) -> Node:
-        if self.at("OP") and self.peek()[1] in ("+", "-"):
-            op = self.advance()[1]
-            return Unary(op, self.parse_unary(), self.peek()[2])
-
-        return self.parse_primary()
-
-    def parse_primary(self) -> Node:
-        t = self.peek()
-
-        if t[0] == "NUM":
-            self.advance()
-            return Num(t[1], t[2])
-
-        if t[0] == "STR":
-            self.advance()
-            return Str(t[1], t[2])
-
-        if t[0] == "KEY" and t[1] == "true":
-            self.advance()
-            return Bool(True, t[2])
-
-        if t[0] == "KEY" and t[1] == "false":
-            self.advance()
-            return Bool(False, t[2])
-
-        if t[0] == "ID":
-            name = self.advance()[1]
-
-            # 支持 sin(x), sqrt(x) 等数学函数
-            if self.at("LPAREN"):
-                self.advance()
-                args = []
-
-                if not self.at("RPAREN"):
-                    args.append(self.parse_expr())
-
-                    while self.at("COMMA"):
-                        self.advance()
-                        args.append(self.parse_expr())
-
-                self.expect("RPAREN")
-                return Call(name, args, t[2])
-
-            return Var(name, t[2])
-
-        if t[0] == "LPAREN":
-            self.advance()
-            expr = self.parse_expr()
-            self.expect("RPAREN")
-            return expr
-
-        self.error(f"非法表达式：{t[1]}")
-
-
-def parse(src: str) -> Program:
-    tokens = tokenize(src)
-    return Parser(tokens).parse_program()
-
-
-============================================================
-鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\runtime.py
-鏂囦欢鍚?   runtime.py
-淇敼鏃堕棿: 08/06/2026 15:58:28
-============================================================
-
-"""GeoSketch 脚本运行时。
-
-职责：
-- 执行 AST
-- 管理局部变量 / 全局变量
-- 管理脚本创建对象
-- 处理 __keep
-- 控制最大执行步数
-"""
-
-from core.variables import FUNCS, CONSTS
-
-from .errors import ScriptError
-from .parser import (
-    Program, Repeat, ForRange, If, Assign, Print,
-    AddPoint, AddSegment, AddLine, AddCircle, AddPolygon, AddText,
-    DeleteObject,
-    Num, Str, Bool, Var, Bin, Unary, Call
-)
-
-
-class ScriptRuntime:
-    MAX_STEPS = 100000
-
-    def __init__(self, doc, canvas=None, owner_id=None):
-        self.doc = doc
-        self.canvas = canvas
-        self.owner_id = owner_id
-
-        self.locals = {}
-        self.globals = {}
-
-        # 脚本内对象引用表：脚本名 -> GeoObject
-        self.refs = {}
-
-        self.created = []
-        self.deleted = []
-        self.logs = []
-
-        self.steps = 0
-        self.keep = False
-        self.allow_existing = False
-        self.error = None
-
-    # ------------------------------------------------------------
-    # 执行入口
-    # ------------------------------------------------------------
-
-    def execute(self, program: Program):
-        try:
-            for stmt in program.statements:
-                self._step(stmt)
-                self.exec_stmt(stmt)
-
-            self._finalize_success()
-
-        except ScriptError as e:
-            self.error = e
-            self._finalize_error()
-
-        except Exception as e:
-            self.error = ScriptError(str(e))
-            self._finalize_error()
-
-        return self
-
-    def _finalize_success(self):
-        keep_val = self.locals.get(
-            "__keep",
-            self.globals.get("__keep", False)
-        )
-
-        self.keep = self._truth(keep_val)
-
-        self._apply_globals()
-
-        if not self.keep:
-            self._remove_created()
-
-        self.doc.changed.emit()
-
-    def _finalize_error(self):
-        # 出错时不保留临时对象
-        self._remove_created()
-        self.doc.changed.emit()
-
-    # ------------------------------------------------------------
-    # 基础工具
-    # ------------------------------------------------------------
-
-    def _step(self, node=None):
-        self.steps += 1
-
-        if self.steps > self.MAX_STEPS:
-            line = getattr(node, "line", None)
-            raise ScriptError(f"超过最大执行步数 {self.MAX_STEPS}", line)
-
-    def _truth(self, value):
-        if isinstance(value, bool):
-            return value
-
-        if isinstance(value, (int, float)):
-            return float(value) != 0.0
-
-        if isinstance(value, str):
-            return len(value) > 0
-
-        return bool(value)
-
-    def _as_number(self, value, line=None):
-        if isinstance(value, bool):
-            return 1.0 if value else 0.0
-
-        if isinstance(value, (int, float)):
-            return float(value)
-
-        raise ScriptError("此处需要数值", line)
-
-    def _format_value(self, value):
-        if isinstance(value, float):
-            if abs(value - round(value)) < 1e-9:
-                return str(int(round(value)))
-            return f"{value:.6g}"
-
-        return str(value)
-
-    # ------------------------------------------------------------
-    # 变量
-    # ------------------------------------------------------------
-
-    def lookup_var(self, name, line=None):
-        if name in self.locals:
-            return self.locals[name]
-
-        if name in self.globals:
-            return self.globals[name]
-
-        # 全局变量系统
-        var = self.doc.vars.get_var(name)
-        if var is not None:
-            return var.value
-
-        if name in CONSTS:
-            return CONSTS[name]
-
-        raise ScriptError(f"未定义变量：{name}", line)
-
-    def _apply_globals(self):
-        store = self.doc.vars
-
-        if not self.globals:
-            return
-
-        store.blockSignals(True)
-
-        try:
-            for name, value in self.globals.items():
-                # __keep 是脚本内部特殊变量，不写入全局变量面板
-                if name == "__keep":
-                    continue
-
-                if isinstance(value, bool):
-                    value = 1.0 if value else 0.0
-
-                if not isinstance(value, (int, float)):
-                    continue
-
-                value = float(value)
-
-                if store.get_var(name) is not None:
-                    store.set(name, value)
-                else:
-                    store.define(
-                        name=name,
-                        value=value,
-                        vmin=value - 10.0,
-                        vmax=value + 10.0,
-                        expr=""
-                    )
-        finally:
-            store.blockSignals(False)
-
-        store.changed.emit()
-
-    # ------------------------------------------------------------
-    # 对象引用 / 创建 / 删除
-    # ------------------------------------------------------------
-
-    def resolve_ref(self, name, line=None):
-        obj = self.refs.get(name)
-
-        if obj is not None and obj in self.doc.objects:
-            return obj
-
-        obj = self.doc.names.get(name)
-
-        if obj is None:
-            raise ScriptError(f"找不到对象：{name}", line)
-
-        return obj
-
-    def _prepare_name(self, script_name, line=None):
-        """重复运行脚本时，默认先删除上一次由本脚本创建的同名对象。"""
-        old = self.refs.get(script_name)
-
-        if old is None:
-            old = self.doc.names.get(script_name)
-
-        if old is None:
-            return
-
-        owned = getattr(old, "script_owner", None) == self.owner_id
-
-        if owned:
-            self._delete_object(old, force=True)
-        else:
-            # 不是本脚本创建的对象：不删除，由 Document 自动重命名新对象
-            return
-
-    def _register_created(self, obj, script_name):
-        if script_name:
-            obj.script_owner = self.owner_id
-            obj.script_name = script_name
-            obj.name = script_name
-
-        self.doc._add(obj)
-
-        self.created.append(obj)
-
-        if script_name:
-            self.refs[script_name] = obj
-
-    def _delete_object(self, obj, force=False, line=None):
-        if obj not in self.doc.objects:
-            return
-
-        owned = getattr(obj, "script_owner", None) == self.owner_id
-
-        if not owned and not force and not self.allow_existing:
-            raise ScriptError(
-                "当前脚本不能删除已有对象。只有 __keep = true 时才允许修改/删除已有对象。",
-                line
-            )
-
-        doomed = self.doc._remove(obj)
-
-        for d in doomed:
-            if d in self.created:
-                self.created.remove(d)
-
-            for k, v in list(self.refs.items()):
-                if v is d:
-                    del self.refs[k]
-
-            self.deleted.append(d)
-
-    def _remove_created(self):
-        for obj in list(self.created):
-            if obj in self.doc.objects:
-                doomed = self.doc._remove(obj)
-
-                for d in doomed:
-                    if d in self.created:
-                        self.created.remove(d)
-
-                    for k, v in list(self.refs.items()):
-                        if v is d:
-                            del self.refs[k]
-
-    # ------------------------------------------------------------
-    # 语句执行
-    # ------------------------------------------------------------
-
-    def exec_stmt(self, stmt):
-        if isinstance(stmt, Repeat):
-            return self.exec_repeat(stmt)
-
-        if isinstance(stmt, ForRange):
-            return self.exec_for(stmt)
-
-        if isinstance(stmt, If):
-            return self.exec_if(stmt)
-
-        if isinstance(stmt, Assign):
-            return self.exec_assign(stmt)
-
-        if isinstance(stmt, Print):
-            return self.exec_print(stmt)
-
-        if isinstance(stmt, AddPoint):
-            return self.exec_add_point(stmt)
-
-        if isinstance(stmt, AddSegment):
-            return self.exec_add_segment(stmt)
-
-        if isinstance(stmt, AddLine):
-            return self.exec_add_line(stmt)
-
-        if isinstance(stmt, AddCircle):
-            return self.exec_add_circle(stmt)
-
-        if isinstance(stmt, AddPolygon):
-            return self.exec_add_polygon(stmt)
-
-        if isinstance(stmt, AddText):
-            return self.exec_add_text(stmt)
-
-        if isinstance(stmt, DeleteObject):
-            return self.exec_delete(stmt)
-
-        raise ScriptError("未知语句", getattr(stmt, "line", None))
-
-    def exec_block(self, block):
-        for stmt in block:
-            self._step(stmt)
-            self.exec_stmt(stmt)
-
-    def exec_repeat(self, stmt):
-        count = self.eval_expr(stmt.count)
-        count = int(self._as_number(count, stmt.line))
-
-        if count <= 0:
-            return
-
-        for _ in range(count):
-            self._step(stmt)
-            self.exec_block(stmt.body)
-
-    def exec_for(self, stmt):
-        start = int(self._as_number(self.eval_expr(stmt.start), stmt.line))
-        end = int(self._as_number(self.eval_expr(stmt.end), stmt.line))
-
-        if start <= end:
-            it = range(start, end + 1)
-        else:
-            it = range(start, end - 1, -1)
-
-        for i in it:
-            self._step(stmt)
-            self.locals[stmt.var] = float(i)
-            self.exec_block(stmt.body)
-
-    def exec_if(self, stmt):
-        for cond, body in stmt.branches:
-            if self._truth(self.eval_expr(cond)):
-                self.exec_block(body)
-                return
-
-        if stmt.else_body is not None:
-            self.exec_block(stmt.else_body)
-
-    def exec_assign(self, stmt):
-        value = self.eval_expr(stmt.expr)
-
-        if stmt.scope == "global":
-            self.globals[stmt.name] = value
-        else:
-            self.locals[stmt.name] = value
-
-        if stmt.name == "__keep":
-            self.allow_existing = self._truth(value)
-
-    def exec_print(self, stmt):
-        if stmt.expr is None:
-            self.logs.append("")
-            return
-
-        value = self.eval_expr(stmt.expr)
-        text = self._format_value(value)
-        self.logs.append(text)
-
-        if self.canvas is not None and hasattr(self.canvas, "cursor_info"):
-            self.canvas.cursor_info.emit(text)
-
-    # ------------------------------------------------------------
-    # 几何命令
-    # ------------------------------------------------------------
-
-    def exec_add_point(self, stmt):
-        from geo.points import FreePoint
-
-        x = self._as_number(self.eval_expr(stmt.x), stmt.line)
-        y = self._as_number(self.eval_expr(stmt.y), stmt.line)
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        obj = FreePoint(x, y)
-        self._register_created(obj, stmt.name)
-
-    def exec_add_segment(self, stmt):
-        from geo.segments import Segment
-        from geo.points import AbstractPoint
-
-        a = self.resolve_ref(stmt.a, stmt.line)
-        b = self.resolve_ref(stmt.b, stmt.line)
-
-        if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
-            raise ScriptError("线段两端必须是点对象", stmt.line)
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        obj = Segment(a, b)
-        self._register_created(obj, stmt.name)
-
-    def exec_add_line(self, stmt):
-        from plugins.line_tool import Line
-        from geo.points import AbstractPoint
-
-        a = self.resolve_ref(stmt.a, stmt.line)
-        b = self.resolve_ref(stmt.b, stmt.line)
-
-        if not isinstance(a, AbstractPoint) or not isinstance(b, AbstractPoint):
-            raise ScriptError("直线需要两个点对象", stmt.line)
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        obj = Line(a, b)
-        self._register_created(obj, stmt.name)
-
-    def exec_add_circle(self, stmt):
-        from geo.constraints import ExprCircle
-        from geo.points import AbstractPoint
-
-        center = self.resolve_ref(stmt.center, stmt.line)
-
-        if not isinstance(center, AbstractPoint):
-            raise ScriptError("圆心必须是点对象", stmt.line)
-
-        # 如果半径写成字符串，例如 radius "a+1"，则作为表达式圆处理
-        if isinstance(stmt.radius, Str):
-            expr = stmt.radius.value
-        else:
-            value = self._as_number(self.eval_expr(stmt.radius), stmt.line)
-            expr = str(value)
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        obj = ExprCircle(center, expr)
-        self._register_created(obj, stmt.name)
-
-    def exec_add_polygon(self, stmt):
-        from geo.chain_fill import ChainFill, Span, FillStyle
-        from geo.points import AbstractPoint
-
-        if len(stmt.point_names) < 3:
-            raise ScriptError("多边形至少需要 3 个点", stmt.line)
-
-        pts = []
-
-        for name in stmt.point_names:
-            p = self.resolve_ref(name, stmt.line)
-
-            if not isinstance(p, AbstractPoint):
-                raise ScriptError(f"{name} 不是点对象", stmt.line)
-
-            pts.append(p)
-
-        spans = []
-
-        for i in range(len(pts) - 1):
-            spans.append(Span(pts[i], pts[i + 1], None))
-
-        spans.append(Span(pts[-1], pts[0], None))
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        style = FillStyle("#4dabf7", 0.35, "solid")
-        obj = ChainFill(spans, style)
-
-        self._register_created(obj, stmt.name)
-
-    def exec_add_text(self, stmt):
-        from plugins.text_tool import TextObject
-
-        x = self._as_number(self.eval_expr(stmt.x), stmt.line)
-        y = self._as_number(self.eval_expr(stmt.y), stmt.line)
-
-        if isinstance(stmt.text_expr, Str):
-            text = stmt.text_expr.value
-        else:
-            text = self._format_value(self.eval_expr(stmt.text_expr))
-
-        self._prepare_name(stmt.name, stmt.line)
-
-        obj = TextObject(
-            text=text,
-            color="#1f2937",
-            size=16,
-            anchor=None,
-            pos=(x, y)
-        )
-
-        self._register_created(obj, stmt.name)
-
-    def exec_delete(self, stmt):
-        obj = self.resolve_ref(stmt.name, stmt.line)
-        self._delete_object(obj, force=False, line=stmt.line)
-
-    # ------------------------------------------------------------
-    # 表达式求值
-    # ------------------------------------------------------------
-
-    def eval_expr(self, node):
-        self._step(node)
-
-        if isinstance(node, Num):
-            return float(node.value)
-
-        if isinstance(node, Str):
-            return node.value
-
-        if isinstance(node, Bool):
-            return node.value
-
-        if isinstance(node, Var):
-            return self.lookup_var(node.name, node.line)
-
-        if isinstance(node, Unary):
-            return self.eval_unary(node)
-
-        if isinstance(node, Bin):
-            return self.eval_bin(node)
-
-        if isinstance(node, Call):
-            return self.eval_call(node)
-
-        raise ScriptError("未知表达式", getattr(node, "line", None))
-
-    def eval_unary(self, node):
-        value = self.eval_expr(node.operand)
-
-        if node.op == "not":
-            return not self._truth(value)
-
-        value = self._as_number(value, node.line)
-
-        if node.op == "-":
-            return -value
-
-        if node.op == "+":
-            return value
-
-        raise ScriptError(f"未知一元运算符：{node.op}", node.line)
-
-    def eval_bin(self, node):
-        op = node.op
-
-        # 逻辑短路
-        if op == "and":
-            left = self.eval_expr(node.left)
-            if not self._truth(left):
-                return False
-            return self._truth(self.eval_expr(node.right))
-
-        if op == "or":
-            left = self.eval_expr(node.left)
-            if self._truth(left):
-                return True
-            return self._truth(self.eval_expr(node.right))
-
-        left = self.eval_expr(node.left)
-        right = self.eval_expr(node.right)
-
-        # 比较
-        if op in ("==", "!=", "<", "<=", ">", ">="):
-            return self.compare(op, left, right, node.line)
-
-        # 算术
-        a = self._as_number(left, node.line)
-        b = self._as_number(right, node.line)
-
-        if op == "+":
-            return a + b
-
-        if op == "-":
-            return a - b
-
-        if op == "*":
-            return a * b
-
-        if op == "/":
-            if abs(b) < 1e-12:
-                raise ScriptError("除数为 0", node.line)
-            return a / b
-
-        if op == "%":
-            if abs(b) < 1e-12:
-                raise ScriptError("模运算除数为 0", node.line)
-            return a % b
-
-        if op == "^":
-            return a ** b
-
-        raise ScriptError(f"未知运算符：{op}", node.line)
-
-    def compare(self, op, left, right, line=None):
-        # 字符串比较
-        if isinstance(left, str) or isinstance(right, str):
-            if op == "==":
-                return str(left) == str(right)
-            if op == "!=":
-                return str(left) != str(right)
-            raise ScriptError("字符串只能使用 == 或 !=", line)
-
-        a = self._as_number(left, line)
-        b = self._as_number(right, line)
-
-        if op == "==":
-            return abs(a - b) < 1e-12
-
-        if op == "!=":
-            return abs(a - b) >= 1e-12
-
-        if op == "<":
-            return a < b
-
-        if op == "<=":
-            return a <= b
-
-        if op == ">":
-            return a > b
-
-        if op == ">=":
-            return a >= b
-
-        raise ScriptError(f"未知比较运算符：{op}", line)
-
-    def eval_call(self, node):
-        name = node.name
-
-        if name not in FUNCS:
-            raise ScriptError(f"不支持的函数：{name}", node.line)
-
-        args = []
-
-        for arg in node.args:
-            v = self.eval_expr(arg)
-            args.append(self._as_number(v, node.line))
-
-        try:
-            return float(FUNCS[name](*args))
-        except Exception as e:
-            raise ScriptError(f"函数 {name} 计算失败：{e}", node.line)
-
-
-# ------------------------------------------------------------
-# 对外入口
-# ------------------------------------------------------------
-
-def run_script(doc, script, owner_id=None, canvas=None):
-    """执行一段脚本。返回 ScriptRuntime。"""
-    from .parser import parse
-
-    try:
-        program = parse(script)
-    except ScriptError as e:
-        if canvas is not None and hasattr(canvas, "cursor_info"):
-            canvas.cursor_info.emit(f"脚本错误：{e}")
-        return None
-
-    rt = ScriptRuntime(doc, canvas=canvas, owner_id=owner_id)
-
-    doc.begin_action()
-
-    try:
-        rt.execute(program)
-    finally:
-        doc.end_action()
-
-    if rt.error is not None:
-        if canvas is not None and hasattr(canvas, "cursor_info"):
-            canvas.cursor_info.emit(f"脚本错误：{rt.error}")
-    else:
-        if rt.logs and canvas is not None and hasattr(canvas, "cursor_info"):
-            canvas.cursor_info.emit(" | ".join(rt.logs))
-
-    return rt
-
-
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\__init__.py
 鏂囦欢鍚?   __init__.py
-淇敼鏃堕棿: 08/06/2026 15:57:01
+淇敼鏃堕棿: 08/07/2026 13:26:08
 ============================================================
+
+"""GeoSketch 脚本系统入口。"""
 
 from .errors import ScriptError
 from .parser import parse
-from .runtime import ScriptRuntime, run_script
+from .interpreter import Interpreter
+
+
+class _ParseErrorResult:
+    def __init__(self, error):
+        self.error = error
+        self.logs = []
+
+
+def register_script_library(doc, name, source):
+    """注册用户脚本库。
+
+    示例：
+        register_script_library(doc, "mylib", '''
+        func double(x) {
+            return x * 2
+        }
+        ''')
+    """
+
+    if not hasattr(doc, "script_libs"):
+        doc.script_libs = {}
+
+    doc.script_libs[name] = source
+
+
+def run_script(doc, script, owner_id=None, canvas=None):
+    """执行一段脚本。"""
+
+    try:
+        program = parse(script)
+
+    except ScriptError as e:
+        if canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(f"脚本错误：{e}")
+
+        return _ParseErrorResult(e)
+
+    interp = Interpreter(doc, canvas=canvas, owner_id=owner_id)
+    interp.run(program)
+
+    if interp.error is not None:
+        if canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(f"脚本错误：{interp.error}")
+
+    else:
+        if interp.logs and canvas is not None and hasattr(canvas, "cursor_info"):
+            canvas.cursor_info.emit(" | ".join(interp.logs))
+
+    return interp
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\libraries\doc_lib.py
+鏂囦欢鍚?   doc_lib.py
+淇敼鏃堕棿: 08/07/2026 13:25:21
+============================================================
+
+"""doc 内置库。"""
+
+
+def build_doc_lib(interp):
+    def delete(obj):
+        interp.destructor.delete_object(obj)
+
+    def delete_all():
+        interp.destructor.delete_all("all")
+
+    def delete_script_created():
+        interp.destructor.delete_all("created")
+
+    def find(name):
+        for obj in interp.doc.objects:
+            if getattr(obj, "script_name", None) == name:
+                return obj
+
+            if getattr(obj, "name", None) == name:
+                return obj
+
+        return None
+
+    return {
+        "delete": delete,
+        "delete_all": delete_all,
+        "delete_script_created": delete_script_created,
+        "find": find,
+    }
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\libraries\draw_lib.py
+鏂囦欢鍚?   draw_lib.py
+淇敼鏃堕棿: 08/07/2026 13:25:12
+============================================================
+
+"""draw 内置库。"""
+
+
+def build_draw_lib(interp):
+    f = interp.factory
+
+    return {
+        "point": f.point,
+        "segment": f.segment,
+        "line": f.line,
+        "ray": f.ray,
+        "circle": f.circle,
+        "ellipse": f.ellipse,
+        "regular_polygon": f.regular_polygon,
+        "polygon": f.polygon,
+        "midpoint": f.midpoint,
+        "division_point": f.division_point,
+        "intersect": f.intersect,
+        "text": f.text,
+
+        "function_curve": f.function_curve,
+        "function": f.function,
+        "parametric": f.parametric,
+        "polar": f.polar,
+    }
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\libraries\geo_lib.py
+鏂囦欢鍚?   geo_lib.py
+淇敼鏃堕棿: 08/07/2026 13:25:03
+============================================================
+
+"""geo 内置库。"""
+
+import math
+
+from ..errors import ScriptError
+
+
+def _vertices(obj):
+    if hasattr(obj, "verts"):
+        return list(obj.verts)
+
+    if hasattr(obj, "path_pts"):
+        return list(obj.path_pts)
+
+    return None
+
+
+def _polygon_area(verts):
+    n = len(verts)
+
+    if n < 3:
+        return 0.0
+
+    s = 0.0
+
+    for i in range(n):
+        x1, y1 = verts[i]
+        x2, y2 = verts[(i + 1) % n]
+        s += x1 * y2 - x2 * y1
+
+    return abs(s) / 2.0
+
+
+def _polygon_perimeter(verts):
+    n = len(verts)
+
+    if n < 2:
+        return 0.0
+
+    total = 0.0
+
+    for i in range(n):
+        x1, y1 = verts[i]
+        x2, y2 = verts[(i + 1) % n]
+        total += math.hypot(x2 - x1, y2 - y1)
+
+    return total
+
+
+def build_geo_lib(interp):
+    def distance(a, b):
+        if not hasattr(a, "x") or not hasattr(b, "x"):
+            raise ScriptError("distance 需要两个点对象")
+
+        return math.hypot(a.x - b.x, a.y - b.y)
+
+    def length(obj):
+        if hasattr(obj, "length") and callable(obj.length):
+            return float(obj.length())
+
+        raise ScriptError("该对象没有长度")
+
+    def slope(obj):
+        a = getattr(obj, "a", None)
+        b = getattr(obj, "b", None)
+
+        if a is None or b is None:
+            raise ScriptError("slope 需要线段或直线对象")
+
+        dx = b.x - a.x
+        dy = b.y - a.y
+
+        if abs(dx) < 1e-12:
+            return 1e18
+
+        return dy / dx
+
+    def radius(obj):
+        if hasattr(obj, "r"):
+            return float(obj.r)
+
+        raise ScriptError("该对象没有半径")
+
+    def area(obj):
+        tn = type(obj).__name__
+
+        if tn in ("Circle", "ExprCircle"):
+            return math.pi * obj.r * obj.r
+
+        if tn == "Ellipse":
+            return math.pi * abs(obj.ux * obj.vy - obj.uy * obj.vx)
+
+        verts = _vertices(obj)
+
+        if verts is not None:
+            return _polygon_area(verts)
+
+        raise ScriptError("该对象不支持面积")
+
+    def perimeter(obj):
+        tn = type(obj).__name__
+
+        if tn in ("Circle", "ExprCircle"):
+            return 2.0 * math.pi * obj.r
+
+        if tn == "Ellipse":
+            a = math.hypot(obj.ux, obj.uy)
+            b = math.hypot(obj.vx, obj.vy)
+
+            if a + b <= 0:
+                return 0.0
+
+            h = ((a - b) ** 2) / ((a + b) ** 2)
+            return math.pi * (a + b) * (1.0 + 3.0 * h / (10.0 + math.sqrt(4.0 - 3.0 * h)))
+
+        verts = _vertices(obj)
+
+        if verts is not None:
+            return _polygon_perimeter(verts)
+
+        raise ScriptError("该对象不支持周长")
+
+    return {
+        "distance": distance,
+        "length": length,
+        "slope": slope,
+        "radius": radius,
+        "area": area,
+        "perimeter": perimeter,
+    }
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\libraries\math_lib.py
+鏂囦欢鍚?   math_lib.py
+淇敼鏃堕棿: 08/07/2026 13:25:37
+============================================================
+
+"""math 内置库。"""
+
+import math
+import random
+
+
+def build_math_lib(interp=None):
+    return {
+        "pi": math.pi,
+        "e": math.e,
+
+        "sin": math.sin,
+        "cos": math.cos,
+        "tan": math.tan,
+
+        "arcsin": math.asin,
+        "arccos": math.acos,
+        "arctan": math.atan,
+
+        "asin": math.asin,
+        "acos": math.acos,
+        "atan": math.atan,
+
+        "sinh": math.sinh,
+        "cosh": math.cosh,
+        "tanh": math.tanh,
+
+        "sqrt": math.sqrt,
+        "abs": abs,
+
+        "ln": math.log,
+        "log": math.log10,
+        "exp": math.exp,
+
+        "cot": lambda x: 1.0 / math.tan(x),
+        "sec": lambda x: 1.0 / math.cos(x),
+        "csc": lambda x: 1.0 / math.sin(x),
+
+        "min": min,
+        "max": max,
+
+        "floor": math.floor,
+        "ceil": math.ceil,
+        "round": lambda x: float(round(x)),
+
+        "random": random.random,
+    }
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\core\scripting\libraries\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/07/2026 13:24:51
+============================================================
+
+"""内置库入口。"""
+
+from .math_lib import build_math_lib
+from .geo_lib import build_geo_lib
+from .draw_lib import build_draw_lib
+from .doc_lib import build_doc_lib
+
+
+def get_builtin_library(name, interp):
+    if name == "math":
+        return build_math_lib(interp)
+
+    if name == "geo":
+        return build_geo_lib(interp)
+
+    if name == "draw":
+        return build_draw_lib(interp)
+
+    if name == "doc":
+        return build_doc_lib(interp)
+
+    return None
 
 
 ============================================================
@@ -3745,7 +5218,7 @@ def _draw_cached(p, obj, view, points):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\geo\function_sampler.py
 鏂囦欢鍚?   function_sampler.py
-淇敼鏃堕棿: 08/05/2026 14:42:45
+淇敼鏃堕棿: 08/06/2026 23:13:59
 ============================================================
 
 """函数曲线子线程采样引擎。
@@ -3791,6 +5264,7 @@ class FunctionSamplerThread(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setObjectName("FunctionSamplerThread")
         self._tasks: dict[int, _SampleTask] = {}   # curve_id → 最新任务（去重）
         self._queue: list[int] = []                 # 待处理 id 队列
         self._mutex = QMutex()
@@ -3808,11 +5282,15 @@ class FunctionSamplerThread(QThread):
         self._mutex.unlock()
 
     def stop(self):
+        """停止后台采样线程。"""
         self._mutex.lock()
         self._running = False
         self._cond.wakeOne()
         self._mutex.unlock()
-        self.wait(2000)
+
+        # ★ 只有线程确实在运行时才等待
+        if self.isRunning():
+            self.wait(5000)
 
     def run(self):
         while True:
@@ -3901,10 +5379,21 @@ _sampler: FunctionSamplerThread | None = None
 
 def get_sampler() -> FunctionSamplerThread:
     global _sampler
+
     if _sampler is None:
         _sampler = FunctionSamplerThread()
         _sampler.start()
+
     return _sampler
+
+
+def shutdown_sampler() -> None:
+    """程序退出时调用，安全终止函数曲线后台采样线程。"""
+    global _sampler
+
+    if _sampler is not None:
+        _sampler.stop()
+        _sampler = None
 
 
 ============================================================
@@ -10029,7 +11518,7 @@ class SegmentTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\tools\select.py
 鏂囦欢鍚?   select.py
-淇敼鏃堕棿: 08/06/2026 16:01:49
+淇敼鏃堕棿: 08/07/2026 12:25:09
 ============================================================
 
 """选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
@@ -10290,14 +11779,28 @@ class SelectTool(Tool):
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
-        # ★ 脚本按钮：没有明显移动则运行
-        if self._click_media is not None and not self._moved:
-            try:
-                self._click_media.run(canvas)
-            except Exception as e:
-                canvas.cursor_info.emit(f"脚本错误：{e}")
-
         if self._drag_undo_begun:
+            # ★ 宏录制：记录拖动结果
+            from core.macro import get_macro_manager
+
+            mm = get_macro_manager()
+
+            if mm is not None and mm.is_recording():
+                if self.drag_poo is not None:
+                    mm.recorder.record_move(self.drag_poo)
+
+                for p in self.drag_pts:
+                    mm.recorder.record_move(p)
+
+                if self.drag_media is not None:
+                    mm.recorder.record_move(self.drag_media)
+
+                if self.resize_media is not None:
+                    mm.recorder.record_move(self.resize_media)
+
+                if self.rotate_media is not None:
+                    mm.recorder.record_move(self.rotate_media)
+
             canvas.doc.end_action()
 
         self._reset()
@@ -11868,7 +13371,7 @@ for _m in pkgutil.iter_modules(__path__):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
 鏂囦欢鍚?   canvas.py
-淇敼鏃堕棿: 08/06/2026 16:02:36
+淇敼鏃堕棿: 08/06/2026 23:06:20
 ============================================================
 
 import math
@@ -12309,7 +13812,32 @@ class Canvas(QWidget):
         self.setCursor(Qt.CursorShape.SizeAllCursor if hover
                        else Qt.CursorShape.ArrowCursor)
         self.update()
-
+        
+    def contextMenuEvent(self, ev):
+        """右键菜单：支持脚本按钮编辑、对象删除等。"""
+        from PySide6.QtWidgets import QMenu
+        from media.script_button import ScriptButtonObject
+        
+        hit = self.pick(ev.position())
+        menu = QMenu(self)
+        
+        # 如果右键的是脚本按钮
+        if isinstance(hit, ScriptButtonObject):
+            act_edit = menu.addAction("✎ 编辑脚本")
+            act_edit.triggered.connect(lambda: hit.edit(self))
+            menu.addSeparator()
+            
+        # 如果有选中的对象，提供删除选项
+        sel = [o for o in self.doc.objects if o.selected]
+        if sel:
+            act_del = menu.addAction("🗑 删除选中对象")
+            act_del.triggered.connect(self.doc.remove_selected)
+            
+        if not menu.isEmpty():
+            menu.exec(ev.globalPosition().toPoint())
+        else:
+            super().contextMenuEvent(ev)
+            
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
@@ -14105,9 +15633,141 @@ class InfoPanel(QWidget):
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\macro_dialog.py
+鏂囦欢鍚?   macro_dialog.py
+淇敼鏃堕棿: 08/07/2026 12:19:25
+============================================================
+
+"""宏管理器对话框。"""
+
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
+    QPushButton, QInputDialog, QMessageBox
+)
+
+
+class MacroDialog(QDialog):
+    def __init__(self, manager, parent=None):
+        super().__init__(parent)
+
+        self.manager = manager
+        self.doc = manager.doc
+
+        self.setWindowTitle("宏管理器")
+        self.resize(460, 380)
+
+        layout = QVBoxLayout(self)
+
+        self.list = QListWidget()
+        layout.addWidget(self.list, 1)
+
+        btn_row = QHBoxLayout()
+
+        play_btn = QPushButton("回放")
+        rename_btn = QPushButton("重命名")
+        delete_btn = QPushButton("删除")
+        close_btn = QPushButton("关闭")
+
+        play_btn.clicked.connect(self._play)
+        rename_btn.clicked.connect(self._rename)
+        delete_btn.clicked.connect(self._delete)
+        close_btn.clicked.connect(self.accept)
+
+        btn_row.addWidget(play_btn)
+        btn_row.addWidget(rename_btn)
+        btn_row.addWidget(delete_btn)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+
+        layout.addLayout(btn_row)
+
+        self.list.itemDoubleClicked.connect(lambda *_: self._play())
+
+        self._refresh()
+
+    # -------------------- 基础 --------------------
+
+    def _macros(self):
+        return getattr(self.doc, "macros", [])
+
+    def _refresh(self):
+        self.list.clear()
+
+        for i, m in enumerate(self._macros()):
+            name = m.get("name", f"宏 {i + 1}")
+            count = len(m.get("commands", []))
+            self.list.addItem(f"{name}（{count} 步）")
+
+    def _selected_index(self):
+        row = self.list.currentRow()
+        macros = self._macros()
+
+        if 0 <= row < len(macros):
+            return row
+
+        return None
+
+    # -------------------- 按钮 --------------------
+
+    def _play(self):
+        index = self._selected_index()
+
+        if index is None:
+            return
+
+        if self.manager.is_recording():
+            QMessageBox.information(
+                self,
+                "宏",
+                "正在录制宏，请先停止录制再回放。"
+            )
+            return
+
+        self.manager.play(self._macros()[index])
+
+    def _rename(self):
+        index = self._selected_index()
+
+        if index is None:
+            return
+
+        old_name = self._macros()[index].get("name", "")
+
+        name, ok = QInputDialog.getText(
+            self,
+            "重命名宏",
+            "宏名称：",
+            text=old_name
+        )
+
+        if ok and name.strip():
+            self.manager.rename_macro(index, name.strip())
+            self._refresh()
+
+    def _delete(self):
+        index = self._selected_index()
+
+        if index is None:
+            return
+
+        name = self._macros()[index].get("name", f"宏 {index + 1}")
+
+        reply = QMessageBox.question(
+            self,
+            "删除宏",
+            f"确定删除宏「{name}」吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if reply == QMessageBox.StandardButton.Yes:
+            self.manager.delete_macro(index)
+            self._refresh()
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\main_window.py
 鏂囦欢鍚?   main_window.py
-淇敼鏃堕棿: 08/04/2026 23:13:16
+淇敼鏃堕棿: 08/07/2026 12:28:00
 ============================================================
 
 import datetime
@@ -14143,7 +15803,12 @@ class MainWindow(QMainWindow):
         self.doc = Document()
         self.canvas = Canvas(self.doc)
         self.setCentralWidget(self.canvas)        # ← 关键：把画布设为中央部件（之前丢了）
+        # ★ 宏系统
+        from core.macro import MacroManager, set_macro_manager
 
+        self.macro_manager = MacroManager(self.doc)
+        set_macro_manager(self.macro_manager)
+        
         self.function_dock = FunctionEditorDock(self.canvas, self)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.function_dock)
         self.doc.changed.connect(self.function_dock.refresh)
@@ -14154,6 +15819,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
         self._build_var_menu()
+        self._build_macro_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
@@ -14412,9 +16078,18 @@ class MainWindow(QMainWindow):
         self._coord_label = QLabel("(    0.00 ,    0.00 )")
         self._coord_label.setFont(theme.LABEL_FONT)
         self._count_label = QLabel("0 个对象")
+        self._rec_label = QLabel("")
+        self._rec_label.setStyleSheet("")
+
         sb.addWidget(self._hint_label, 1)
         sb.addPermanentWidget(self._count_label)
         sb.addPermanentWidget(self._coord_label)
+        sb.addPermanentWidget(self._rec_label)
+
+        # ★ 宏状态刷新
+        if hasattr(self, "macro_manager"):
+            self.macro_manager.changed.connect(self._update_macro_actions)
+            self._update_macro_actions()
         self.canvas.cursor_info.connect(self._coord_label.setText)
         self.canvas.tool_changed.connect(self._hint_label.setText)
         self.doc.changed.connect(
@@ -14436,7 +16111,83 @@ class MainWindow(QMainWindow):
         if path:
             self.doc.load(path)
             self.canvas.update_snow_state()
-            
+
+            # ★ 刷新宏菜单
+            if hasattr(self, "macro_manager"):
+                self.macro_manager.changed.emit()
+                
+    # ================= 宏系统 =================
+
+    def _build_macro_menu(self) -> None:
+        mb = self.menuBar()
+        mm = mb.addMenu("宏(&M)")
+
+        self._record_act = QAction("● 开始录制", self, checkable=True)
+        self._record_act.setShortcut(QKeySequence("Ctrl+Shift+R"))
+        self._record_act.triggered.connect(self._toggle_macro_recording)
+        mm.addAction(self._record_act)
+
+        self._play_last_act = QAction("回放最新宏", self)
+        self._play_last_act.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        self._play_last_act.triggered.connect(self._play_last_macro)
+        mm.addAction(self._play_last_act)
+
+        mm.addSeparator()
+
+        mgr_act = QAction("宏管理器…", self)
+        mgr_act.triggered.connect(self._open_macro_dialog)
+        mm.addAction(mgr_act)
+
+        self._update_macro_actions()
+
+    def _toggle_macro_recording(self):
+        self.macro_manager.toggle_recording()
+        self._update_macro_actions()
+
+    def _play_last_macro(self):
+        if self.macro_manager.is_recording():
+            QMessageBox.information(
+                self,
+                "宏",
+                "正在录制宏，请先停止录制再回放。"
+            )
+            return
+
+        if not getattr(self.doc, "macros", []):
+            QMessageBox.information(
+                self,
+                "宏",
+                "还没有录制任何宏。"
+            )
+            return
+
+        self.macro_manager.play_last()
+
+    def _open_macro_dialog(self):
+        from ui.macro_dialog import MacroDialog
+
+        MacroDialog(self.macro_manager, self).exec()
+
+    def _update_macro_actions(self):
+        rec = self.macro_manager.is_recording()
+
+        if hasattr(self, "_record_act"):
+            self._record_act.setChecked(rec)
+            self._record_act.setText("■ 停止录制" if rec else "● 开始录制")
+
+        if hasattr(self, "_play_last_act"):
+            self._play_last_act.setEnabled(bool(getattr(self.doc, "macros", [])))
+
+        if hasattr(self, "_rec_label"):
+            if rec:
+                self._rec_label.setText("● 宏录制中")
+                self._rec_label.setStyleSheet(
+                    "color:#e03131;font-weight:700;"
+                )
+            else:
+                self._rec_label.setText("")
+                self._rec_label.setStyleSheet("")
+                           
     def _doc_info(self) -> None:
         title, ok = QInputDialog.getText(
             self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))
@@ -14462,79 +16213,98 @@ class MainWindow(QMainWindow):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\script_editor.py
 鏂囦欢鍚?   script_editor.py
-淇敼鏃堕棿: 08/06/2026 16:27:53
+淇敼鏃堕棿: 08/06/2026 23:05:37
 ============================================================
 
-"""脚本编辑器基础版。
-
-当前支持：
-- 多行编辑
-- 简单关键字高亮
-- 运行
-- 保存
-
-后续步骤会加：
-- 行号
-- 自动补全
-- 函数提醒
-- 错误红线
+"""脚本编辑器增强版。
+功能：
+- 行号显示与当前行高亮
+- 语法错误实时标红与行号定位
+- 智能自动补全（关键字、函数、画布对象名）
+- 内置脚本模板库
+- 快捷键 (Ctrl+S 保存, Ctrl+R 运行)
 """
 
 import re
+from PySide6.QtCore import Qt, QRect, QSize, QStringListModel
+from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
+                           QPainter, QTextCursor, QPalette, QTextFormat, QShortcut, QKeySequence)
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
+                               QPushButton, QWidget, QTextEdit, QComboBox,
+                               QLabel, QMessageBox, QCompleter, QApplication)
 
-from PySide6.QtGui import QColor, QFont, QSyntaxHighlighter, QTextCharFormat
-from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit, QPushButton
-)
-
-from core.scripting import run_script
+from core.scripting import run_script, parse
+from core.scripting.errors import ScriptError
+from ui import theme
 
 
-KEYWORD_PATTERNS = [
-    r"repeat", r"重复",
-    r"for", r"遍历",
-    r"from", r"从",
-    r"to", r"到",
-    r"if", r"如果",
-    r"elif", r"否则如果",
-    r"else", r"否则",
-    r"global", r"全局",
-    r"set", r"设置",
-    r"true", r"真",
-    r"false", r"假",
-    r"and", r"并且", r"且",
-    r"or", r"或者",
-    r"not", r"非",
-    r"add", r"新增", r"添加",
-    r"delete", r"删除",
-    r"print", r"打印",
-    r"point", r"点",
-    r"segment", r"线段",
-    r"line", r"直线",
-    r"circle", r"圆",
-    r"polygon", r"多边形",
-    r"text", r"文本",
-    r"at", r"在",
-    r"center", r"圆心",
-    r"radius", r"半径",
-    r"points", r"点集",
-    r"object", r"对象",
+# ═══════════════ 1. 自动补全数据源 ═══════════════
+KEYWORDS = [
+    "repeat", "重复", "for", "遍历", "from", "从", "to", "到",
+    "if", "如果", "elif", "否则如果", "else", "否则",
+    "global", "全局", "set", "设置",
+    "true", "真", "false", "假",
+    "and", "并且", "且", "or", "或者", "not", "非",
+    "add", "新增", "添加", "delete", "删除", "print", "打印",
+    "point", "点", "segment", "线段", "line", "直线",
+    "circle", "圆", "polygon", "多边形", "text", "文本",
+    "at", "在", "center", "圆心", "radius", "半径", "points", "点集",
+    "__keep"
 ]
 
+FUNCS = [
+    "sin", "cos", "tan", "arcsin", "arccos", "arctan",
+    "sqrt", "abs", "ln", "log", "exp"
+]
 
+def get_completions(doc):
+    """获取补全列表：关键字 + 函数 + 画布上的对象名"""
+    obj_names = list(getattr(doc, "names", {}).keys())
+    return list(set(KEYWORDS + FUNCS + obj_names))
+
+
+# ═══════════════ 2. 脚本模板库 ═══════════════
+TEMPLATES = {
+    "循环创建点": """set n = 5
+for i from 1 to n {
+    add point P{i} at (i, i * i)
+}
+__keep = true
+""",
+    "条件判断": """set a = 10
+if a > 5 {
+    print("a 大于 5")
+} else {
+    print("a 不大于 5")
+}
+""",
+    "绘制多边形": """add point A at (0, 0)
+add point B at (4, 0)
+add point C at (2, 3)
+add polygon Poly1 points A, B, C
+__keep = true
+""",
+    "字符串拼接": """for i from 1 to 3 {
+    print("当前点 P" + i)
+    add point P{i} at (i, 0)
+}
+__keep = true
+"""
+}
+
+
+# ═══════════════ 3. 语法高亮 ═══════════════
 class ScriptHighlighter(QSyntaxHighlighter):
     def __init__(self, document):
         super().__init__(document)
-
         self.rules = []
 
         # 关键字
         kw_format = QTextCharFormat()
         kw_format.setForeground(QColor("#1971c2"))
         kw_format.setFontWeight(QFont.Weight.Bold)
-
-        for pat in KEYWORD_PATTERNS:
-            self.rules.append((re.compile(pat), kw_format))
+        for pat in KEYWORDS:
+            self.rules.append((re.compile(rf"\b{pat}\b"), kw_format))
 
         # 数字
         num_format = QTextCharFormat()
@@ -14554,69 +16324,280 @@ class ScriptHighlighter(QSyntaxHighlighter):
 
     def highlightBlock(self, text):
         for pattern, fmt in self.rules:
-            # ★ 修复：使用 Python re 模块的 finditer，而不是 Qt 的 globalMatch
             for match in pattern.finditer(text):
                 self.setFormat(match.start(), match.end() - match.start(), fmt)
 
 
+# ═══════════════ 4. 行号区组件 ═══════════════
+class LineNumberArea(QWidget):
+    def __init__(self, editor):
+        super().__init__(editor)
+        self.editor = editor
+
+    def sizeHint(self):
+        return QSize(self.editor.lineNumberAreaWidth(), 0)
+
+    def paintEvent(self, event):
+        self.editor.lineNumberAreaPaintEvent(event)
+
+
+# ═══════════════ 5. 代码编辑器核心 ═══════════════
+class CodeEditor(QPlainTextEdit):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        
+        # 字体设置
+        font = QFont("Consolas", 11)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.setFont(font)
+        self.setTabStopDistance(28)
+        
+        # 行号区初始化
+        self.lineNumberArea = LineNumberArea(self)
+        self.blockCountChanged.connect(self.updateLineNumberAreaWidth)
+        self.updateRequest.connect(self.updateLineNumberArea)
+        self.cursorPositionChanged.connect(self.highlightCurrentLine)
+        self.updateLineNumberAreaWidth(0)
+        
+        self._error_selections = []
+        
+        # 自动补全初始化
+        self.completer = QCompleter(self)
+        self.completer.setWidget(self)
+        self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+        self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self.completer.activated.connect(self.insertCompletion)
+
+    # ---------- 行号绘制逻辑 ----------
+    def lineNumberAreaWidth(self):
+        digits = len(str(max(1, self.blockCount())))
+        space = 10 + self.fontMetrics().horizontalAdvance('9') * digits
+        return space
+
+    def updateLineNumberAreaWidth(self, _):
+        self.setViewportMargins(self.lineNumberAreaWidth(), 0, 0, 0)
+
+    def updateLineNumberArea(self, rect, dy):
+        if dy:
+            self.lineNumberArea.scroll(0, dy)
+        else:
+            self.lineNumberArea.update(0, rect.y(), self.lineNumberArea.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self.updateLineNumberAreaWidth(0)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self.lineNumberArea.setGeometry(QRect(cr.left(), cr.top(),
+                                              self.lineNumberAreaWidth(), cr.height()))
+
+    def lineNumberAreaPaintEvent(self, event):
+        painter = QPainter(self.lineNumberArea)
+        painter.fillRect(event.rect(), QColor(theme.PANEL_BG.name() if hasattr(theme, 'PANEL_BG') else "#f0f0f0"))
+
+        block = self.firstVisibleBlock()
+        blockNumber = block.blockNumber()
+        top = int(self.blockBoundingGeometry(block).translated(self.contentOffset()).top())
+        bottom = top + int(self.blockBoundingRect(block).height())
+
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                number = str(blockNumber + 1)
+                painter.setPen(QColor(theme.SUBINK.name() if hasattr(theme, 'SUBINK') else "#888888"))
+                painter.drawText(0, top, self.lineNumberArea.width() - 5,
+                                 self.fontMetrics().height(),
+                                 Qt.AlignmentFlag.AlignRight, number)
+
+            block = block.next()
+            top = bottom
+            bottom = top + int(self.blockBoundingRect(block).height())
+            blockNumber += 1
+
+    # ---------- 高亮与错误标记 ----------
+    def highlightCurrentLine(self):
+        extraSelections = []
+        if not self.isReadOnly():
+            selection = QTextEdit.ExtraSelection()
+            lineColor = QColor(Qt.GlobalColor.yellow).lighter(160)
+            lineColor.setAlpha(40)
+            selection.format.setBackground(lineColor)
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            selection.cursor = self.textCursor()
+            selection.cursor.clearSelection()
+            extraSelections.append(selection)
+            
+        extraSelections.extend(self._error_selections)
+        self.setExtraSelections(extraSelections)
+        
+    def set_error_line(self, line_num):
+        self._error_selections = []
+        if line_num > 0:
+            selection = QTextEdit.ExtraSelection()
+            selection.format.setBackground(QColor(255, 0, 0, 60))
+            selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+            
+            cursor = self.textCursor()
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+            cursor.movePosition(QTextCursor.MoveOperation.Down, QTextCursor.MoveMode.MoveAnchor, line_num - 1)
+            selection.cursor = cursor
+            
+            self._error_selections.append(selection)
+        self.highlightCurrentLine()
+
+    # ---------- 自动补全逻辑 ----------
+    def insertCompletion(self, completion):
+        if self.completer.widget() != self:
+            return
+        tc = self.textCursor()
+        extra = len(completion) - len(self.completer.completionPrefix())
+        tc.movePosition(QTextCursor.MoveOperation.Left)
+        tc.movePosition(QTextCursor.MoveOperation.EndOfWord)
+        tc.insertText(completion[-extra:])
+        self.setTextCursor(tc)
+
+    def textUnderCursor(self):
+        tc = self.textCursor()
+        tc.select(QTextCursor.SelectionType.WordUnderCursor)
+        return tc.selectedText()
+
+    def keyPressEvent(self, e):
+        if self.completer.popup().isVisible():
+            if e.key() in (Qt.Key.Key_Enter, Qt.Key.Key_Return, Qt.Key.Key_Escape, Qt.Key.Key_Tab, Qt.Key.Key_Backtab):
+                e.ignore()
+                return
+
+        super().keyPressEvent(e)
+
+        hasModifier = e.modifiers() != Qt.KeyboardModifier.NoModifier
+        if hasModifier and e.text() == '':
+            return
+
+        completionPrefix = self.textUnderCursor()
+        
+        if not completionPrefix or (not completionPrefix.isidentifier() and not completionPrefix.isalnum()):
+            self.completer.popup().hide()
+            return
+
+        if completionPrefix != self.completer.completionPrefix():
+            self.completer.setCompletionPrefix(completionPrefix)
+            popup = self.completer.popup()
+            popup.setCurrentIndex(self.completer.completionModel().index(0, 0))
+
+        cr = self.cursorRect()
+        cr.setWidth(self.completer.popup().sizeHintForColumn(0) +
+                    self.completer.popup().verticalScrollBar().sizeHint().width())
+        self.completer.complete(cr)
+
+
+# ═══════════════ 6. 编辑器主对话框 ═══════════════
 class ScriptEditorDialog(QDialog):
     def __init__(self, canvas, button_obj, parent=None):
         super().__init__(parent)
-
         self.canvas = canvas
         self.button_obj = button_obj
-
+        
         self.setWindowTitle(f"脚本编辑器 · {getattr(button_obj, 'name', '') or 'ScriptButton'}")
-        self.resize(760, 560)
-
+        self.resize(800, 600)
+        
         layout = QVBoxLayout(self)
-
-        self.editor = QPlainTextEdit()
+        
+        # 顶部工具栏：模板
+        top_bar = QHBoxLayout()
+        top_bar.addWidget(QLabel("插入模板:"))
+        self.template_combo = QComboBox()
+        self.template_combo.addItem("-- 选择模板 --", None)
+        for name, code in TEMPLATES.items():
+            self.template_combo.addItem(name, code)
+        self.template_combo.currentIndexChanged.connect(self._insert_template)
+        top_bar.addWidget(self.template_combo, 1)
+        layout.addLayout(top_bar)
+        
+        # 编辑器
+        self.editor = CodeEditor()
         self.editor.setPlainText(button_obj.script)
-        self.editor.setTabStopDistance(28)
-
-        font = QFont("Consolas")
-        font.setStyleHint(QFont.StyleHint.Monospace)
-        font.setPointSize(11)
-        self.editor.setFont(font)
-
         self.highlighter = ScriptHighlighter(self.editor.document())
-
         layout.addWidget(self.editor, 1)
-
-        btn_row = QHBoxLayout()
-
-        run_btn = QPushButton("运行")
-        save_btn = QPushButton("保存")
+        
+        # 底部状态与按钮
+        bottom_bar = QHBoxLayout()
+        self.status_lbl = QLabel("")
+        self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
+        bottom_bar.addWidget(self.status_lbl, 1)
+        
+        run_btn = QPushButton("运行 (Ctrl+R)")
+        save_btn = QPushButton("保存 (Ctrl+S)")
         cancel_btn = QPushButton("取消")
-
+        
         run_btn.clicked.connect(self._run)
         save_btn.clicked.connect(self._save)
         cancel_btn.clicked.connect(self.reject)
-
-        btn_row.addStretch(1)
-        btn_row.addWidget(run_btn)
-        btn_row.addWidget(save_btn)
-        btn_row.addWidget(cancel_btn)
-
-        layout.addLayout(btn_row)
+        
+        bottom_bar.addWidget(run_btn)
+        bottom_bar.addWidget(save_btn)
+        bottom_bar.addWidget(cancel_btn)
+        layout.addLayout(bottom_bar)
+        
+        # 快捷键
+        QShortcut(QKeySequence("Ctrl+R"), self, self._run)
+        QShortcut(QKeySequence("Ctrl+S"), self, self._save)
+        
+        # 初始化补全
+        self._update_completer()
+        
+    def _update_completer(self):
+        words = get_completions(self.canvas.doc)
+        model = QStringListModel(words)
+        self.editor.completer.setModel(model)
+        
+    def _insert_template(self, index):
+        code = self.template_combo.itemData(index)
+        if code:
+            self.editor.insertPlainText(code)
+            self.template_combo.setCurrentIndex(0)
+            
+    def _check_syntax(self):
+        self.editor._error_selections = []
+        self.status_lbl.setText("")
+        self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
+        try:
+            parse(self.editor.toPlainText())
+            self.editor.highlightCurrentLine()
+            return True
+        except ScriptError as e:
+            self.status_lbl.setText(f"语法错误: {e}")
+            self.editor.set_error_line(e.line or 0)
+            return False
+        except Exception as e:
+            self.status_lbl.setText(f"未知错误: {e}")
+            return False
 
     def _save(self):
+        if not self._check_syntax():
+            return
         self.button_obj.script = self.editor.toPlainText()
         self.canvas.doc.changed.emit()
         self.accept()
 
     def _run(self):
-        # 运行时先保存当前文本
         self.button_obj.script = self.editor.toPlainText()
         self.canvas.doc.changed.emit()
-
-        run_script(
+        
+        if not self._check_syntax():
+            return
+            
+        rt = run_script(
             self.canvas.doc,
             self.button_obj.script,
             owner_id=self.button_obj.id,
             canvas=self.canvas
         )
+        if rt and rt.error:
+            self.status_lbl.setText(f"运行错误: {rt.error}")
+            if hasattr(rt.error, 'line'):
+                self.editor.set_error_line(rt.error.line or 0)
+        else:
+            self.status_lbl.setText("✔ 运行成功")
+            self.status_lbl.setStyleSheet("color: green; font-weight: bold;")
 
 
 def edit_script_button(canvas, button_obj):
@@ -15130,7 +17111,7 @@ class ToolRail(QWidget):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\variable_widgets.py
 鏂囦欢鍚?   variable_widgets.py
-淇敼鏃堕棿: 08/04/2026 20:18:40
+淇敼鏃堕棿: 08/07/2026 12:26:28
 ============================================================
 
 """变量 UI：两步创建向导 + 画布左下角的滑杆面板。"""
@@ -15274,7 +17255,21 @@ class VariableSliderPanel(QWidget):
         self._rows.setSpacing(4)
         layout.addLayout(self._rows)
         self._dragging = False 
+        
+    def _macro_record_var(self, name):
+        """滑杆释放时调用，把变量值录入宏。"""
+        from core.macro import get_macro_manager
 
+        mm = get_macro_manager()
+
+        if mm is None:
+            return
+
+        var = self.canvas.doc.vars.get_var(name)
+
+        if var is not None:
+            mm.recorder.record_set_var(name, var.value)
+            
     def refresh(self):
         if self._dragging:              # ★ 新增：拖动时不重建滑杆
             return
@@ -15299,26 +17294,53 @@ class VariableSliderPanel(QWidget):
         h = QHBoxLayout(w)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
-        lbl = QLabel(f"{name} = {var.value:.2f}")
-        lbl.setFont(theme.LABEL_FONT)
-        lbl.setMinimumWidth(90)
-        slider = QSlider(Qt.Orientation.Horizontal)
-        slider.setRange(0, 1000)
-        span = (var.vmax - var.vmin) or 1.0
-        slider.setValue(int((var.value - var.vmin) / span * 1000))
-        slider.setMinimumWidth(110)
-        slider.valueChanged.connect(
-            lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax: self._on_slide(n, v, l, a, b))
+
+        # ★ 从动变量：不显示滑杆，只显示表达式和当前值
+        if getattr(var, "expr", ""):
+            lbl = QLabel(f"{name} = {var.expr} = {var.value:.2f}")
+            lbl.setFont(theme.LABEL_FONT)
+            lbl.setToolTip("从动变量：由表达式自动计算，不能手动拖动")
+
+            h.addWidget(lbl, 1)
+
+        else:
+            lbl = QLabel(f"{name} = {var.value:.2f}")
+            lbl.setFont(theme.LABEL_FONT)
+            lbl.setMinimumWidth(90)
+
+            slider = QSlider(Qt.Orientation.Horizontal)
+            slider.setRange(0, 1000)
+
+            span = (var.vmax - var.vmin) or 1.0
+            slider.setValue(int((var.value - var.vmin) / span * 1000))
+            slider.setMinimumWidth(110)
+
+            slider.valueChanged.connect(
+                lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax:
+                    self._on_slide(n, v, l, a, b)
+            )
+            # ★ 宏录制：滑杆释放时记录变量值
+            slider.sliderReleased.connect(
+                lambda n=name: self._macro_record_var(n)
+            )
+            
+            # ★ 拖动结束后刷新一次，从动变量的值会跟着更新
+            slider.sliderReleased.connect(self.refresh)
+
+            h.addWidget(lbl)
+            h.addWidget(slider, 1)
+
         rm = QPushButton("×")
         rm.setFixedSize(20, 20)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
+        rm.setStyleSheet(
+            f"border:none;color:{theme.SELECTED.name()};font-weight:700;"
+        )
         rm.clicked.connect(lambda _=False, n=name: self._delete(n))
-        h.addWidget(lbl)
-        h.addWidget(slider, 1)
-        h.addWidget(rm)
-        return w
 
+        h.addWidget(rm)
+
+        return w
     def _on_slide(self, name, v, lbl, vmin, vmax):
         self._dragging = True
         val = vmin + (vmax - vmin) * v / 1000
