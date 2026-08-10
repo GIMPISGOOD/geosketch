@@ -147,7 +147,7 @@ def canvas_qss() -> str:
     t = THEMES[_active]
     return f"""
     #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
-    #infoPanel, #lengthPanel, #anglePanel, #fillConfigPanel,
+    #infoPanel, #propertyPanel, #lengthPanel, #anglePanel, #fillConfigPanel,
     #varSliderPanel, #exprPanel, #functionPanel {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["PANEL_BORDER"]};
@@ -192,6 +192,52 @@ def canvas_qss() -> str:
     }}
     #functionPanel QScrollBar::add-line:vertical,
     #functionPanel QScrollBar::sub-line:vertical {{ height: 0px; }}
+    #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
+    #exprPanel QLabel {{ color: {t["INK"]}; }}
+    
+    /* ================= 属性面板专属样式 ================= */
+    #propertyPanel QLabel {{
+        color: {t["INK"]};
+        background: transparent;
+    }}
+    #propertyPanel #panelTitle {{
+        font-size: 15px;
+        font-weight: 700;
+        color: {t["INK"]};
+    }}
+    #propertyPanel #panelSubtitle {{
+        font-size: 11px;
+        color: {t["SUBINK"]};
+    }}
+    #propertyPanel QLineEdit,
+    #propertyPanel QDoubleSpinBox,
+    #propertyPanel QComboBox {{
+        background: {t["WINDOW_BG"]};
+        color: {t["INK"]};
+        border: 1px solid {t["PANEL_BORDER"]};
+        border-radius: 6px;
+        padding: 3px 6px;
+        font-size: 12px;
+    }}
+    #propertyPanel QCheckBox {{
+        color: {t["INK"]};
+        background: transparent;
+    }}
+    #propertyPanel QPushButton {{
+        background: {t["ACCENT"]};
+        color: #ffffff;
+        border: none;
+        border-radius: 6px;
+        padding: 5px 12px;
+        font-weight: 600;
+        font-size: 12px;
+    }}
+    #propertyPanel QPushButton:hover {{
+        background: {t["SELECTED"]};
+    }}
+    #propertyPanel QPushButton:pressed {{
+        background: {t["INK"]};
+    }}    
     """
 
 
