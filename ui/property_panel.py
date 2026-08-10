@@ -220,7 +220,18 @@ class PropertyPanel(QWidget):
         self.reposition()
         self.show()
         self.raise_()
-
+        
+    def _build_multi(self, objs: list[Any]) -> None:
+        """多选时的批量操作面板。"""
+        self._add_section("批量操作")
+        visible_all = all(getattr(o, "visible", True) for o in objs)
+        self._add_buttons([
+            ("隐藏" if visible_all else "显示", lambda: self._set_visible(objs, not visible_all)),
+            ("删除", self.canvas.doc.remove_selected),
+            ("置顶", lambda: self._reorder(objs, True)),
+            ("置底", lambda: self._reorder(objs, False)),
+        ])
+        
     def _type_label(self, obj):
         name = type(obj).__name__
         cn = {
