@@ -422,6 +422,12 @@ class Document(QObject):
                 "macros.json",
                 json.dumps(getattr(self, "macros", []), ensure_ascii=False, indent=1)
             )
+            # ★ 保存脚本库
+            if hasattr(self, "script_libs") and self.script_libs:
+                zf.writestr(
+                    "script_libs.json",
+                    json.dumps(self.script_libs, ensure_ascii=False, indent=1)
+                )
 
     def load(self, path):
         import zipfile
@@ -438,7 +444,15 @@ class Document(QObject):
                 self.vars.load_dict({})
                 
             self._load_state(json.loads(zf.read("sketch.json")))
-
+            # ★ 载入脚本库
+            if "script_libs.json" in names:
+                try:
+                    self.script_libs = json.loads(zf.read("script_libs.json"))
+                except Exception:
+                    self.script_libs = {}
+            else:
+                self.script_libs = {}
+                
             if "meta.data" in names:
                 self.meta = json.loads(zf.read("meta.data"))
 

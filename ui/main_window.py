@@ -258,7 +258,12 @@ class MainWindow(QMainWindow):
             a.setShortcut(key)
             a.triggered.connect(slot)
             vm.addAction(a)
-
+        # ================= 脚本库菜单 =================
+        sm = mb.addMenu("脚本库(&L)")
+        mgr_act = QAction("管理脚本库...", self)
+        mgr_act.triggered.connect(self._open_script_library_manager)
+        sm.addAction(mgr_act)
+        
         # 主题菜单：互斥单选
         thm = mb.addMenu("主题(&M)")
         tgroup = QActionGroup(self)
@@ -274,7 +279,11 @@ class MainWindow(QMainWindow):
         custom_act = QAction("自定义主题…", self)
         custom_act.triggered.connect(self._open_theme_editor)
         thm.addAction(custom_act)
-
+        
+    def _open_script_library_manager(self):
+        from ui.script_library_manager import ScriptLibraryManager
+        ScriptLibraryManager(self.doc, self).exec()
+        
     def _open_theme_editor(self):
         from ui.theme_editor import ThemeEditorDialog
         ThemeEditorDialog(self).exec()

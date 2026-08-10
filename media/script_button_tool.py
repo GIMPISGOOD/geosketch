@@ -1,9 +1,10 @@
-"""插入脚本按钮工具：注册到「插入」菜单。"""
+"""插入脚本按钮工具：注册到「插入」菜单。
 
-from PySide6.QtWidgets import QFileDialog  # noqa: F401  保持和其他 insert 工具一致
+点击画布后打开脚本按钮向导，而不是直接插入裸脚本。
+"""
+
 from core.registry import register_tool
 from tools.base import Tool
-
 from media.script_button import ScriptButtonObject
 
 
@@ -20,25 +21,22 @@ def _finish_insert(canvas, obj):
     order=5,
     panel="insert",
     icon="insert_table",
-    hint="点击画布插入脚本按钮"
+    hint="点击画布，通过向导创建脚本按钮"
 )
 class InsertScriptButtonTool(Tool):
     def press(self, canvas, wpt, hit):
+        from media.script_button_wizard import ScriptButtonWizard
+
+        dlg = ScriptButtonWizard(canvas, None, parent=canvas)
+        if not dlg.exec():
+            return
+
         obj = ScriptButtonObject(
             wpt[0],
             wpt[1],
-            width=4.0,
-            height=1.2,
-            text="运行",
-            script="""# 示例脚本
-set n = 3
-
-repeat n {
-    print("GeoSketch 脚本运行")
-}
-
-__keep = true
-"""
+            width=4.5,
+            height=1.3,
         )
 
+        dlg.apply_to(obj)
         _finish_insert(canvas, obj)

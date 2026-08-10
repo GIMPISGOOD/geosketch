@@ -1,19 +1,18 @@
-"""脚本编辑器增强版。
+"""脚本编辑器 v2：适配全新 DSL 语法。
 功能：
-- 行号显示与当前行高亮
-- 语法错误实时标红与行号定位
-- 智能自动补全（关键字、函数、画布对象名）
-- 内置脚本模板库
-- 快捷键 (Ctrl+S 保存, Ctrl+R 运行)
+- 新语法高亮（func, import, wait, 几何函数）
+- 智能补全（内置几何函数、库名、文档对象名）
+- 运行防抖（执行 wait 时禁用按钮）
+- 错误红线与行号
 """
 
 import re
 from PySide6.QtCore import Qt, QRect, QSize, QStringListModel
 from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
-                           QPainter, QTextCursor, QPalette, QTextFormat, QShortcut, QKeySequence)
+                           QPainter, QTextCursor, QTextFormat, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
                                QPushButton, QWidget, QTextEdit, QComboBox,
-                               QLabel, QMessageBox, QCompleter, QApplication)
+                               QLabel, QMessageBox, QCompleter)
 
 from core.scripting import run_script, parse
 from core.scripting.errors import ScriptError
@@ -22,55 +21,79 @@ from ui import theme
 
 # ═══════════════ 1. 自动补全数据源 ═══════════════
 KEYWORDS = [
-    "repeat", "重复", "for", "遍历", "from", "从", "to", "到",
     "if", "如果", "elif", "否则如果", "else", "否则",
-    "global", "全局", "set", "设置",
+    "repeat", "重复", "for", "遍历", "from", "从", "to", "到",
+    "func", "函数", "return", "返回",
+    "import", "导入",
+    "wait", "等待",
+    "delete", "删除", "all", "所有",
+    "global", "全局",
     "true", "真", "false", "假",
-    "and", "并且", "且", "or", "或者", "not", "非",
-    "add", "新增", "添加", "delete", "删除", "print", "打印",
-    "point", "点", "segment", "线段", "line", "直线",
-    "circle", "圆", "polygon", "多边形", "text", "文本",
-    "at", "在", "center", "圆心", "radius", "半径", "points", "点集",
-    "__keep"
+    "and", "并且", "or", "或者", "not", "非",
+    "__keep", "__allow_delete_user"
 ]
 
+# 内置几何函数与数学函数
 FUNCS = [
+    "point", "segment", "line", "ray", "circle", "ellipse", 
+    "polygon", "regular_polygon", "midpoint", "division_point", 
+    "intersect", "text", "function", "parametric", "polar",
+    "distance", "length", "slope", "radius", "area", "perimeter",
     "sin", "cos", "tan", "arcsin", "arccos", "arctan",
-    "sqrt", "abs", "ln", "log", "exp"
+    "sqrt", "abs", "ln", "log", "exp", "floor", "ceil", "round",
+    "print", "math", "geo", "draw", "doc"
 ]
 
 def get_completions(doc):
-    """获取补全列表：关键字 + 函数 + 画布上的对象名"""
+    """获取补全列表：关键字 + 函数 + 画布上的对象名 + 已导入的库"""
     obj_names = list(getattr(doc, "names", {}).keys())
-    return list(set(KEYWORDS + FUNCS + obj_names))
+    libs = list(getattr(doc, "script_libs", {}).keys())
+    return list(set(KEYWORDS + FUNCS + obj_names + libs))
 
 
-# ═══════════════ 2. 脚本模板库 ═══════════════
+# ═══════════════ 2. 脚本模板库（新语法） ═══════════════
 TEMPLATES = {
-    "循环创建点": """set n = 5
-for i from 1 to n {
-    add point P{i} at (i, i * i)
+    "基础图形创建": """__keep = true
+
+A = point(0, 0)
+B = point(4, 0)
+AB = segment(A, B)
+
+C = circle(A, 2)
+""",
+    "自定义函数与循环": """__keep = true
+
+func make_star(center, r, n) {
+    for i from 0 to n - 1 {
+        angle = i * 2 * pi / n
+        P = point(center.x + r * cos(angle), center.y + r * sin(angle))
+        if i > 0 {
+            segment(prev_P, P)
+        }
+        prev_P = P
+    }
 }
+
+O = point(0, 0)
+make_star(O, 3, 5)
+""",
+    "动画与等待 (wait)": """A = point(0, 0)
+B = point(1, 0)
+
+for i from 1 to 5 {
+    B = point(i, sin(i))
+    wait 0.5
+}
+
 __keep = true
 """,
-    "条件判断": """set a = 10
-if a > 5 {
-    print("a 大于 5")
-} else {
-    print("a 不大于 5")
-}
-""",
-    "绘制多边形": """add point A at (0, 0)
-add point B at (4, 0)
-add point C at (2, 3)
-add polygon Poly1 points A, B, C
+    "导入数学库": """import math
+
 __keep = true
-""",
-    "字符串拼接": """for i from 1 to 3 {
-    print("当前点 P" + i)
-    add point P{i} at (i, 0)
-}
-__keep = true
+
+A = point(0, 0)
+B = point(math.cos(0), math.sin(math.pi / 2))
+segment(A, B)
 """
 }
 
@@ -86,7 +109,13 @@ class ScriptHighlighter(QSyntaxHighlighter):
         kw_format.setForeground(QColor("#1971c2"))
         kw_format.setFontWeight(QFont.Weight.Bold)
         for pat in KEYWORDS:
-            self.rules.append((re.compile(rf"\b{pat}\b"), kw_format))
+            self.rules.append((re.compile(rf"\b{re.escape(pat)}\b"), kw_format))
+
+        # 几何与数学函数
+        fn_format = QTextCharFormat()
+        fn_format.setForeground(QColor("#9c36b5"))
+        for pat in FUNCS:
+            self.rules.append((re.compile(rf"\b{re.escape(pat)}\b(?=\s*\()"), fn_format))
 
         # 数字
         num_format = QTextCharFormat()
@@ -128,13 +157,11 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         
-        # 字体设置
         font = QFont("Consolas", 11)
         font.setStyleHint(QFont.StyleHint.Monospace)
         self.setFont(font)
         self.setTabStopDistance(28)
         
-        # 行号区初始化
         self.lineNumberArea = LineNumberArea(self)
         self.blockCountChanged.connect(self.updateLineNumberAreaWidth)
         self.updateRequest.connect(self.updateLineNumberArea)
@@ -143,14 +170,12 @@ class CodeEditor(QPlainTextEdit):
         
         self._error_selections = []
         
-        # 自动补全初始化
         self.completer = QCompleter(self)
         self.completer.setWidget(self)
         self.completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         self.completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         self.completer.activated.connect(self.insertCompletion)
 
-    # ---------- 行号绘制逻辑 ----------
     def lineNumberAreaWidth(self):
         digits = len(str(max(1, self.blockCount())))
         space = 10 + self.fontMetrics().horizontalAdvance('9') * digits
@@ -189,13 +214,11 @@ class CodeEditor(QPlainTextEdit):
                 painter.drawText(0, top, self.lineNumberArea.width() - 5,
                                  self.fontMetrics().height(),
                                  Qt.AlignmentFlag.AlignRight, number)
-
             block = block.next()
             top = bottom
             bottom = top + int(self.blockBoundingRect(block).height())
             blockNumber += 1
 
-    # ---------- 高亮与错误标记 ----------
     def highlightCurrentLine(self):
         extraSelections = []
         if not self.isReadOnly():
@@ -226,7 +249,6 @@ class CodeEditor(QPlainTextEdit):
             self._error_selections.append(selection)
         self.highlightCurrentLine()
 
-    # ---------- 自动补全逻辑 ----------
     def insertCompletion(self, completion):
         if self.completer.widget() != self:
             return
@@ -283,7 +305,6 @@ class ScriptEditorDialog(QDialog):
         
         layout = QVBoxLayout(self)
         
-        # 顶部工具栏：模板
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("插入模板:"))
         self.template_combo = QComboBox()
@@ -294,36 +315,32 @@ class ScriptEditorDialog(QDialog):
         top_bar.addWidget(self.template_combo, 1)
         layout.addLayout(top_bar)
         
-        # 编辑器
         self.editor = CodeEditor()
         self.editor.setPlainText(button_obj.script)
         self.highlighter = ScriptHighlighter(self.editor.document())
         layout.addWidget(self.editor, 1)
         
-        # 底部状态与按钮
         bottom_bar = QHBoxLayout()
         self.status_lbl = QLabel("")
         self.status_lbl.setStyleSheet("color: red; font-weight: bold;")
         bottom_bar.addWidget(self.status_lbl, 1)
         
-        run_btn = QPushButton("运行 (Ctrl+R)")
+        self.run_btn = QPushButton("运行 (Ctrl+R)")
         save_btn = QPushButton("保存 (Ctrl+S)")
         cancel_btn = QPushButton("取消")
         
-        run_btn.clicked.connect(self._run)
+        self.run_btn.clicked.connect(self._run)
         save_btn.clicked.connect(self._save)
         cancel_btn.clicked.connect(self.reject)
         
-        bottom_bar.addWidget(run_btn)
+        bottom_bar.addWidget(self.run_btn)
         bottom_bar.addWidget(save_btn)
         bottom_bar.addWidget(cancel_btn)
         layout.addLayout(bottom_bar)
         
-        # 快捷键
         QShortcut(QKeySequence("Ctrl+R"), self, self._run)
         QShortcut(QKeySequence("Ctrl+S"), self, self._save)
         
-        # 初始化补全
         self._update_completer()
         
     def _update_completer(self):
@@ -367,19 +384,28 @@ class ScriptEditorDialog(QDialog):
         if not self._check_syntax():
             return
             
-        rt = run_script(
-            self.canvas.doc,
-            self.button_obj.script,
-            owner_id=self.button_obj.id,
-            canvas=self.canvas
-        )
-        if rt and rt.error:
-            self.status_lbl.setText(f"运行错误: {rt.error}")
-            if hasattr(rt.error, 'line'):
-                self.editor.set_error_line(rt.error.line or 0)
-        else:
-            self.status_lbl.setText("✔ 运行成功")
-            self.status_lbl.setStyleSheet("color: green; font-weight: bold;")
+        # ★ 防抖：运行期间禁用按钮，防止 wait 时重复点击
+        self.run_btn.setEnabled(False)
+        self.run_btn.setText("运行中...")
+        QApplication.processEvents()
+        
+        try:
+            rt = run_script(
+                self.canvas.doc,
+                self.button_obj.script,
+                owner_id=self.button_obj.id,
+                canvas=self.canvas
+            )
+            if rt and rt.error:
+                self.status_lbl.setText(f"运行错误: {rt.error}")
+                if hasattr(rt.error, 'line'):
+                    self.editor.set_error_line(rt.error.line or 0)
+            else:
+                self.status_lbl.setText("✔ 运行成功")
+                self.status_lbl.setStyleSheet("color: green; font-weight: bold;")
+        finally:
+            self.run_btn.setEnabled(True)
+            self.run_btn.setText("运行 (Ctrl+R)")
 
 
 def edit_script_button(canvas, button_obj):

@@ -16,7 +16,7 @@ from ui import theme
 from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
-from ui.info_panel import InfoPanel
+from ui.property_panel import PropertyPanel
 
 
 BASE_SCALE = 48.0
@@ -60,7 +60,7 @@ class Canvas(QWidget):
         self._trash.clicked.connect(self.doc.remove_selected)
         self._trash.hide()
 
-        self.info_panel = InfoPanel(self, self)
+        self.info_panel = PropertyPanel(self, self)
 
         # ================= 雪花彩蛋 =================
         self._snow_active = False
@@ -438,30 +438,227 @@ class Canvas(QWidget):
         self.update()
         
     def contextMenuEvent(self, ev):
-        """右键菜单：支持脚本按钮编辑、对象删除等。"""
+        """增强右键菜单：对象编辑、层级、依赖、脚本按钮、文本、媒体对象等。"""
         from PySide6.QtWidgets import QMenu
+        from media.base import MediaObject
         from media.script_button import ScriptButtonObject
-        
+
         hit = self.pick(ev.position())
+        selected = [o for o in self.doc.objects if o.selected]
+
+        if hit is not None:
+            if hit not in selected:
+                self.doc.set_selection([hit])
+                selected = [hit]
+
         menu = QMenu(self)
-        
-        # 如果右键的是脚本按钮
-        if isinstance(hit, ScriptButtonObject):
-            act_edit = menu.addAction("✎ 编辑脚本")
-            act_edit.triggered.connect(lambda: hit.edit(self))
+
+        # ---------- 命中对象的快捷操作 ----------
+        if hit is not None:
+            if isinstance(hit, ScriptButtonObject):
+                menu.addAction("▶ 运行脚本", lambda: hit.run(self))
+                menu.addAction("🧩 简单编辑脚本", lambda: self._simple_edit_script_button(hit))
+                menu.addAction("✎ 高级编辑脚本", lambda: hit.edit(self))
+                menu.addSeparator()
+
+            if type(hit).__name__ == "TextObject":
+                menu.addAction("✎ 编辑文本", lambda: self._edit_text_object(hit))
+                menu.addSeparator()
+
+            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
+                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
+                menu.addSeparator()
+
+        # ---------- 选中对象通用操作 ----------
+        if selected:
+            obj = selected[0]
+
+            menu.addAction("重命名…", lambda: self._rename_objects(selected))
+
+            visible_all = all(getattr(o, "visible", True) for o in selected)
+            menu.addAction(
+                "隐藏" if visible_all else "显示",
+                lambda: self._set_visible(selected, not visible_all),
+            )
+
             menu.addSeparator()
-            
-        # 如果有选中的对象，提供删除选项
-        sel = [o for o in self.doc.objects if o.selected]
-        if sel:
-            act_del = menu.addAction("🗑 删除选中对象")
-            act_del.triggered.connect(self.doc.remove_selected)
-            
+
+            menu.addAction("复制", self.doc.copy_selection)
+            menu.addAction("剪切", self.doc.cut_selection)
+            menu.addAction("复制一份", self._duplicate_selected)
+
+            menu.addSeparator()
+
+            menu.addAction("置顶", lambda: self._reorder_objects(selected, True))
+            menu.addAction("置底", lambda: self._reorder_objects(selected, False))
+
+            menu.addSeparator()
+
+            menu.addAction("选择父对象", lambda: self._select_related(selected, "parents"))
+            menu.addAction("选择子对象", lambda: self._select_related(selected, "children"))
+
+            menu.addSeparator()
+
+            menu.addAction("删除", self.doc.remove_selected)
+
+        # ---------- 粘贴 ----------
+        if getattr(self.doc, "_clipboard", None):
+            if not menu.isEmpty():
+                menu.addSeparator()
+            menu.addAction("粘贴", lambda: self.doc.paste())
+
         if not menu.isEmpty():
             menu.exec(ev.globalPosition().toPoint())
         else:
             super().contextMenuEvent(ev)
             
+    # ================= 右键菜单辅助 =================
+
+    def _doc_action(self, fn):
+        """在撤销组中执行一个文档动作。"""
+        self.doc.begin_action()
+        try:
+            fn()
+        finally:
+            self.doc.end_action()
+        self.doc.changed.emit()
+
+    def _rename_objects(self, objs):
+        if len(objs) != 1:
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+
+        obj = objs[0]
+        old_name = getattr(obj, "name", "") or ""
+        name, ok = QInputDialog.getText(
+            self,
+            "重命名对象",
+            "对象名称：",
+            text=old_name,
+        )
+        if ok and name.strip():
+            self.doc.rename_object(obj, name.strip())
+
+    def _set_visible(self, objs, visible):
+        def doit():
+            for o in objs:
+                o.visible = bool(visible)
+
+        self._doc_action(doit)
+
+    def _duplicate_selected(self):
+        self.doc.copy_selection()
+        self.doc.paste()
+
+    def _reorder_objects(self, objs, front):
+        def doit():
+            if front:
+                for o in objs:
+                    if o in self.doc.objects:
+                        self.doc.objects.remove(o)
+                        self.doc.objects.append(o)
+            else:
+                for o in reversed(objs):
+                    if o in self.doc.objects:
+                        self.doc.objects.remove(o)
+                        self.doc.objects.insert(0, o)
+
+        self._doc_action(doit)
+
+    def _select_related(self, objs, mode):
+        related = []
+        for o in objs:
+            if mode == "parents":
+                related.extend(o.parents)
+            else:
+                related.extend(o.children)
+
+        # 去重
+        unique = []
+        seen = set()
+        for o in related:
+            if id(o) not in seen:
+                seen.add(id(o))
+                unique.append(o)
+
+        self.doc.set_selection(unique)
+
+    def _simple_edit_script_button(self, obj):
+        from media.script_button_wizard import ScriptButtonWizard
+
+        dlg = ScriptButtonWizard(self, obj, parent=self)
+        if dlg.exec():
+            def doit():
+                dlg.apply_to(obj)
+
+            self._doc_action(doit)
+
+    def _edit_text_object(self, obj):
+        from PySide6.QtWidgets import (
+            QColorDialog,
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QLineEdit,
+            QPushButton,
+            QSpinBox,
+            QVBoxLayout,
+        )
+        from PySide6.QtGui import QColor
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("编辑文本")
+        dlg.setMinimumWidth(360)
+
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        text_edit = QLineEdit(getattr(obj, "text", ""))
+        size_spin = QSpinBox()
+        size_spin.setRange(6, 200)
+        size_spin.setValue(int(getattr(obj, "size", 16)))
+
+        color_holder = [QColor(getattr(obj, "color", "#1f2937"))]
+        color_btn = QPushButton()
+        color_btn.setFixedHeight(22)
+
+        def paint_color():
+            color_btn.setStyleSheet(
+                f"background:{color_holder[0].name()};"
+                f"border:1px solid rgba(0,0,0,0.30);"
+                f"border-radius:5px;"
+            )
+
+        def pick_color():
+            c = QColorDialog.getColor(color_holder[0], self, "选择文本颜色")
+            if c.isValid():
+                color_holder[0] = c
+                paint_color()
+
+        color_btn.clicked.connect(pick_color)
+        paint_color()
+
+        form.addRow("文本内容", text_edit)
+        form.addRow("字号", size_spin)
+        form.addRow("颜色", color_btn)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec():
+            def doit():
+                obj.text = text_edit.text()
+                obj.size = int(size_spin.value())
+                obj.color = color_holder[0].name()
+
+            self._doc_action(doit)
+                       
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False

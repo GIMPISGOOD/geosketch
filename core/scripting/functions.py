@@ -21,6 +21,16 @@ def build_global_env(interp):
         "π": math.pi,
         "e": math.e,
 
+        # ★ 内置数学函数（无需 import math 即可直接使用）
+        "sin": math.sin, "cos": math.cos, "tan": math.tan,
+        "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+        "asin": math.asin, "acos": math.acos, "atan": math.atan,
+        "sqrt": math.sqrt, "abs": abs, 
+        "ln": math.log, "log": math.log10, "exp": math.exp,
+        "floor": math.floor, "ceil": math.ceil, 
+        "round": lambda x: float(round(x)),
+        "min": min, "max": max,
+
         # 输出 / 等待
         "print": _print,
         "打印": _print,
