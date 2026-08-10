@@ -440,10 +440,13 @@ class Canvas(QWidget):
     def contextMenuEvent(self, ev):
         """增强右键菜单：对象编辑、层级、依赖、脚本按钮、文本、媒体对象等。"""
         from PySide6.QtWidgets import QMenu
+        from PySide6.QtCore import QPointF
         from media.base import MediaObject
         from media.script_button import ScriptButtonObject
 
-        hit = self.pick(ev.position())
+        # ★ 修复 1：QContextMenuEvent 没有 position()，必须使用 pos() 并转为 QPointF
+        local_pos = QPointF(ev.pos())
+        hit = self.pick(local_pos)
         selected = [o for o in self.doc.objects if o.selected]
 
         if hit is not None:
@@ -471,8 +474,6 @@ class Canvas(QWidget):
 
         # ---------- 选中对象通用操作 ----------
         if selected:
-            obj = selected[0]
-
             menu.addAction("重命名…", lambda: self._rename_objects(selected))
 
             visible_all = all(getattr(o, "visible", True) for o in selected)
@@ -508,7 +509,8 @@ class Canvas(QWidget):
             menu.addAction("粘贴", lambda: self.doc.paste())
 
         if not menu.isEmpty():
-            menu.exec(ev.globalPosition().toPoint())
+            # ★ 修复 2：QContextMenuEvent 没有 globalPosition()，必须使用 globalPos()
+            menu.exec(ev.globalPos())
         else:
             super().contextMenuEvent(ev)
             
