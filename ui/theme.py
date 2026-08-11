@@ -1,16 +1,13 @@
 """多主题系统：内置 4 套主题，运行时动态切换。
-
 所有渲染代码照旧写 theme.XXX —— 模块级 __getattr__（PEP 562）
 始终返回当前主题的颜色，换肤时无需触碰任何绘制代码。
 """
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPen
 
-
 def _c(v):
     """hex 字符串或 (r,g,b,a) 元组 → QColor"""
     return QColor(v) if isinstance(v, str) else QColor(*v)
-
 
 THEMES = {
     "纸白": {
@@ -81,28 +78,22 @@ THEMES = {
 
 _active = "纸白"
 
-
 class _Bus(QObject):
     changed = Signal(str)
 
-
 bus = _Bus()
-
 
 def theme_names():
     return list(THEMES)
 
-
 def active_name():
     return _active
-
 
 def set_theme(name):
     global _active
     if name in THEMES and name != _active:
         _active = name
         bus.changed.emit(name)
-
 
 def __getattr__(name):
     """动态取色：永远返回当前主题下的 QColor（缺失键回退到纸白）。"""
@@ -112,7 +103,6 @@ def __getattr__(name):
     if name in THEMES["纸白"]:
         return _c(THEMES["纸白"][name])
     raise AttributeError(name)
-
 
 # ───────────────────────── 样式表生成 ─────────────────────────
 def app_stylesheet() -> str:
@@ -126,21 +116,20 @@ def app_stylesheet() -> str:
     }}
     QMainWindow {{ background: {t["WINDOW_BG"]}; }}
     QMenuBar {{ background: {t["MENU_BG"]}; color: {t["INK"]};
-               border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
+                border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
     QMenuBar::item {{ padding: 5px 10px; border-radius: 6px; }}
     QMenuBar::item:selected {{ background: {t["MENU_HOVER"]}; }}
     QMenu {{ background: {t["MENU_BG"]}; color: {t["INK"]};
-            border: 1px solid {t["BORDER"]}; }}
+             border: 1px solid {t["BORDER"]}; }}
     QMenu::item {{ padding: 6px 24px; }}
     QMenu::item:selected {{ background: {t["MENU_HOVER"]}; }}
     QStatusBar {{ background: {t["MENU_BG"]}; border-top: 1px solid {t["BORDER"]}; }}
     QStatusBar QLabel {{ color: {t["SUBINK"]}; }}
-    QComboBox, QLineEdit, QCheckBox {{
-        background: {t["PANEL_BG"]}; color: {t["INK"]};
+    QComboBox, QLineEdit, QCheckBox, QDoubleSpinBox, QSpinBox {{
+        background: {t["WINDOW_BG"]}; color: {t["INK"]};
         border: 1px solid {t["PANEL_BORDER"]}; border-radius: 6px; padding: 3px 6px;
     }}
     """
-
 
 def canvas_qss() -> str:
     """画布内全部悬浮面板的样式（磨砂玻璃）——面板都是 canvas 子控件，必须放这里。"""
@@ -161,6 +150,7 @@ def canvas_qss() -> str:
     #toolRail QToolButton {{ padding: 7px; }}
     #zoomBar QToolButton {{ padding: 4px 9px; }}
     #sidesPicker QToolButton, #dividePicker QToolButton {{ padding: 5px 8px; }}
+    
     #toolRail QToolButton:hover, #zoomBar QToolButton:hover,
     #sidesPicker QToolButton:hover, #dividePicker QToolButton:hover {{
         background: {t["PANEL_HOVER"]};
@@ -169,19 +159,22 @@ def canvas_qss() -> str:
     #sidesPicker QToolButton:checked, #dividePicker QToolButton:checked {{
         background: {t["ACCENT"]}; color: #ffffff;
     }}
+    
     #zoomBar QLabel, #sidesPicker QLabel, #dividePicker QLabel {{
         color: {t["SUBINK"]}; font-weight: 600;
     }}
     #varSliderPanel QLabel {{ color: {t["INK"]}; }}
     #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
     #exprPanel QLabel {{ color: {t["INK"]}; }}
+    
     #trashBtn {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["SELECTED"]};
         border-radius: 14px;
     }}
     #trashBtn:hover {{ background: {t["SELECTED"]}; }}
-        #functionPanel QScrollBar:vertical {{
+    
+    #functionPanel QScrollBar:vertical {{
         background: transparent; width: 8px; margin: 2px;
     }}
     #functionPanel QScrollBar::handle:vertical {{
@@ -192,9 +185,7 @@ def canvas_qss() -> str:
     }}
     #functionPanel QScrollBar::add-line:vertical,
     #functionPanel QScrollBar::sub-line:vertical {{ height: 0px; }}
-    #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
-    #exprPanel QLabel {{ color: {t["INK"]}; }}
-    
+
     /* ================= 属性面板专属样式 ================= */
     #propertyPanel QLabel {{
         color: {t["INK"]};
@@ -237,14 +228,13 @@ def canvas_qss() -> str:
     }}
     #propertyPanel QPushButton:pressed {{
         background: {t["INK"]};
-    }}    
+    }}
+    /* ===================================================== */
     """
-
 
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
 def pen(color, width=1.0):
     return QPen(QColor(color), float(width))
-
 
 def dashed_pen(color, width=1.0):
     """虚线画笔：显式 CustomDashLine + 浮点 dash pattern。"""
@@ -252,22 +242,19 @@ def dashed_pen(color, width=1.0):
         c = QColor(color)
     else:
         c = _c(color)
-
     p = QPen(c, float(width))
     p.setStyle(Qt.PenStyle.CustomDashLine)
     p.setDashPattern([6.0, 4.0])
     p.setCapStyle(Qt.PenCapStyle.FlatCap)
     p.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-
     return p
-
 
 def brush(color):
     return QBrush(QColor(color))
 
-
 LABEL_FONT = QFont("Consolas", 9)
 LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
+
 AXIS_FONT = QFont("Georgia", 11, QFont.Weight.DemiBold)
 AXIS_FONT.setItalic(True)
 

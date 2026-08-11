@@ -12,7 +12,7 @@ from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
                            QPainter, QTextCursor, QTextFormat, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
                                QPushButton, QWidget, QTextEdit, QComboBox,
-                               QLabel, QMessageBox, QCompleter)
+                               QLabel, QMessageBox, QCompleter, QApplication)
 
 from core.scripting import run_script, parse
 from core.scripting.errors import ScriptError
