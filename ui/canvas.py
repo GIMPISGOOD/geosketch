@@ -3,7 +3,7 @@ import os
 import random
 
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QWidget, QToolButton
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
@@ -199,17 +199,22 @@ class Canvas(QWidget):
         if self._bg_cache is not None and self._bg_cache_key == key:
             p.drawPixmap(0, 0, self._bg_cache)
             return
-        # 重建缓存
-        from PySide6.QtGui import QPixmap
-        self._bg_cache = QPixmap(self.width(), self.height())
-        self._bg_cache.setDevicePixelRatio(self.devicePixelRatioF())
+            
+        # ★ 修复 HiDPI 缩放导致背景/坐标轴无法占满窗口的问题
+        dpr = self.devicePixelRatioF()
+        # 必须用 逻辑尺寸 × DPR 来创建物理像素大小的 QPixmap
+        self._bg_cache = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+        self._bg_cache.setDevicePixelRatio(dpr)
         self._bg_cache.fill(Qt.GlobalColor.transparent)
+        
         bg_p = QPainter(self._bg_cache)
         bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 此时 bg_p 的逻辑坐标系完美等同于 0~self.width(), 0~self.height()
         self._draw_background(bg_p)
         self._draw_grid(bg_p)
         self._draw_axes(bg_p)
         bg_p.end()
+        
         self._bg_cache_key = key
         p.drawPixmap(0, 0, self._bg_cache)
 
