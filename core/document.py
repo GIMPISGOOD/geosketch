@@ -37,6 +37,12 @@ class Document(QObject):
         self.macros = []
         self._macro_suppress = False
         self.names = {}
+        self._objects_version = 0
+        self._type_cache = {}
+        self._type_cache_version = -1
+
+        # ★ 约束系统预留（当前为空列表，零开销）
+        self.constraints = []
         
     # ================= 对象命名 =================
 
@@ -128,15 +134,13 @@ class Document(QObject):
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
+        self._objects_version += 1          # ★ 结构变化
         self.objects.append(obj)
-
         if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
             self.expr_objects.append(obj)
-
         # ★ 宏录制：通知对象新增
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
-
         return obj
 
     def _collect_with_deps(self, objs):
@@ -202,6 +206,7 @@ class Document(QObject):
     def _remove(self, obj):
         """级联删除（不入栈、不发信号），返回被删集合。"""
         self._mutation_count += 1
+        self._objects_version += 1          # ★ 结构变化
         doomed, stack = set(), [obj]
         while stack:
             o = stack.pop()
@@ -221,7 +226,7 @@ class Document(QObject):
         if not getattr(self, "_macro_suppress", False):
             self.object_removed.emit(obj)
         return doomed
-
+    
     def remove(self, obj):
         if self._group_depth == 0:
             self._push_undo()
@@ -243,15 +248,13 @@ class Document(QObject):
     def clear(self):
         if self.objects:
             self._push_undo()
-
-        self.objects.clear()
-        self.expr_objects.clear()
-
-        # ★ 宏录制：通知清空
-        if not getattr(self, "_macro_suppress", False):
-            self.cleared.emit()
-
-        self.changed.emit()
+            self.objects.clear()
+            self.expr_objects.clear()
+            self._objects_version += 1      # ★ 结构变化
+            # ★ 宏录制：通知清空
+            if not getattr(self, "_macro_suppress", False):
+                self.cleared.emit()
+            self.changed.emit()
         
     # ================= 选择 =================
     def set_selection(self, objs):
@@ -259,9 +262,34 @@ class Document(QObject):
         for o in self.objects:
             o.selected = id(o) in target
         self.changed.emit()
+    # ================= 类型缓存 =================
 
-    # ================= 增量重算 =================
-    def recompute_from(self, roots):
+    def get_typed(self, type_name):
+        """按类型名返回对象列表（带缓存，对象增删时自动失效）。
+
+        用法示例：
+            for fc in doc.get_typed("FunctionCurve"):
+                fc.invalidate_cache()
+        """
+        if self._type_cache_version != self._objects_version:
+            self._type_cache.clear()
+            self._type_cache_version = self._objects_version
+        if type_name not in self._type_cache:
+            self._type_cache[type_name] = [
+                o for o in self.objects if type(o).__name__ == type_name
+            ]
+        return self._type_cache[type_name]
+
+    # ================= 静默重算 =================
+
+    def recompute_silent(self, roots):
+        """静默重算：与 recompute_from 相同的依赖传播，但不 emit changed。
+
+        用途：
+        - 约束求解器内部多轮迭代（每轮只改坐标，最后统一 emit）
+        - refresh_variables 内部（先静默重算，最后统一 emit）
+        - 任何需要"改完再刷新"的批量操作
+        """
         roots = roots if isinstance(roots, (list, tuple)) else [roots]
         dirty = set()
         stack = list(roots)
@@ -269,13 +297,34 @@ class Document(QObject):
             o = stack.pop()
             if o in dirty:
                 continue
-            dirty.add(o)                 # ★ 根节点自己也加入重算集合
+            dirty.add(o)
             stack.extend(o.children)
         for o in sorted(dirty, key=lambda o: o.id):
             o.exists = all(p.exists for p in o.parents)
             if o.exists:
                 o.recompute()
         self._mutation_count += 1
+
+    # ================= 约束求解预留 =================
+
+    def solve_constraints(self, trigger_points=None, pinned_points=None):
+        """约束求解入口（预留）。
+
+        当前无约束时立即返回，零开销。
+        未来实现时：
+        1. 收集 trigger_points 所在的约束连通分量
+        2. 收集分量内的 FreePoint 作为自由变量
+        3. LM 迭代求解
+        4. recompute_silent(moved_points)
+        5. 链式检查是否有新约束被触发（最多 N 轮）
+        """
+        if not self.constraints:
+            return
+        
+    # ================= 增量重算 =================
+    def recompute_from(self, roots):
+        """增量重算 + emit changed（对外接口，行为不变）。"""
+        self.recompute_silent(roots)
         self.changed.emit()
 
     # ================= 撤销 / 重做 =================
@@ -308,21 +357,25 @@ class Document(QObject):
 
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
-        # ★ 新增：标记所有函数曲线缓存失效
         from geo.function_curve import FunctionCurve
-        for obj in self.objects:
-            if isinstance(obj, FunctionCurve):
-                obj.invalidate_cache()
+
+        # ★ 优化：使用类型缓存，避免全量扫描 objects
+        for obj in self.get_typed("FunctionCurve"):
+            obj.invalidate_cache()
 
         moved = []
         for eo in sorted(self.expr_objects, key=lambda o: o.id):
             if eo.exists:
                 eo.recompute()
                 moved.extend(eo.moved_points())
+
         if moved:
-            self.recompute_from(moved)
-        else:
-            self.changed.emit()
+            self.recompute_silent(moved)    # ★ 静默重算，不单独 emit
+
+        # ★ 未来约束求解：变量变化后也需要求解
+        # self.solve_constraints()
+
+        self.changed.emit()                 # ★ 统一 emit 一次
 
     @contextmanager
     def action(self):
@@ -371,26 +424,21 @@ class Document(QObject):
     def _load_state(self, data):
         self.objects.clear()
         self.expr_objects.clear()
-
+        self._objects_version += 1          # ★ 结构变化
         pool = {}
-
         # ★ 加载 / 撤销 / 重做期间不录制宏
         self._macro_suppress = True
-
         try:
             for item in data:
                 cls = GEO_REGISTRY[item["type"]]
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
-                obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+                obj.id = item["id"]
                 pool[item["id"]] = self._add(obj)
-
             if data:
                 GeoObject.bump_ids(max(item["id"] for item in data))
-
         finally:
             self._macro_suppress = False
-
         self.changed.emit()
 
     def save(self, path):
