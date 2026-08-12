@@ -78,6 +78,10 @@ THEMES = {
 
 _active = "纸白"
 
+_color_cache: dict[tuple, QColor] = {}
+_pen_cache: dict[tuple, QPen] = {}
+_brush_cache: dict[str, QBrush] = {}
+
 class _Bus(QObject):
     changed = Signal(str)
 
@@ -93,15 +97,27 @@ def set_theme(name):
     global _active
     if name in THEMES and name != _active:
         _active = name
+        # ★ 切换主题时清空所有缓存
+        _color_cache.clear()
+        _pen_cache.clear()
+        _brush_cache.clear()
         bus.changed.emit(name)
 
 def __getattr__(name):
-    """动态取色：永远返回当前主题下的 QColor（缺失键回退到纸白）。"""
+    """动态取色：永远返回当前主题下的 QColor（带缓存）。"""
+    key = (_active, name)
+    cached = _color_cache.get(key)
+    if cached is not None:
+        return cached
     t = THEMES[_active]
     if name in t:
-        return _c(t[name])
+        c = _c(t[name])
+        _color_cache[key] = c
+        return c
     if name in THEMES["纸白"]:
-        return _c(THEMES["纸白"][name])
+        c = _c(THEMES["纸白"][name])
+        _color_cache[key] = c
+        return c
     raise AttributeError(name)
 
 # ───────────────────────── 样式表生成 ─────────────────────────
@@ -233,24 +249,53 @@ def canvas_qss() -> str:
     """
 
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
+# ───────────────────────── 绘图工具（带缓存）─────────────────────────
+
 def pen(color, width=1.0):
-    return QPen(QColor(color), float(width))
+    """实线画笔（带缓存）。返回副本，调用者可安全修改。"""
+    if isinstance(color, QColor):
+        ckey = color.name(QColor.NameFormat.HexArgb)
+    else:
+        ckey = str(color)
+    key = (ckey, float(width))
+    cached = _pen_cache.get(key)
+    if cached is not None:
+        return QPen(cached)           # 隐式共享副本，极低成本
+    p = QPen(QColor(color), float(width))
+    _pen_cache[key] = p
+    return QPen(p)
 
 def dashed_pen(color, width=1.0):
-    """虚线画笔：显式 CustomDashLine + 浮点 dash pattern。"""
+    """虚线画笔（带缓存）。返回副本，调用者可安全修改。"""
     if isinstance(color, QColor):
-        c = QColor(color)
+        ckey = color.name(QColor.NameFormat.HexArgb)
     else:
-        c = _c(color)
+        ckey = str(color)
+    key = ("dash", ckey, float(width))
+    cached = _pen_cache.get(key)
+    if cached is not None:
+        return QPen(cached)
+    c = QColor(color) if isinstance(color, QColor) else _c(color)
     p = QPen(c, float(width))
     p.setStyle(Qt.PenStyle.CustomDashLine)
     p.setDashPattern([6.0, 4.0])
     p.setCapStyle(Qt.PenCapStyle.FlatCap)
     p.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-    return p
+    _pen_cache[key] = p
+    return QPen(p)
 
 def brush(color):
-    return QBrush(QColor(color))
+    """画刷（带缓存）。返回副本，调用者可安全修改。"""
+    if isinstance(color, QColor):
+        key = color.name(QColor.NameFormat.HexArgb)
+    else:
+        key = str(color)
+    cached = _brush_cache.get(key)
+    if cached is not None:
+        return QBrush(cached)
+    b = QBrush(QColor(color))
+    _brush_cache[key] = b
+    return QBrush(b)
 
 LABEL_FONT = QFont("Consolas", 9)
 LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)

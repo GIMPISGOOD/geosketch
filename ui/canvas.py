@@ -61,7 +61,12 @@ class Canvas(QWidget):
         self._trash.hide()
 
         self.info_panel = PropertyPanel(self, self)
-
+        # ★ 性能优化：背景缓存 + 渲染列表缓存
+        self._bg_cache = None
+        self._bg_cache_key = None
+        self._render_list = []
+        self._render_list_version = -1
+        
         # ================= 雪花彩蛋 =================
         self._snow_active = False
         self._snowflakes = []
@@ -184,21 +189,84 @@ class Canvas(QWidget):
             p.end()
 
         self._place_trash()
+    # ================= 性能优化：背景缓存 =================
 
+    def _draw_background_cached(self, p: QPainter) -> None:
+        """背景 + 网格 + 坐标轴缓存渲染。视图/主题不变时直接 blit。"""
+        key = (self.width(), self.height(),
+               round(self.origin.x(), 2), round(self.origin.y(), 2),
+               round(self.scale, 2), theme.active_name())
+        if self._bg_cache is not None and self._bg_cache_key == key:
+            p.drawPixmap(0, 0, self._bg_cache)
+            return
+        # 重建缓存
+        from PySide6.QtGui import QPixmap
+        self._bg_cache = QPixmap(self.width(), self.height())
+        self._bg_cache.setDevicePixelRatio(self.devicePixelRatioF())
+        self._bg_cache.fill(Qt.GlobalColor.transparent)
+        bg_p = QPainter(self._bg_cache)
+        bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_background(bg_p)
+        self._draw_grid(bg_p)
+        self._draw_axes(bg_p)
+        bg_p.end()
+        self._bg_cache_key = key
+        p.drawPixmap(0, 0, self._bg_cache)
+
+    # ================= 性能优化：渲染列表缓存 =================
+
+    def _get_render_list(self):
+        """返回 [(obj, renderer), ...] 缓存列表。对象增删/显隐变化时重建。"""
+        ver = self.doc._mutation_count
+        if self._render_list_version != ver:
+            self._render_list = []
+            for obj in self.doc.objects:
+                if obj.visible and obj.exists:
+                    renderer = find_renderer(obj)
+                    if renderer is not None:
+                        self._render_list.append((obj, renderer))
+            self._render_list_version = ver
+        return self._render_list
+
+    # ================= 性能优化：视口裁剪 =================
+
+    def _in_viewport(self, obj) -> bool:
+        """快速判断对象是否在视口内（粗略检测，宁多画不漏画）。"""
+        margin = 60.0  # 像素边距
+        w, h = self.width(), self.height()
+        # 点类对象：直接坐标判断
+        if hasattr(obj, 'x') and hasattr(obj, 'y') and not hasattr(obj, 'width'):
+            sx = self.origin.x() + obj.x * self.scale
+            sy = self.origin.y() - obj.y * self.scale
+            return -margin <= sx <= w + margin and -margin <= sy <= h + margin
+        # 媒体对象：矩形判断
+        if hasattr(obj, 'width') and hasattr(obj, 'height') and hasattr(obj, 'x'):
+            x0 = self.origin.x() + obj.x * self.scale
+            y0 = self.origin.y() - obj.y * self.scale
+            x1 = x0 + obj.width * self.scale
+            y1 = y0 + obj.height * self.scale
+            return not (x1 < -margin or x0 > w + margin or
+                        y1 < -margin or y0 > h + margin)
+        # 线段/圆/曲线等：第一版不裁剪，默认可见
+        return True
+    
     def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
         """渲染几何场景（背景 + 可选网格/坐标轴 + 全部对象）。
         bg_mode: "grid"=网格+坐标轴, "axes"=仅坐标轴, "none"=都不画。"""
-        self._draw_background(p)
+
+        # ★ 优化：背景/网格/坐标轴使用缓存
         if bg_mode == "grid":
-            self._draw_grid(p)
-            self._draw_axes(p)
+            self._draw_background_cached(p)
         elif bg_mode == "axes":
+            self._draw_background(p)
             self._draw_axes(p)
-        for obj in self.doc.objects:
-            if obj.visible and obj.exists:
-                renderer = find_renderer(obj)
-                if renderer is not None:
-                    renderer(p, obj, self)
+        else:
+            self._draw_background(p)
+
+        # ★ 优化：使用渲染列表缓存 + 视口裁剪
+        for obj, renderer in self._get_render_list():
+            if self._in_viewport(obj):
+                renderer(p, obj, self)
 
         # ================= 图像导出 =================
         # ================= 图像导出 =================
@@ -389,7 +457,7 @@ class Canvas(QWidget):
                 self.height() - zb.height() - 16)
 
         self.info_panel.reposition()
-
+        self._bg_cache = None  
         # snow 彩蛋：如果当前没有雪花，但标题仍是 snow，则重新生成
         if self._snow_active and not self._snowflakes:
             self._init_snow()
@@ -698,6 +766,7 @@ class Canvas(QWidget):
         self._trash.setIcon(trash_icon())
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
+        self._bg_cache = None   
         self.update()
     # ================= snow 彩蛋 =================
 

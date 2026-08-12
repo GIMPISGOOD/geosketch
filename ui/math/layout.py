@@ -6,20 +6,23 @@
 """
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainterPath, QPen, QFontMetricsF
 
 from . import font as mfont
 from .parser import (
     Ord, Bin, Sup, Sub, SubSup, Frac, Sqrt, Over, Paren, Row, is_cjk
 )
 
+# ★ 性能优化：字体度量全局缓存（跨 MathLayout 实例共享）
+_GLOBAL_METRICS_CACHE: dict[tuple, object] = {}
 
 class MathLayout:
     def __init__(self, painter, size, color):
         self.p = painter
         self.size = float(size)
         self.color = QColor(color)
-        self._mcache = {}
+        # ★ 改为引用模块级缓存，不再每实例新建
+        self._mcache: dict[tuple, QFontMetricsF] = {}
 
     # ── 字体与度量 ──
 
