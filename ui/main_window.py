@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
         self._build_var_menu()
-        self._build_macro_menu()
+        self._build_advanced_menu()  # ★ 宏与脚本库移入高级菜单
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
@@ -164,7 +164,8 @@ class MainWindow(QMainWindow):
 
     def _build_menubar(self) -> None:
         mb = self.menuBar()
-
+        
+        # ================= 1. 文件 =================
         fm = mb.addMenu("文件(&F)")
         for text, slot, key in (
             ("新建(&N)", self.doc.clear, QKeySequence.StandardKey.New),
@@ -175,80 +176,43 @@ class MainWindow(QMainWindow):
             act.setShortcut(key)
             act.triggered.connect(slot)
             fm.addAction(act)
+            
         info_act = QAction("文档信息(&I)…", self)
         info_act.triggered.connect(self._doc_info)
         fm.addAction(info_act)
+        
+        fm.addSeparator()
         export_act = QAction("导出图像(&E)…", self)
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self._export_image)
         fm.addAction(export_act)
-        fm.addSeparator()
+        
         export_cw = QAction("导出到课件(&C)…", self)
         export_cw.triggered.connect(self._export_courseware)
-        fm.addAction(export_cw)        
+        fm.addAction(export_cw)
+        
+        fm.addSeparator()
         quit_act = QAction("退出(&X)", self)
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         quit_act.triggered.connect(self.close)
         fm.addAction(quit_act)
 
-        # 工具菜单：插件工具
-        tm = mb.addMenu("工具(&T)")
-        plugin_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "menu"]
-        for spec in plugin_specs:
-            tm.addAction(self._actions[spec["cls"]])
-        if not plugin_specs:
-            e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
-        # ================= 变换菜单 =================
-        gm = mb.addMenu("变换(&G)")
-
-        transform_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "transform"],
-            key=lambda s: s.get("order", 99)
-        )
-
-        for spec in transform_specs:
-            gm.addAction(self._actions[spec["cls"]])
-
-        if not transform_specs:
-            e = gm.addAction("（暂无变换工具）")
-            e.setEnabled(False)
-        # 插入菜单：媒体对象
-        im = mb.addMenu("插入(&I)")
-        insert_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "insert"],
-            key=lambda s: s.get("order", 99))
-        for spec in insert_specs:
-            im.addAction(self._actions[spec["cls"]])
-        if not insert_specs:
-            e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
-        # 度量菜单：panel="measure" 的工具
-        mm = mb.addMenu("度量(&L)")
-        measure_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "measure"],
-            key=lambda s: s.get("order", 99))
-        for spec in measure_specs:
-            mm.addAction(self._actions[spec["cls"]])
-        if not measure_specs:
-            e = mm.addAction("（暂无度量工具）"); e.setEnabled(False)
-                # 视图菜单：撤销 / 重做
-        vm = mb.addMenu("视图(&W)")
+        # ================= 2. 编辑 (从原视图菜单独立) =================
+        em = mb.addMenu("编辑(&E)")
         self._undo_act = QAction("撤销(&U)", self)
-        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)      # Ctrl+Z
+        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)
         self._undo_act.triggered.connect(self.doc.undo)
-        vm.addAction(self._undo_act)
+        em.addAction(self._undo_act)
+        
         self._redo_act = QAction("重做(&R)", self)
-        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)      # Ctrl+Shift+Z
+        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)
         self._redo_act.triggered.connect(self.doc.redo)
-        vm.addAction(self._redo_act)
+        em.addAction(self._redo_act)
+        
         self.doc.history_changed.connect(self._update_history_actions)
         self._update_history_actions()
-        self._func_editor_act = QAction("函数编辑器", self, checkable=True)
-        self._func_editor_act.setChecked(True)
-        self._func_editor_act.toggled.connect(self.function_dock.setVisible)
-        self.function_dock.visibilityChanged.connect(self._func_editor_act.setChecked)
-        # 加到「视图」菜单
-        vm.addAction(self._func_editor_act)
-        vm.addSeparator()
+        
+        em.addSeparator()
         for text, key, slot in (
             ("剪切(&T)", QKeySequence.StandardKey.Cut, lambda: self.doc.cut_selection()),
             ("复制(&C)", QKeySequence.StandardKey.Copy, lambda: self.doc.copy_selection()),
@@ -257,15 +221,26 @@ class MainWindow(QMainWindow):
             a = QAction(text, self)
             a.setShortcut(key)
             a.triggered.connect(slot)
-            vm.addAction(a)
-        # ================= 脚本库菜单 =================
-        sm = mb.addMenu("脚本库(&L)")
-        mgr_act = QAction("管理脚本库...", self)
-        mgr_act.triggered.connect(self._open_script_library_manager)
-        sm.addAction(mgr_act)
+            em.addAction(a)
+            
+        em.addSeparator()
+        del_act = QAction("删除选中(&D)", self)
+        del_act.setShortcut(QKeySequence.StandardKey.Delete)
+        del_act.triggered.connect(self.doc.remove_selected)
+        em.addAction(del_act)
+
+        # ================= 3. 视图 =================
+        vm = mb.addMenu("视图(&V)")
+        self._func_editor_act = QAction("函数编辑器", self, checkable=True)
+        self._func_editor_act.setChecked(True)
+        self._func_editor_act.toggled.connect(self.function_dock.setVisible)
+        self.function_dock.visibilityChanged.connect(self._func_editor_act.setChecked)
+        vm.addAction(self._func_editor_act)
         
-        # 主题菜单：互斥单选
-        thm = mb.addMenu("主题(&M)")
+        vm.addSeparator()
+        
+        # 主题菜单移入视图
+        thm = vm.addMenu("主题(&M)")
         tgroup = QActionGroup(self)
         tgroup.setExclusive(True)
         for name in theme.theme_names():
@@ -275,10 +250,41 @@ class MainWindow(QMainWindow):
             tgroup.addAction(act)
             thm.addAction(act)
         thm.addSeparator()
-        thm.addSeparator()
         custom_act = QAction("自定义主题…", self)
         custom_act.triggered.connect(self._open_theme_editor)
         thm.addAction(custom_act)
+
+        # ================= 4. 构造 (原"工具"菜单，预留未来扩展) =================
+        cm = mb.addMenu("构造(&C)")
+        plugin_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "menu"]
+        for spec in sorted(plugin_specs, key=lambda s: s.get("order", 99)):
+            cm.addAction(self._actions[spec["cls"]])
+        if not plugin_specs:
+            e = cm.addAction("（暂无构造工具）"); e.setEnabled(False)
+
+        # ================= 5. 度量 =================
+        mm = mb.addMenu("度量(&M)")
+        measure_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "measure"]
+        for spec in sorted(measure_specs, key=lambda s: s.get("order", 99)):
+            mm.addAction(self._actions[spec["cls"]])
+        if not measure_specs:
+            e = mm.addAction("（暂无度量工具）"); e.setEnabled(False)
+
+        # ================= 6. 变换 =================
+        gm = mb.addMenu("变换(&T)")
+        transform_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "transform"]
+        for spec in sorted(transform_specs, key=lambda s: s.get("order", 99)):
+            gm.addAction(self._actions[spec["cls"]])
+        if not transform_specs:
+            e = gm.addAction("（暂无变换工具）"); e.setEnabled(False)
+
+        # ================= 7. 插入 =================
+        im = mb.addMenu("插入(&I)")
+        insert_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "insert"]
+        for spec in sorted(insert_specs, key=lambda s: s.get("order", 99)):
+            im.addAction(self._actions[spec["cls"]])
+        if not insert_specs:
+            e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
         
     def _open_script_library_manager(self):
         from ui.script_library_manager import ScriptLibraryManager
@@ -355,26 +361,34 @@ class MainWindow(QMainWindow):
                 
     # ================= 宏系统 =================
 
-    def _build_macro_menu(self) -> None:
+    def _build_advanced_menu(self) -> None:
+        """高级功能菜单：脚本库与宏系统。"""
         mb = self.menuBar()
-        mm = mb.addMenu("宏(&M)")
-
-        self._record_act = QAction("● 开始录制", self, checkable=True)
+        am = mb.addMenu("高级(&A)")
+        
+        # 1. 脚本库
+        mgr_act = QAction("管理脚本库...", self)
+        mgr_act.triggered.connect(self._open_script_library_manager)
+        am.addAction(mgr_act)
+        
+        am.addSeparator()
+        
+        # 2. 宏系统
+        self._record_act = QAction("● 开始录制宏", self, checkable=True)
         self._record_act.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self._record_act.triggered.connect(self._toggle_macro_recording)
-        mm.addAction(self._record_act)
-
+        am.addAction(self._record_act)
+        
         self._play_last_act = QAction("回放最新宏", self)
         self._play_last_act.setShortcut(QKeySequence("Ctrl+Shift+P"))
         self._play_last_act.triggered.connect(self._play_last_macro)
-        mm.addAction(self._play_last_act)
-
-        mm.addSeparator()
-
-        mgr_act = QAction("宏管理器…", self)
-        mgr_act.triggered.connect(self._open_macro_dialog)
-        mm.addAction(mgr_act)
-
+        am.addAction(self._play_last_act)
+        
+        am.addSeparator()
+        macro_mgr_act = QAction("宏管理器…", self)
+        macro_mgr_act.triggered.connect(self._open_macro_dialog)
+        am.addAction(macro_mgr_act)
+        
         self._update_macro_actions()
 
     def _toggle_macro_recording(self):
