@@ -106,7 +106,7 @@ class TransformTool(Tool):
 # 平移
 # ============================================================
 
-@register_tool(name="平移·坐标", order=301, panel="transform", icon="select",
+@register_tool(name="平移·坐标", order=301, panel="transform", icon="translate",
                hint="按 dx/dy 表达式平移选中对象，可绑定变量")
 class TranslateExprTool(TransformTool):
     def _start(self, canvas):
@@ -133,7 +133,7 @@ class TranslateExprTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="平移·两点向量", order=302, panel="transform", icon="select",
+@register_tool(name="平移·两点向量", order=302, panel="transform", icon="translate",
                hint="先选对象，再点击两个点 A→B 作为平移向量")
 class TranslateVectorTool(TransformTool):
     def _start(self, canvas):
@@ -165,7 +165,7 @@ class TranslateVectorTool(TransformTool):
         _back_select(canvas)
 
 
-@register_tool(name="平移·标记线段", order=303, panel="transform", icon="select",
+@register_tool(name="平移·标记线段", order=303, panel="transform", icon="translate",
                hint="先选对象，再点击一条线段/直线/射线作为平移向量")
 class TranslateSegmentTool(TransformTool):
     def _start(self, canvas):
@@ -196,7 +196,7 @@ class TranslateSegmentTool(TransformTool):
 # 旋转
 # ============================================================
 
-@register_tool(name="旋转·角度", order=311, panel="transform", icon="select",
+@register_tool(name="旋转·角度", order=311, panel="transform", icon="rotate",
                hint="先选对象，点击旋转中心，再输入角度表达式")
 class RotateTool(TransformTool):
     def _start(self, canvas):
@@ -231,7 +231,7 @@ class RotateTool(TransformTool):
 # 缩放
 # ============================================================
 
-@register_tool(name="缩放·比例", order=321, panel="transform", icon="select",
+@register_tool(name="缩放·比例", order=321, panel="transform", icon="scale",
                hint="先选对象，点击缩放中心，再输入比例表达式")
 class ScaleFactorTool(TransformTool):
     def _start(self, canvas):
@@ -262,7 +262,7 @@ class ScaleFactorTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="缩放·线段比", order=322, panel="transform", icon="select",
+@register_tool(name="缩放·线段比", order=322, panel="transform", icon="scale",
                hint="先选对象，点击缩放中心，再点两条线段，比例 = 线段1/线段2")
 class ScaleRatioTool(TransformTool):
     def _start(self, canvas):
@@ -320,7 +320,7 @@ class ScaleRatioTool(TransformTool):
 # 反射 / 中心对称
 # ============================================================
 
-@register_tool(name="反射·轴对称", order=331, panel="transform", icon="select",
+@register_tool(name="反射·轴对称", order=331, panel="transform", icon="reflect",
                hint="先选对象，再点击对称轴：可直接点线段/直线，或点两个点")
 class ReflectTool(TransformTool):
     def _start(self, canvas):
@@ -366,7 +366,7 @@ class ReflectTool(TransformTool):
         _back_select(canvas)
 
 
-@register_tool(name="反射·中心对称", order=332, panel="transform", icon="select",
+@register_tool(name="反射·中心对称", order=332, panel="transform", icon="reflect",
                hint="先选对象，再点击对称中心")
 class CentralSymmetryTool(TransformTool):
     def _start(self, canvas):
@@ -395,7 +395,7 @@ class CentralSymmetryTool(TransformTool):
 # 自定义仿射变换
 # ============================================================
 
-@register_tool(name="仿射·矩阵", order=341, panel="transform", icon="select",
+@register_tool(name="仿射·矩阵", order=341, panel="transform", icon="affine",
                hint="输入 2×3 矩阵实现任意仿射变换")
 class AffineMatrixTool(TransformTool):
     def _start(self, canvas):
@@ -438,7 +438,7 @@ class AffineMatrixTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="仿射·三对应点", order=342, panel="transform", icon="select",
+@register_tool(name="仿射·三对应点", order=342, panel="transform", icon="affine",
                hint="依次点 3 个源点，再点 3 个目标点，求仿射变换")
 class AffinePointsTool(TransformTool):
     def _start(self, canvas):
@@ -483,7 +483,7 @@ class AffinePointsTool(TransformTool):
 # 圆反演
 # ============================================================
 
-@register_tool(name="反演·圆内外翻转", order=351, panel="transform", icon="select",
+@register_tool(name="反演·圆内外翻转", order=351, panel="transform", icon="invert",
                hint="先选对象，点击反演圆；或点击空白设置中心后输入半径")
 class InversionTool(TransformTool):
     def _start(self, canvas):
@@ -540,7 +540,7 @@ class InversionTool(TransformTool):
 # 迭代点列 / 分形数列点
 # ============================================================
 
-@register_tool(name="迭代·数列点", order=361, panel="transform", icon="select",
+@register_tool(name="迭代·数列点", order=361, panel="transform", icon="iterate",
                hint="点击起点，输入迭代公式，生成点列")
 class IterationPointTool(Tool):
     def __init__(self):
