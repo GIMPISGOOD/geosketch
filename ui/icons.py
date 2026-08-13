@@ -48,6 +48,13 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "insert_table": ("fa5s.table", "mdi.table"),
     "insert_pie":   ("fa5s.chart-pie", "mdi.chart-pie"),
     "insert_bar":   ("fa5s.chart-bar", "mdi.chart-bar"),
+    "translate":   ("fa5s.arrows-alt", "mdi.arrow-right-bold"),
+    "rotate":      ("fa5s.sync-alt", "mdi.rotate-right"),
+    "scale":       ("fa5s.expand-arrows-alt", "mdi.resize"),
+    "reflect":     ("fa5s.exchange-alt", "mdi.swap-horizontal"),
+    "affine":      ("mdi.grid", "fa5s.drafting-compass"),
+    "invert":      ("mdi.circle-double", "fa5s.dot-circle"),
+    "iterate":     ("mdi.repeat", "fa5s.redo"),
 }
 
 

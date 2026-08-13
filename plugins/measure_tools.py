@@ -330,3 +330,128 @@ register_tool(name="斜率", order=9, panel="measure", icon="slope",
               hint="点击线段/直线度量斜率")(SlopeMeasureTool)
 register_tool(name="坐标", order=10, panel="measure", icon="coord",
               hint="点击点度量其坐标")(CoordMeasureTool)
+
+# ───────── 任意区域度量（类似链式填充的交互） ─────────
+@register_geo("RegionMeasure")
+class RegionMeasure(GeoObject):
+    """任意多边形区域度量：由一系列点围成，实时计算面积和周长。"""
+    def __init__(self, points):
+        super().__init__(parents=tuple(points))
+        self.pts = list(points)
+        self.area = 0.0
+        self.perimeter = 0.0
+        self.label_pos = (0.0, 0.0)
+        self.recompute()
+
+    def recompute(self):
+        n = len(self.pts)
+        if n < 3:
+            self.exists = False
+            return
+        self.exists = True
+        
+        # 1. 计算周长
+        peri = 0.0
+        for i in range(n):
+            p1 = self.pts[i]
+            p2 = self.pts[(i + 1) % n]
+            peri += math.hypot(p2.x - p1.x, p2.y - p1.y)
+        self.perimeter = peri
+        
+        # 2. 计算面积 (鞋带公式)
+        area = 0.0
+        for i in range(n):
+            p1 = self.pts[i]
+            p2 = self.pts[(i + 1) % n]
+            area += p1.x * p2.y - p2.x * p1.y
+        self.area = abs(area) / 2.0
+        
+        # 3. 标签位置：多边形重心
+        cx = sum(p.x for p in self.pts) / n
+        cy = sum(p.y for p in self.pts) / n
+        self.label_pos = (cx, cy)
+
+    def distance_to(self, x, y):
+        return math.hypot(x - self.label_pos[0], y - self.label_pos[1])
+
+    def dump(self):
+        return {}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents)
+
+@register_renderer(RegionMeasure)
+def draw_region_measure(p, obj, view):
+    if not obj.exists:
+        return
+    # 绘制半透明虚线边界
+    p.setPen(theme.dashed_pen(theme.MEASURE, 1.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.moveTo(view.to_screen(obj.pts[0].x, obj.pts[0].y))
+    for pt in obj.pts[1:]:
+        path.lineTo(view.to_screen(pt.x, pt.y))
+    path.closeSubpath()
+    p.drawPath(path)
+    
+    # 绘制面积与周长标签
+    sp = view.to_screen(*obj.label_pos)
+    text = f"S={obj.area:.2f}, L={obj.perimeter:.2f}"
+    draw_math(p, sp.x() - 40, sp.y(), text, 13, theme.MEASURE)
+
+class RegionMeasureTool(Tool):
+    """任意区域度量工具：依次点击顶点，再次点击起点闭合。"""
+    def __init__(self):
+        self.pts = []
+
+    def activated(self, canvas):
+        self.pts = []
+
+    def deactivated(self, canvas):
+        self.pts = []
+
+    def press(self, canvas, wpt, hit):
+        pt = point_or_snap(canvas, wpt, hit)
+        if pt is None:
+            return
+        
+        # 如果点击了起点（且已有至少3个点），则闭合
+        if len(self.pts) >= 3 and pt is self.pts[0]:
+            canvas.doc.add(RegionMeasure(self.pts))
+            self.pts = []
+            canvas.update()
+            return
+            
+        # 避免连续点击同一个点
+        if not self.pts or pt is not self.pts[-1]:
+            self.pts.append(pt)
+        canvas.update()
+
+    def cancel(self, canvas):
+        self.pts = []
+        canvas.update()
+
+    def draw_overlay(self, p, view):
+        if not self.pts:
+            return
+        # 预览多边形边界
+        p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath()
+        path.moveTo(view.to_screen(self.pts[0].x, self.pts[0].y))
+        for pt in self.pts[1:]:
+            path.lineTo(view.to_screen(pt.x, pt.y))
+        path.lineTo(view.to_screen(*view.cursor_wpt))
+        p.drawPath(path)
+        
+        # 绘制已选顶点（起点高亮）
+        for i, pt in enumerate(self.pts):
+            sp = view.to_screen(pt.x, pt.y)
+            p.setPen(theme.pen(theme.PREVIEW if i == 0 else theme.ACCENT, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(sp, 5, 5)
+
+# 注册到度量菜单
+register_tool(name="任意区域", order=11, panel="measure", icon="area",
+              hint="依次点击多边形的顶点，再次点击起点闭合并度量面积和周长")(RegionMeasureTool)
