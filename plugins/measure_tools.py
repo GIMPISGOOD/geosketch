@@ -2,6 +2,7 @@
 统一用 Measure 对象显示度量值，随几何对象实时刷新。全部注册到「度量」菜单。"""
 import math
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainterPath
 
 from core.registry import register_geo, register_renderer, register_tool
