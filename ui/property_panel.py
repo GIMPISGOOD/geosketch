@@ -23,27 +23,39 @@ class PropertyPanel(QWidget):
         self.canvas = canvas
         self.setObjectName("propertyPanel")
         self.setFixedWidth(310)
+        self._collapsed = False          # ★ 新增：折叠状态
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(16, 14, 16, 14)
         outer.setSpacing(8)
 
-        # 标题区
+        # ★ 修改：标题行改为水平布局，加入折叠按钮
+        head = QHBoxLayout()
         self.title = QLabel("属性")
         self.title.setObjectName("panelTitle")
+        head.addWidget(self.title)
+        head.addStretch(1)
+
+        self._collapse_btn = QPushButton("«")
+        self._collapse_btn.setFixedSize(24, 24)
+        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_btn.setToolTip("折叠属性面板")
+        self._collapse_btn.clicked.connect(self._toggle_collapse)
+        head.addWidget(self._collapse_btn)
+
+        outer.addLayout(head)
+
         self.type_label = QLabel("")
         self.type_label.setObjectName("panelSubtitle")
         self.type_label.setWordWrap(True)
-
-        outer.addWidget(self.title)
         outer.addWidget(self.type_label)
 
-        # 分割线
-        line = QFrame()
-        line.setFrameShape(QFrame.Shape.HLine)
-        line.setFixedHeight(1)
-        line.setStyleSheet(f"background-color: {theme.PANEL_BORDER.name()}; border: none; margin: 4px 0;")
-        outer.addWidget(line)
+        # ★ 折叠时显示的窄条内容（默认隐藏）
+        self._strip_label = QLabel("属\n性")
+        self._strip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._strip_label.setStyleSheet("font-size:12px; letter-spacing:2px;")
+        self._strip_label.hide()
+        outer.addWidget(self._strip_label)
 
         # 滚动区 (修复 Pylance 报错：重命名为 scroll_area)
         self.scroll_area = QScrollArea()
@@ -77,12 +89,34 @@ class PropertyPanel(QWidget):
 
     def refresh(self):
         self._timer.start()
-
+        
+    def _toggle_collapse(self):
+        """折叠 / 展开属性面板。"""
+        self._collapsed = not self._collapsed
+        if self._collapsed:
+            self.setFixedWidth(36)
+            self.type_label.hide()
+            self.scroll_area.hide()
+            self._strip_label.show()
+            self._collapse_btn.setText("»")
+            self._collapse_btn.setToolTip("展开属性面板")
+            self.setFixedHeight(80)
+        else:
+            self.setFixedWidth(310)
+            self.type_label.show()
+            self.scroll_area.show()
+            self._strip_label.hide()
+            self._collapse_btn.setText("«")
+            self._collapse_btn.setToolTip("折叠属性面板")
+            self.setMaximumHeight(max(240, self.canvas.height() - 110))
+        self.reposition()
+        
     def reposition(self):
         x = max(10, self.canvas.width() - self.width() - 16)
         y = 14
         self.move(x, y)
-        self.setMaximumHeight(max(240, self.canvas.height() - 110))
+        if not self._collapsed:
+            self.setMaximumHeight(max(240, self.canvas.height() - 110))
 
     def _clear_form(self):
         """安全清理表单 (修复 Pylance 空指针警告)。"""
@@ -197,6 +231,8 @@ class PropertyPanel(QWidget):
         doc.changed.emit()
 
     def _do_refresh(self):
+        if self._collapsed:
+            return
         doc = self.canvas.doc
         selected = [o for o in doc.objects if o.selected and o in doc.objects]
 
@@ -218,7 +254,8 @@ class PropertyPanel(QWidget):
 
         self.form.addStretch(1)
         self.reposition()
-        self.show()
+        if not self._collapsed:       # ★ 折叠时不自动展开
+            self.show()
         self.raise_()
         
     def _build_multi(self, objs: list[Any]) -> None:
