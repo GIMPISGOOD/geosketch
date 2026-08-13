@@ -5,7 +5,7 @@ from tools.base import Tool, point_or_snap
 from ..types.distance import DistanceConstraint
 from ..types.fixed import FixedConstraint
 
-@register_tool(name="距离约束", order=501, panel="menu", icon="distance",
+@register_tool(name="距离约束", order=501, panel="constraint", icon="distance",
                hint="点击两点，输入距离表达式")
 class DistanceConstraintTool(Tool):
     def __init__(self): self.pts = []
@@ -20,7 +20,7 @@ class DistanceConstraintTool(Tool):
                 canvas.doc.add_constraint(c)
             self.pts = []
 
-@register_tool(name="固定约束", order=502, panel="menu", icon="point",
+@register_tool(name="固定约束", order=502, panel="constraint", icon="point",
                hint="点击一个点，将其固定在当前位置")
 class FixedConstraintTool(Tool):
     def press(self, canvas, wpt, hit):

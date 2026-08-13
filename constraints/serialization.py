@@ -38,5 +38,5 @@ def _new_load(self, path):
                     except Exception: pass
 
 def patch_save_load():
-    Document.save = _new_save
-    Document.load = _new_load
+    setattr(Document, "save", _new_save)
+    setattr(Document, "load", _new_load)

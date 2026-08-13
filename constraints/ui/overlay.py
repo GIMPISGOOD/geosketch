@@ -26,4 +26,4 @@ def _new_paint(self, ev):
     p.end()
 
 def patch_canvas():
-    Canvas.paintEvent = _new_paint
+    setattr(Canvas, "paintEvent", _new_paint)
