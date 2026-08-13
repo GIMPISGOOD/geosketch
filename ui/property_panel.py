@@ -1,13 +1,23 @@
-"""统一对象属性面板 (v2 - 优化布局与主题适配)。"""
+"""统一对象属性面板 (v3 - 折叠功能 + Pylance 零报错)。"""
+from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDoubleSpinBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
 )
 
 from geo.points import AbstractPoint, FreePoint, PointOnObject
@@ -16,149 +26,232 @@ from ui import theme
 
 
 class PropertyPanel(QWidget):
-    """统一对象属性面板。"""
+    """统一对象属性面板，支持折叠/展开。"""
 
-    def __init__(self, canvas, parent=None):
+    def __init__(self, canvas: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.canvas = canvas
         self.setObjectName("propertyPanel")
-        self.setFixedWidth(310)
-        self._collapsed = False          # ★ 新增：折叠状态
+        self._collapsed: bool = False
+        self._expanded_width: int = 300
+        self._collapsed_width: int = 36
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(16, 14, 16, 14)
-        outer.setSpacing(8)
+        # ══════════════════════════════════════════
+        # 主布局：只放两个容器，切换显示
+        # ══════════════════════════════════════════
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._outer.setSpacing(0)
 
-        # ★ 修改：标题行改为水平布局，加入折叠按钮
+        # ──────────────────────────────────────────
+        # 容器 A：展开状态（完整面板）
+        # ──────────────────────────────────────────
+        self._expanded_widget = QWidget()
+        self._expanded_layout = QVBoxLayout(self._expanded_widget)
+        self._expanded_layout.setContentsMargins(12, 10, 12, 10)
+        self._expanded_layout.setSpacing(6)
+
+        # 标题行 + 折叠按钮
         head = QHBoxLayout()
         self.title = QLabel("属性")
         self.title.setObjectName("panelTitle")
         head.addWidget(self.title)
         head.addStretch(1)
 
-        self._collapse_btn = QPushButton("«")
-        self._collapse_btn.setFixedSize(24, 24)
+        # ★ 折叠按钮：透明背景 + 灰色边框，明显区别于面板内其他按钮
+        self._collapse_btn = QPushButton("»")
+        self._collapse_btn.setFixedSize(22, 22)
         self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_btn.setToolTip("折叠属性面板")
+        self._collapse_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            "  border: 1px solid rgba(120,140,170,0.5);"
+            "  border-radius: 4px;"
+            "  color: #777;"
+            "  font-size: 13px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(120,140,170,0.15);"
+            "  border-color: rgba(120,140,170,0.8);"
+            "}"
+        )
         self._collapse_btn.clicked.connect(self._toggle_collapse)
         head.addWidget(self._collapse_btn)
+        self._expanded_layout.addLayout(head)
 
-        outer.addLayout(head)
-
+        # 类型标签
         self.type_label = QLabel("")
         self.type_label.setObjectName("panelSubtitle")
         self.type_label.setWordWrap(True)
-        outer.addWidget(self.type_label)
+        self._expanded_layout.addWidget(self.type_label)
 
-        # ★ 折叠时显示的窄条内容（默认隐藏）
-        self._strip_label = QLabel("属\n性")
-        self._strip_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._strip_label.setStyleSheet("font-size:12px; letter-spacing:2px;")
-        self._strip_label.hide()
-        outer.addWidget(self._strip_label)
+        # 滚动区域
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
 
-        # 滚动区 (修复 Pylance 报错：重命名为 scroll_area)
-        self.scroll_area = QScrollArea()
-        self.scroll_area.setWidgetResizable(True)
-        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
-        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-
-        self.content = QWidget()
-        self.form = QVBoxLayout(self.content)
+        self._content = QWidget()
+        self.form = QVBoxLayout(self._content)
         self.form.setContentsMargins(0, 0, 0, 0)
         self.form.setSpacing(10)
 
-        self.scroll_area.setWidget(self.content)
-        outer.addWidget(self.scroll_area, 1)
+        self._scroll_area.setWidget(self._content)
+        self._expanded_layout.addWidget(self._scroll_area, 1)
 
+        # ──────────────────────────────────────────
+        # 容器 B：折叠状态（窄条）
+        # ──────────────────────────────────────────
+        self._collapsed_widget = QWidget()
+        self._collapsed_layout = QVBoxLayout(self._collapsed_widget)
+        self._collapsed_layout.setContentsMargins(4, 10, 4, 10)
+        self._collapsed_layout.setSpacing(8)
+
+        # ★ 展开按钮：同样透明背景 + 灰色边框
+        self._expand_btn = QPushButton("«")
+        self._expand_btn.setFixedSize(24, 24)
+        self._expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._expand_btn.setToolTip("展开属性面板")
+        self._expand_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            "  border: 1px solid rgba(120,140,170,0.5);"
+            "  border-radius: 4px;"
+            "  color: #777;"
+            "  font-size: 14px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(120,140,170,0.15);"
+            "  border-color: rgba(120,140,170,0.8);"
+            "}"
+        )
+        self._expand_btn.clicked.connect(self._toggle_collapse)
+        self._collapsed_layout.addWidget(
+            self._expand_btn, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+
+        # 竖排文字提示
+        self._collapsed_label = QLabel("属\n性")
+        self._collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._collapsed_label.setStyleSheet(
+            "font-size: 11px; color: #999; letter-spacing: 2px;"
+        )
+        self._collapsed_layout.addWidget(self._collapsed_label)
+        self._collapsed_layout.addStretch(1)
+
+        # ──────────────────────────────────────────
+        # 组装
+        # ──────────────────────────────────────────
+        self._outer.addWidget(self._expanded_widget)
+        self._outer.addWidget(self._collapsed_widget)
+        self._collapsed_widget.hide()
+
+        # 初始状态：展开
+        self.setFixedWidth(self._expanded_width)
+
+        # 信号连接
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._do_refresh)
-
-        canvas.doc.changed.connect(self.refresh)
+        self.canvas.doc.changed.connect(self._schedule_refresh)
         theme.bus.changed.connect(self._on_theme_changed)
 
         self.hide()
 
-    def _on_theme_changed(self, *_):
-        """主题切换时强制刷新样式。"""
+    # ══════════════════════════════════════════
+    # 刷新调度
+    # ══════════════════════════════════════════
+
+    def _schedule_refresh(self) -> None:
+        if not self._collapsed:
+            self._timer.start()
+
+    def _on_theme_changed(self, *_: Any) -> None:
         self.style().unpolish(self)
         self.style().polish(self)
         self.update()
 
-    def refresh(self):
+    def refresh(self) -> None:
         self._timer.start()
-        
-    def _toggle_collapse(self):
-        """折叠 / 展开属性面板。"""
+
+    # ══════════════════════════════════════════
+    # 折叠 / 展开
+    # ══════════════════════════════════════════
+
+    def _toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
         if self._collapsed:
-            self.setFixedWidth(36)
-            self.type_label.hide()
-            self.scroll_area.hide()
-            self._strip_label.show()
-            self._collapse_btn.setText("»")
-            self._collapse_btn.setToolTip("展开属性面板")
-            self.setFixedHeight(80)
+            self._expanded_widget.hide()
+            self._collapsed_widget.show()
+            self.setFixedWidth(self._collapsed_width)
+            self.setFixedHeight(90)
         else:
-            self.setFixedWidth(310)
-            self.type_label.show()
-            self.scroll_area.show()
-            self._strip_label.hide()
-            self._collapse_btn.setText("«")
-            self._collapse_btn.setToolTip("折叠属性面板")
+            self._collapsed_widget.hide()
+            self._expanded_widget.show()
+            self.setFixedWidth(self._expanded_width)
             self.setMaximumHeight(max(240, self.canvas.height() - 110))
+            self.setMinimumHeight(0)
         self.reposition()
-        
-    def reposition(self):
+        self.raise_()
+
+    def reposition(self) -> None:
         x = max(10, self.canvas.width() - self.width() - 16)
         y = 14
         self.move(x, y)
         if not self._collapsed:
             self.setMaximumHeight(max(240, self.canvas.height() - 110))
 
-    def _clear_form(self):
-        """安全清理表单 (修复 Pylance 空指针警告)。"""
+    # ══════════════════════════════════════════
+    # 表单构建工具
+    # ══════════════════════════════════════════
+
+    def _clear_form(self) -> None:
+        """安全清理表单。"""
         while self.form.count():
             item = self.form.takeAt(0)
             if item is None:
                 continue
-            
-            # 1. 尝试获取直接子控件
             w = item.widget()
             if w is not None:
                 w.deleteLater()
                 continue
-
-            # 2. 如果是嵌套布局，递归清理
             sub_layout = item.layout()
             if sub_layout is not None:
                 while sub_layout.count():
                     sub_item = sub_layout.takeAt(0)
                     if sub_item is not None:
                         sub_w = sub_item.widget()
-                        # ★ 修复：将结果存入局部变量再判空，消除 Pylance 警告
                         if sub_w is not None:
                             sub_w.deleteLater()
 
-    def _add_section(self, title):
-        lbl = QLabel(title)
-        lbl.setStyleSheet(f"color: {theme.ACCENT.name()}; font-weight: bold; font-size: 12px; margin-top: 6px;")
+    def _add_section(self, title_text: str) -> None:
+        lbl = QLabel(title_text)
+        lbl.setStyleSheet(
+            f"color: {theme.ACCENT.name()}; font-weight: bold; "
+            f"font-size: 12px; margin-top: 6px;"
+        )
         self.form.addWidget(lbl)
 
-    def _add_row(self, label_text, widget):
+    def _add_row(self, label_text: str, widget: QWidget) -> None:
         row = QHBoxLayout()
         row.setSpacing(8)
         label = QLabel(label_text)
         label.setFixedWidth(76)
-        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
         label.setStyleSheet(f"color: {theme.SUBINK.name()}; font-size: 12px;")
         row.addWidget(label)
         row.addWidget(widget, 1)
         self.form.addLayout(row)
 
-    def _add_buttons(self, buttons):
+    def _add_buttons(self, buttons: list[tuple[str, Callable[[], Any]]]) -> None:
         row = QHBoxLayout()
         row.setSpacing(6)
         for text, slot in buttons:
@@ -169,12 +262,19 @@ class PropertyPanel(QWidget):
         row.addStretch(1)
         self.form.addLayout(row)
 
-    def _make_line(self, text, on_commit):
+    def _make_line(self, text: Any, on_commit: Callable[[str], Any]) -> QLineEdit:
         edit = QLineEdit(str(text))
         edit.editingFinished.connect(lambda: on_commit(edit.text().strip()))
         return edit
 
-    def _make_spin(self, value, vmin, vmax, decimals, on_commit):
+    def _make_spin(
+        self,
+        value: Any,
+        vmin: float,
+        vmax: float,
+        decimals: int,
+        on_commit: Callable[[float], Any],
+    ) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setRange(vmin, vmax)
         spin.setDecimals(decimals)
@@ -183,37 +283,48 @@ class PropertyPanel(QWidget):
         spin.editingFinished.connect(lambda: on_commit(spin.value()))
         return spin
 
-    def _make_check(self, checked, on_toggle):
+    def _make_check(
+        self, checked: Any, on_toggle: Callable[[bool], Any]
+    ) -> QCheckBox:
         check = QCheckBox()
         check.setChecked(bool(checked))
         check.toggled.connect(on_toggle)
         return check
 
-    def _make_combo(self, items, current, on_change):
+    def _make_combo(
+        self,
+        items: list[str],
+        current: Any,
+        on_change: Callable[[str], Any],
+    ) -> QComboBox:
         combo = QComboBox()
         combo.addItems(items)
-        if current in items:
-            combo.setCurrentText(current)
+        if str(current) in items:
+            combo.setCurrentText(str(current))
         combo.currentTextChanged.connect(on_change)
         return combo
 
-    def _make_color_button(self, color, on_commit):
+    def _make_color_button(
+        self, color: QColor, on_commit: Callable[[QColor], Any]
+    ) -> QPushButton:
         btn = QPushButton()
         btn.setFixedHeight(24)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
 
-        def paint():
+        local_color = QColor(color)
+
+        def paint() -> None:
             btn.setStyleSheet(
-                f"background:{color.name()};"
+                f"background:{local_color.name()};"
                 f"border:1px solid {theme.PANEL_BORDER.name()};"
                 f"border-radius:4px;"
             )
 
-        def pick():
-            nonlocal color
-            c = QColorDialog.getColor(color, self, "选择颜色")
+        def pick() -> None:
+            nonlocal local_color
+            c = QColorDialog.getColor(local_color, self, "选择颜色")
             if c.isValid():
-                color = c
+                local_color = c
                 paint()
                 on_commit(c)
 
@@ -221,7 +332,7 @@ class PropertyPanel(QWidget):
         paint()
         return btn
 
-    def _doc_action(self, fn):
+    def _doc_action(self, fn: Callable[[], Any]) -> None:
         doc = self.canvas.doc
         doc.begin_action()
         try:
@@ -230,9 +341,14 @@ class PropertyPanel(QWidget):
             doc.end_action()
         doc.changed.emit()
 
-    def _do_refresh(self):
+    # ══════════════════════════════════════════
+    # 刷新内容
+    # ══════════════════════════════════════════
+
+    def _do_refresh(self) -> None:
         if self._collapsed:
             return
+
         doc = self.canvas.doc
         selected = [o for o in doc.objects if o.selected and o in doc.objects]
 
@@ -244,8 +360,10 @@ class PropertyPanel(QWidget):
 
         if len(selected) == 1:
             obj = selected[0]
-            self.title.setText(getattr(obj, "name", "") or self._type_label(obj))
-            self.type_label.setText(self._type_label(obj))
+            self.title.setText(
+                getattr(obj, "name", "") or self._get_type_label(obj)
+            )
+            self.type_label.setText(self._get_type_label(obj))
             self._build_single(obj)
         else:
             self.title.setText(f"已选 {len(selected)} 个对象")
@@ -254,45 +372,85 @@ class PropertyPanel(QWidget):
 
         self.form.addStretch(1)
         self.reposition()
-        if not self._collapsed:       # ★ 折叠时不自动展开
+        if not self._collapsed:
             self.show()
         self.raise_()
-        
+
+    def _get_type_label(self, obj: Any) -> str:
+        name = type(obj).__name__
+        cn: dict[str, str] = {
+            "FreePoint": "自由点",
+            "PointOnObject": "吸附点",
+            "IntersectPoint": "交点",
+            "DivisionPoint": "等分点",
+            "Segment": "线段",
+            "Circle": "圆",
+            "ExprCircle": "表达式圆",
+            "ExprSegment": "表达式线段",
+            "ExprAngle": "表达式角度",
+            "ExprPoint": "表达式点",
+            "Line": "直线",
+            "Ray": "射线",
+            "RegularPolygon": "正多边形",
+            "Ellipse": "椭圆",
+            "CubicBezier": "贝塞尔曲线",
+            "FunctionCurve": "函数曲线",
+            "ChainFill": "链式填充",
+            "TextObject": "文本",
+            "ScriptButtonObject": "脚本按钮",
+            "TableObject": "表格",
+            "PieChartObject": "饼图",
+            "BarChartObject": "柱状图",
+            "ImageObject": "图片",
+            "InkStroke": "墨迹",
+            "Measure": "度量",
+            "AngleMeasure": "角度",
+            "RatioMeasure": "比例",
+            "TransformPoint": "变换点",
+            "IterPoint": "迭代点",
+        }
+        return cn.get(name, name)
+
+    # ══════════════════════════════════════════
+    # 多选批量操作
+    # ══════════════════════════════════════════
+
     def _build_multi(self, objs: list[Any]) -> None:
-        """多选时的批量操作面板。"""
         self._add_section("批量操作")
         visible_all = all(getattr(o, "visible", True) for o in objs)
         self._add_buttons([
-            ("隐藏" if visible_all else "显示", lambda: self._set_visible(objs, not visible_all)),
+            (
+                "隐藏" if visible_all else "显示",
+                lambda: self._set_visible(objs, not visible_all),
+            ),
             ("删除", self.canvas.doc.remove_selected),
             ("置顶", lambda: self._reorder(objs, True)),
             ("置底", lambda: self._reorder(objs, False)),
         ])
-        
-    def _type_label(self, obj):
-        name = type(obj).__name__
-        cn = {
-            "FreePoint": "自由点", "PointOnObject": "吸附点", "IntersectPoint": "交点",
-            "DivisionPoint": "等分点", "Segment": "线段", "Circle": "圆",
-            "ExprCircle": "表达式圆", "ExprSegment": "表达式线段", "ExprAngle": "表达式角度",
-            "ExprPoint": "表达式点", "Line": "直线", "Ray": "射线", "RegularPolygon": "正多边形",
-            "Ellipse": "椭圆", "CubicBezier": "贝塞尔曲线", "FunctionCurve": "函数曲线",
-            "ChainFill": "链式填充", "TextObject": "文本", "ScriptButtonObject": "脚本按钮",
-            "TableObject": "表格", "PieChartObject": "饼图", "BarChartObject": "柱状图",
-            "ImageObject": "图片", "InkStroke": "墨迹", "Measure": "度量",
-            "AngleMeasure": "角度", "RatioMeasure": "比例", "TransformPoint": "变换点",
-            "IterPoint": "迭代点",
-        }
-        return cn.get(name, name)
+
+    # ══════════════════════════════════════════
+    # 单选属性编辑
+    # ══════════════════════════════════════════
 
     def _build_single(self, obj: Any) -> None:
         doc = self.canvas.doc
         tn = type(obj).__name__
 
         self._add_section("基础")
-        self._add_row("名称", self._make_line(getattr(obj, "name", ""), lambda t: doc.rename_object(obj, t)))
-        self._add_row("可见", self._make_check(getattr(obj, "visible", True), lambda v: self._set_visible([obj], v)))
-        
+        self._add_row(
+            "名称",
+            self._make_line(
+                getattr(obj, "name", ""),
+                lambda t: doc.rename_object(obj, t),
+            ),
+        )
+        self._add_row(
+            "可见",
+            self._make_check(
+                getattr(obj, "visible", True),
+                lambda v: self._set_visible([obj], v),
+            ),
+        )
         self._add_buttons([
             ("删除", lambda: doc.remove(obj)),
             ("置顶", lambda: self._reorder([obj], True)),
@@ -301,31 +459,100 @@ class PropertyPanel(QWidget):
 
         if isinstance(obj, FreePoint):
             self._add_section("坐标")
-            self._add_row("X", self._make_spin(obj.x, -1e6, 1e6, 3, lambda v: self._set_point_coord(obj, "x", v)))
-            self._add_row("Y", self._make_spin(obj.y, -1e6, 1e6, 3, lambda v: self._set_point_coord(obj, "y", v)))
+            self._add_row(
+                "X",
+                self._make_spin(
+                    obj.x, -1e6, 1e6, 3,
+                    lambda v: self._set_point_coord(obj, "x", v),
+                ),
+            )
+            self._add_row(
+                "Y",
+                self._make_spin(
+                    obj.y, -1e6, 1e6, 3,
+                    lambda v: self._set_point_coord(obj, "y", v),
+                ),
+            )
+
         elif isinstance(obj, PointOnObject):
             self._add_section("参数")
-            self._add_row("t", self._make_spin(obj.t, 0.0, 1.0, 4, lambda v: self._set_attr_and_recompute(obj, "t", v)))
+            self._add_row(
+                "t",
+                self._make_spin(
+                    obj.t, 0.0, 1.0, 4,
+                    lambda v: self._set_attr_and_recompute(obj, "t", v),
+                ),
+            )
+
         elif isinstance(obj, MediaObject):
             self._add_section("布局")
-            self._add_row("X", self._make_spin(obj.x, -1e6, 1e6, 3, lambda v: self._set_attr_and_changed(obj, "x", v)))
-            self._add_row("Y", self._make_spin(obj.y, -1e6, 1e6, 3, lambda v: self._set_attr_and_changed(obj, "y", v)))
-            self._add_row("宽度", self._make_spin(obj.width, 0.1, 1000.0, 3, lambda v: self._set_attr_and_changed(obj, "width", v)))
-            self._add_row("高度", self._make_spin(obj.height, 0.1, 1000.0, 3, lambda v: self._set_attr_and_changed(obj, "height", v)))
+            self._add_row(
+                "X",
+                self._make_spin(
+                    obj.x, -1e6, 1e6, 3,
+                    lambda v: self._set_attr_and_changed(obj, "x", v),
+                ),
+            )
+            self._add_row(
+                "Y",
+                self._make_spin(
+                    obj.y, -1e6, 1e6, 3,
+                    lambda v: self._set_attr_and_changed(obj, "y", v),
+                ),
+            )
+            self._add_row(
+                "宽度",
+                self._make_spin(
+                    obj.width, 0.1, 1000.0, 3,
+                    lambda v: self._set_attr_and_changed(obj, "width", v),
+                ),
+            )
+            self._add_row(
+                "高度",
+                self._make_spin(
+                    obj.height, 0.1, 1000.0, 3,
+                    lambda v: self._set_attr_and_changed(obj, "height", v),
+                ),
+            )
             if hasattr(obj, "rotation"):
-                self._add_row("旋转", self._make_spin(getattr(obj, "rotation", 0.0), 0.0, 360.0, 1, lambda v: self._set_attr_and_changed(obj, "rotation", v)))
+                self._add_row(
+                    "旋转",
+                    self._make_spin(
+                        getattr(obj, "rotation", 0.0),
+                        0.0, 360.0, 1,
+                        lambda v: self._set_attr_and_changed(obj, "rotation", v),
+                    ),
+                )
 
-        # ★ 修复：全部使用 getattr 绕过 Pylance 对特定子类属性的误报
+        # ★ 全部使用 getattr 绕过 Pylance 对特定子类属性的误报
         if tn == "ScriptButtonObject":
             self._add_section("按钮样式")
-            self._add_row("文字", self._make_line(getattr(obj, "text", ""), lambda t: self._set_attr_and_changed(obj, "text", t)))
-            self._add_row("背景", self._make_color_button(QColor(getattr(obj, "color", "#1971c2")), lambda c: self._set_attr_and_changed(obj, "color", c.name())))
-            self._add_row("字色", self._make_color_button(QColor(getattr(obj, "text_color", "#ffffff")), lambda c: self._set_attr_and_changed(obj, "text_color", c.name())))
-            
-            # 安全获取并调用方法
+            self._add_row(
+                "文字",
+                self._make_line(
+                    getattr(obj, "text", ""),
+                    lambda t: self._set_attr_and_changed(obj, "text", t),
+                ),
+            )
+            self._add_row(
+                "背景",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1971c2")),
+                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                ),
+            )
+            self._add_row(
+                "字色",
+                self._make_color_button(
+                    QColor(getattr(obj, "text_color", "#ffffff")),
+                    lambda c: self._set_attr_and_changed(
+                        obj, "text_color", c.name()
+                    ),
+                ),
+            )
             run_fn = getattr(obj, "run", None)
             edit_fn = getattr(obj, "edit", None)
-            btns = []
+            btns: list[tuple[str, Callable[[], Any]]] = []
             if callable(run_fn):
                 btns.append(("▶ 运行", lambda: run_fn(self.canvas)))
             if callable(edit_fn):
@@ -335,83 +562,146 @@ class PropertyPanel(QWidget):
 
         elif tn == "TextObject":
             self._add_section("文本样式")
-            self._add_row("内容", self._make_line(getattr(obj, "text", ""), lambda t: self._set_attr_and_changed(obj, "text", t)))
-            self._add_row("颜色", self._make_color_button(QColor(getattr(obj, "color", "#1f2937")), lambda c: self._set_attr_and_changed(obj, "color", c.name())))
-            self._add_row("字号", self._make_spin(getattr(obj, "size", 16), 6, 200, 0, lambda v: self._set_attr_and_changed(obj, "size", int(v))))
+            self._add_row(
+                "内容",
+                self._make_line(
+                    getattr(obj, "text", ""),
+                    lambda t: self._set_attr_and_changed(obj, "text", t),
+                ),
+            )
+            self._add_row(
+                "颜色",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1f2937")),
+                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                ),
+            )
+            self._add_row(
+                "字号",
+                self._make_spin(
+                    getattr(obj, "size", 16),
+                    6, 200, 0,
+                    lambda v: self._set_attr_and_changed(obj, "size", int(v)),
+                ),
+            )
 
         elif tn == "FunctionCurve":
             self._add_section("函数")
-            self._add_row("表达式", self._make_line(getattr(obj, "expr", ""), lambda t: self._set_function_curve_expr(obj, "expr", t)))
+            self._add_row(
+                "表达式",
+                self._make_line(
+                    getattr(obj, "expr", ""),
+                    lambda t: self._set_function_curve_expr(obj, "expr", t),
+                ),
+            )
             if getattr(obj, "kind", "") == "parametric":
-                self._add_row("Y 表达式", self._make_line(getattr(obj, "expr2", ""), lambda t: self._set_function_curve_expr(obj, "expr2", t)))
-            self._add_row("颜色", self._make_color_button(QColor(getattr(obj, "color", "#1971c2")), lambda c: self._set_function_curve_color(obj, c)))
+                self._add_row(
+                    "Y 表达式",
+                    self._make_line(
+                        getattr(obj, "expr2", ""),
+                        lambda t: self._set_function_curve_expr(obj, "expr2", t),
+                    ),
+                )
+            self._add_row(
+                "颜色",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1971c2")),
+                    lambda c: self._set_function_curve_color(obj, c),
+                ),
+            )
 
         elif tn in ("ExprSegment", "ExprAngle", "ExprCircle"):
             self._add_section("约束")
-            self._add_row("表达式", self._make_line(getattr(obj, "expr", ""), lambda t: self._set_expr(obj, t)))
+            self._add_row(
+                "表达式",
+                self._make_line(
+                    getattr(obj, "expr", ""),
+                    lambda t: self._set_expr(obj, t),
+                ),
+            )
 
         self._add_section("依赖")
-        # 使用 getattr 防止 Pylance 对 parents/children 报错
         parents = getattr(obj, "parents", [])
         children = getattr(obj, "children", [])
-        self._add_row("关系", QLabel(f"{len(parents)} 父 / {len(children)} 子"))
+        self._add_row(
+            "关系", QLabel(f"{len(parents)} 父 / {len(children)} 子")
+        )
         self._add_buttons([
             ("选父", lambda: self._select_related(obj, "parents")),
             ("选子", lambda: self._select_related(obj, "children")),
         ])
 
-    # ================= 提交逻辑 =================
-    def _set_visible(self, objs, visible):
-        self._doc_action(lambda: [setattr(o, "visible", bool(visible)) for o in objs])
+    # ══════════════════════════════════════════
+    # 提交逻辑
+    # ══════════════════════════════════════════
 
-    def _reorder(self, objs, front):
-        def doit():
+    def _set_visible(self, objs: list[Any], visible: bool) -> None:
+        self._doc_action(
+            lambda: [setattr(o, "visible", bool(visible)) for o in objs]
+        )
+
+    def _reorder(self, objs: list[Any], front: bool) -> None:
+        def doit() -> None:
+            doc_objects = self.canvas.doc.objects
             if front:
                 for o in objs:
-                    if o in self.canvas.doc.objects:
-                        self.canvas.doc.objects.remove(o)
-                        self.canvas.doc.objects.append(o)
+                    if o in doc_objects:
+                        doc_objects.remove(o)
+                        doc_objects.append(o)
             else:
                 for o in reversed(objs):
-                    if o in self.canvas.doc.objects:
-                        self.canvas.doc.objects.remove(o)
-                        self.canvas.doc.objects.insert(0, o)
+                    if o in doc_objects:
+                        doc_objects.remove(o)
+                        doc_objects.insert(0, o)
+
         self._doc_action(doit)
 
-    def _select_related(self, obj, mode):
-        self.canvas.doc.set_selection(list(obj.parents) if mode == "parents" else list(obj.children))
+    def _select_related(self, obj: Any, mode: str) -> None:
+        related = list(obj.parents) if mode == "parents" else list(obj.children)
+        self.canvas.doc.set_selection(related)
 
-    def _set_point_coord(self, obj, axis, value):
-        def doit():
+    def _set_point_coord(self, obj: Any, axis: str, value: float) -> None:
+        def doit() -> None:
             setattr(obj, axis, float(value))
             self.canvas.doc.recompute_from(obj)
+
         self._doc_action(doit)
 
-    def _set_attr_and_recompute(self, obj, name, value):
-        def doit():
+    def _set_attr_and_recompute(
+        self, obj: Any, name: str, value: Any
+    ) -> None:
+        def doit() -> None:
             setattr(obj, name, value)
             self.canvas.doc.recompute_from(obj)
+
         self._doc_action(doit)
 
-    def _set_attr_and_changed(self, obj, name, value):
+    def _set_attr_and_changed(
+        self, obj: Any, name: str, value: Any
+    ) -> None:
         self._doc_action(lambda: setattr(obj, name, value))
 
-    def _set_expr(self, obj, text):
-        def doit():
-            # ★ 修复：使用 setattr 动态设置属性，消除 Pylance 对 FreePoint 缺少 expr 属性的误报
+    def _set_expr(self, obj: Any, text: str) -> None:
+        def doit() -> None:
             setattr(obj, "expr", text)
             self.canvas.doc.refresh_variables()
 
         self._doc_action(doit)
 
-    def _set_function_curve_expr(self, obj, field, text):
-        def doit():
+    def _set_function_curve_expr(
+        self, obj: Any, field: str, text: str
+    ) -> None:
+        def doit() -> None:
             setattr(obj, field, text)
-            if hasattr(obj, "invalidate_cache"): obj.invalidate_cache()
+            if hasattr(obj, "invalidate_cache"):
+                obj.invalidate_cache()
+
         self._doc_action(doit)
 
-    def _set_function_curve_color(self, obj, color):
-        def doit():
+    def _set_function_curve_color(self, obj: Any, color: QColor) -> None:
+        def doit() -> None:
             obj.color = color.name()
-            if hasattr(obj, "invalidate_cache"): obj.invalidate_cache()
+            if hasattr(obj, "invalidate_cache"):
+                obj.invalidate_cache()
+
         self._doc_action(doit)
