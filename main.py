@@ -9,6 +9,16 @@ from ui import theme
 
 from geo.function_sampler import shutdown_sampler
 
+def load_constraints() -> None:
+    """加载几何约束求解器扩展"""
+    try:
+        import constraints
+        
+    except Exception as e:
+        print("无法加载几何约束求解器扩展，请确保已正确安装依赖。")
+        print("错误信息:", e)
+
+
 
 def main() -> None:
     app = QApplication(sys.argv)
@@ -35,4 +45,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    load_constraints()
     main()
