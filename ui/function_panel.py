@@ -1,14 +1,21 @@
-"""函数编辑器：可折叠的停靠侧栏（QDockWidget），函数显示于此。"""
+"""函数编辑器：可折叠停靠侧栏，按类型分页显示函数。"""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QColorDialog, QCheckBox,
                                QScrollArea, QFrame, QDockWidget, QMainWindow)
-
 from geo.function_curve import FunctionCurve
 from ui.variable_widgets import VariableSliderPanel
 from ui import theme
 from ui.math import draw_math
+
+# 分页定义
+PAGES = [
+    ("explicit", "显函数"),
+    ("parametric", "参数"),
+    ("polar", "极坐标"),
+    ("implicit", "隐函数"),
+]
 
 
 class ExprLabel(QWidget):
@@ -44,16 +51,17 @@ class FunctionRow(QWidget):
         self.dot.clicked.connect(lambda _=False, f=func: editor.recolor(f))
         h.addWidget(self.dot)
 
-        self.expr = ExprLabel(func.default_label(), func.color)
+        label = self._get_label(func)
+        self.expr = ExprLabel(label, getattr(func, "color", "#1971c2"))
         h.addWidget(self.expr, 1)
 
-        self._ops = QWidget()                      # 不能叫 actions（与 QWidget.actions() 冲突）
+        self._ops = QWidget()
         ah = QHBoxLayout(self._ops)
         ah.setContentsMargins(0, 0, 0, 0)
         ah.setSpacing(2)
         self.eye = QCheckBox()
         self.eye.setToolTip("显示/隐藏")
-        self.eye.setChecked(func.visible)
+        self.eye.setChecked(getattr(func, "visible", True))
         self.eye.toggled.connect(lambda on, f=func: editor.toggle(f, on))
         ah.addWidget(self.eye)
         edit = QPushButton("✎")
@@ -65,22 +73,35 @@ class FunctionRow(QWidget):
         rm = QPushButton("×")
         rm.setFixedSize(22, 22)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
+        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};"
+                         f"font-weight:700;")
         rm.clicked.connect(lambda _=False, f=func: editor.delete(f))
         ah.addWidget(rm)
         h.addWidget(self._ops)
         self._ops.hide()
-        self.setToolTip(func.default_label())
+        self.setToolTip(label)
         self._style()
 
+    @staticmethod
+    def _get_label(func):
+        from geo.implicit_curve import ImplicitCurve
+        if isinstance(func, ImplicitCurve):
+            return f"{func.expr} = 0"
+        if hasattr(func, "default_label"):
+            return func.default_label()
+        return getattr(func, "expr", "")
+
     def _style(self):
+        color = getattr(self.func, "color", "#1971c2")
         self.dot.setStyleSheet(
-            f"background:{self.func.color};border-radius:6px;border:1px solid rgba(0,0,0,0.25);")
-        self.expr.set_text(self.func.default_label(), self.func.color)
+            f"background:{color};border-radius:6px;"
+            f"border:1px solid rgba(0,0,0,0.25);")
+        self.expr.set_text(self._get_label(self.func), color)
 
     def enterEvent(self, ev):
         self._ops.show()
-        self.setStyleSheet("background:rgba(120,140,170,0.10);border-radius:7px;")
+        self.setStyleSheet("background:rgba(120,140,170,0.10);"
+                           "border-radius:7px;")
 
     def leaveEvent(self, ev):
         self._ops.hide()
@@ -93,17 +114,20 @@ class FunctionEditorWidget(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
+        self._current_page = "explicit"
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 9, 8, 9)
         outer.setSpacing(6)
 
-        # 头部：折叠 + 标题 + 新建函数
+        # 头部
         head = QHBoxLayout()
         self._collapse_btn = QPushButton("«")
         self._collapse_btn.setFixedWidth(24)
         self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_btn.setToolTip("折叠侧栏")
-        self._collapse_btn.clicked.connect(lambda: self.collapse_requested.emit(True))
+        self._collapse_btn.clicked.connect(
+            lambda: self.collapse_requested.emit(True))
         head.addWidget(self._collapse_btn)
         self._cap = QLabel("函数编辑器")
         head.addWidget(self._cap)
@@ -114,12 +138,12 @@ class FunctionEditorWidget(QWidget):
         head.addWidget(self._add)
         outer.addLayout(head)
 
-        # 滚动区：变量区 + 函数区（同一个滚动区，不再各自浮动堆叠）
+        # 滚动区
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("background:transparent;border:none;")
         self._content = QWidget()
         self._content.setStyleSheet("background:transparent;")
@@ -127,26 +151,61 @@ class FunctionEditorWidget(QWidget):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(10)
 
-        self.var_panel = VariableSliderPanel(canvas, self._content)   # 变量区
+        self.var_panel = VariableSliderPanel(canvas, self._content)
         cl.addWidget(self.var_panel)
-        self._func_cap = QLabel("函数")
-        cl.addWidget(self._func_cap)
+
+        # ★ 分页按钮
+        self._page_btns = {}
+        page_row = QHBoxLayout()
+        page_row.setSpacing(4)
+        for kind, label in PAGES:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, k=kind: self._switch_page(k))
+            page_row.addWidget(btn)
+            self._page_btns[kind] = btn
+        page_row.addStretch(1)
+        cl.addLayout(page_row)
+
+        # 函数列表容器
         self._func_rows = QVBoxLayout()
         self._func_rows.setSpacing(2)
         cl.addLayout(self._func_rows)
         cl.addStretch(1)
+
         self._scroll.setWidget(self._content)
         outer.addWidget(self._scroll, 1)
 
+        self._switch_page("explicit")
+
+    def _switch_page(self, kind):
+        self._current_page = kind
+        for k, btn in self._page_btns.items():
+            btn.setChecked(k == kind)
+        self.refresh()
+
     def refresh(self):
         self._cap.setStyleSheet(
-            f"font-weight:800;font-size:13px;letter-spacing:2px;color:{theme.INK.name()};")
+            f"font-weight:800;font-size:13px;letter-spacing:2px;"
+            f"color:{theme.INK.name()};")
         self._add.setStyleSheet(
             f"border:none;border-radius:8px;background:{theme.ACCENT.name()};"
             f"color:#fff;font-weight:700;padding:5px 10px;")
-        self._func_cap.setStyleSheet(
-            f"font-weight:800;font-size:12px;color:{theme.INK.name()};")
+        # 分页按钮样式
+        for k, btn in self._page_btns.items():
+            if k == self._current_page:
+                btn.setStyleSheet(
+                    f"background:{theme.ACCENT.name()};color:#fff;"
+                    f"border:none;border-radius:6px;padding:4px 8px;"
+                    f"font-weight:600;")
+            else:
+                btn.setStyleSheet(
+                    f"background:transparent;color:{theme.SUBINK.name()};"
+                    f"border:none;border-radius:6px;padding:4px 8px;")
         self.var_panel.refresh()
+
+        # 清空函数列表
         while self._func_rows.count():
             item = self._func_rows.takeAt(0)
             if item is None:
@@ -154,10 +213,21 @@ class FunctionEditorWidget(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
-        for i, f in enumerate(o for o in self.canvas.doc.objects
-                              if isinstance(o, FunctionCurve)):
-            self._func_rows.insertWidget(i, FunctionRow(f, self))
 
+        # 按当前分页填充
+        from geo.implicit_curve import ImplicitCurve
+        funcs = []
+        for o in self.canvas.doc.objects:
+            if self._current_page == "implicit":
+                if isinstance(o, ImplicitCurve):
+                    funcs.append(o)
+            else:
+                if isinstance(o, FunctionCurve) and o.kind == self._current_page:
+                    funcs.append(o)
+        for f in funcs:
+            self._func_rows.addWidget(FunctionRow(f, self))
+
+    # ───────── 操作 ─────────
     def new_function(self):
         from ui.formula_editor import FormulaEditor
         dlg = FormulaEditor(self.canvas, None, self)
@@ -168,15 +238,27 @@ class FunctionEditorWidget(QWidget):
                 self.refresh()
 
     def edit(self, f):
-        from ui.formula_editor import FormulaEditor
-        dlg = FormulaEditor(self.canvas, f, self)
-        if dlg.exec():
-            dlg.build_function()
-            self.canvas.doc.changed.emit()
-            self.refresh()
+        from geo.implicit_curve import ImplicitCurve
+        if isinstance(f, ImplicitCurve):
+            from PySide6.QtWidgets import QInputDialog
+            expr, ok = QInputDialog.getText(
+                self, "隐函数", "F(x,y) = 0：", text=f.expr)
+            if ok and expr.strip():
+                f.expr = expr.strip()
+                f.invalidate_cache()
+                self.canvas.doc.changed.emit()
+                self.refresh()
+        else:
+            from ui.formula_editor import FormulaEditor
+            dlg = FormulaEditor(self.canvas, f, self)
+            if dlg.exec():
+                dlg.build_function()
+                self.canvas.doc.changed.emit()
+                self.refresh()
 
     def recolor(self, f):
-        c = QColorDialog.getColor(QColor(f.color), self, "选择曲线颜色")
+        c = QColorDialog.getColor(QColor(getattr(f, "color", "#1971c2")),
+                                  self, "选择曲线颜色")
         if c.isValid():
             f.color = c.name()
             self.canvas.doc.changed.emit()
@@ -190,13 +272,15 @@ class FunctionEditorWidget(QWidget):
         self.canvas.doc.remove(f)
         self.refresh()
 
+
 class FunctionEditorDock(QDockWidget):
-    """可折叠函数编辑器侧栏：« 收成窄条，» 展开。"""
+    """可折叠函数编辑器侧栏。"""
     def __init__(self, canvas, parent=None):
         super().__init__("函数编辑器", parent)
         self.setObjectName("functionEditorDock")
         self.canvas = canvas
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
+                             Qt.DockWidgetArea.RightDockWidgetArea)
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
                          QDockWidget.DockWidgetFeature.DockWidgetFloatable |
                          QDockWidget.DockWidgetFeature.DockWidgetClosable)
@@ -204,7 +288,6 @@ class FunctionEditorDock(QDockWidget):
         self._editor.collapse_requested.connect(self.set_collapsed)
         self._collapsed = False
 
-        # 折叠后的窄条
         self._strip = QWidget()
         sl = QVBoxLayout(self._strip)
         sl.setContentsMargins(4, 8, 4, 8)
@@ -237,7 +320,7 @@ class FunctionEditorDock(QDockWidget):
             self.setMinimumWidth(280)
             if isinstance(mw, QMainWindow):
                 mw.resizeDocks([self], [300], Qt.Orientation.Horizontal)
-            self._editor.refresh()
+        self._editor.refresh()
 
     def refresh(self):
         self._editor.refresh()

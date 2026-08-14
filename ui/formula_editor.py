@@ -116,13 +116,13 @@ class FormulaEditor(QDialog):
     def _build(self):
         root = QVBoxLayout(self)
         root.setSpacing(10)
-
         kind_row = QHBoxLayout()
         self._kind_group = QButtonGroup(self)
         self._kinds = {}
         for key, label in [("explicit", "显函数 y=f(x)"),
                            ("parametric", "参数方程"),
-                           ("polar", "极坐标 r=f(θ)")]:
+                           ("polar", "极坐标 r=f(θ)"),
+                           ("implicit", "隐函数 F(x,y)=0")]:
             rb = QRadioButton(label)
             self._kind_group.addButton(rb)
             self._kinds[key] = rb
@@ -213,6 +213,7 @@ class FormulaEditor(QDialog):
     def _on_kind_changed(self, *a):
         kind = self._current_kind()
         is_param = (kind == "parametric")
+        is_implicit = (kind == "implicit")
         for i in range(self._expr2_row.count()):
             item = self._expr2_row.itemAt(i)
             if item is not None:
@@ -225,12 +226,15 @@ class FormulaEditor(QDialog):
         elif kind == "parametric":
             self._expr1_lbl.setText("x(t) =")
             self._auto_dom.setVisible(False)
-        else:
+        elif kind == "polar":
             self._expr1_lbl.setText("r =")
+            self._auto_dom.setVisible(False)
+        elif kind == "implicit":
+            self._expr1_lbl.setText("F(x,y) =")
             self._auto_dom.setVisible(False)
         self._on_auto_toggled()
         self._update_preview()
-
+        
     def _on_auto_toggled(self, *a):
         auto = self._auto_dom.isChecked() and self._current_kind() == "explicit"
         self._dom_a.setEnabled(not auto)
@@ -244,8 +248,10 @@ class FormulaEditor(QDialog):
         elif kind == "parametric":
             e2 = self._expr2.text().strip()
             self._preview.set_text(f"({e1}, {e2})" if (e1 or e2) else "")
-        else:
+        elif kind == "polar":
             self._preview.set_text(f"r = {e1}" if e1 else "")
+        elif kind == "implicit":
+            self._preview.set_text(f"{e1} = 0" if e1 else "")
 
     def _pick_color(self):
         c = QColorDialog.getColor(self._color, self, "选择曲线颜色")
@@ -261,6 +267,18 @@ class FormulaEditor(QDialog):
         kind = self._current_kind()
         e1 = self._expr1.text().strip()
         e2 = self._expr2.text().strip()
+
+        if kind == "implicit":
+            if not e1:
+                return None
+            from geo.implicit_curve import ImplicitCurve
+            if self.func and isinstance(self.func, ImplicitCurve):
+                self.func.expr = e1
+                self.func.color = self._color.name()
+                self.func.invalidate_cache()
+                return self.func
+            return ImplicitCurve(e1, color=self._color.name())
+
         if not e1 or (kind == "parametric" and not e2):
             return None
         if self._auto_dom.isChecked() and kind == "explicit":
