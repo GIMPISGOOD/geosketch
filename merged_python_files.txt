@@ -1,7 +1,7 @@
 ﻿============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\main.py
 鏂囦欢鍚?   main.py
-淇敼鏃堕棿: 08/06/2026 23:14:17
+淇敼鏃堕棿: 08/13/2026 14:55:47
 ============================================================
 
 import sys
@@ -14,6 +14,16 @@ from ui.main_window import MainWindow
 from ui import theme
 
 from geo.function_sampler import shutdown_sampler
+
+def load_constraints() -> None:
+    """加载几何约束求解器扩展"""
+    try:
+        import constraints
+        
+    except Exception as e:
+        print("无法加载几何约束求解器扩展，请确保已正确安装依赖。")
+        print("错误信息:", e)
+
 
 
 def main() -> None:
@@ -41,13 +51,753 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    load_constraints()
     main()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\base.py
+鏂囦欢鍚?   base.py
+淇敼鏃堕棿: 08/13/2026 15:05:05
+============================================================
+
+"""约束基类与注册表。"""
+from typing import List, Any, Dict, Type
+
+
+class GeometricConstraint:
+    """几何约束基类。不继承 GeoObject，独立于依赖图。"""
+    _next_id = 1
+
+    def __init__(self):
+        self.cid = f"c{GeometricConstraint._next_id}"
+        GeometricConstraint._next_id += 1
+        self.enabled = True
+        self.status = "ok"  # ok / conflict / degenerate / invalid_expr
+
+    def involved_points(self) -> List[Any]:
+        """返回此约束涉及的所有点对象。"""
+        raise NotImplementedError
+
+    def residual(self) -> List[float]:
+        """残差向量。约束满足时全为 0。"""
+        raise NotImplementedError
+
+    def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
+        """数值雅可比矩阵（中心差分）。
+
+        参数:
+            vars_map: {id(point): 该点在 free_points 中的索引}
+
+        返回:
+            矩阵行数 = len(residual())
+            矩阵列数 = 2 * len(vars_map)  ← 每个点贡献 x, y 两列
+        """
+        eps = 1e-7
+        pts = self.involved_points()
+        n_res = len(self.residual())
+        # ★ 修复：列数 = 2 × 自由点数量（每个点有 x, y 两个变量）
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols for _ in range(n_res)]
+
+        for p in pts:
+            if id(p) not in vars_map:
+                continue
+            idx = vars_map[id(p)]
+            for axis in range(2):  # 0=x, 1=y
+                old = p.x if axis == 0 else p.y
+                # +ε
+                if axis == 0:
+                    p.x = old + eps
+                else:
+                    p.y = old + eps
+                r_plus = self.residual()
+
+                # −ε
+                if axis == 0:
+                    p.x = old - eps
+                else:
+                    p.y = old - eps
+                r_minus = self.residual()
+
+                # 恢复
+                if axis == 0:
+                    p.x = old
+                else:
+                    p.y = old
+
+                # 中心差分
+                for j in range(n_res):
+                    jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
+
+        return jac
+
+    # ── 序列化接口 ──
+    def dump(self) -> dict:
+        raise NotImplementedError
+
+    @classmethod
+    def build(cls, point_map: dict, params: dict) -> 'GeometricConstraint':
+        raise NotImplementedError
+
+
+# ── 注册表 ──
+CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
+
+
+def register_constraint(name: str):
+    def deco(cls):
+        cls.type_name = name
+        CONSTRAINT_REGISTRY[name] = cls
+        return cls
+    return deco
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\document_ext.py
+鏂囦欢鍚?   document_ext.py
+淇敼鏃堕棿: 08/13/2026 15:10:14
+============================================================
+
+"""Document 补丁：添加 constraints 列表、solve_constraints、recompute_silent。"""
+from core.document import Document
+from geo.points import FreePoint
+from .solver import ConstraintSolver
+from .graph import get_affected_constraints
+
+_original_init = Document.__init__
+_original_recompute = Document.recompute_from
+_original_remove = Document._remove
+
+
+def _recompute_silent(self, roots):
+    """静默重算：不 emit changed。"""
+    roots = roots if isinstance(roots, (list, tuple)) else [roots]
+    dirty = set()
+    stack = list(roots)
+    while stack:
+        o = stack.pop()
+        if o in dirty:
+            continue
+        dirty.add(o)
+        stack.extend(o.children)
+    for o in sorted(dirty, key=lambda o: o.id):
+        o.exists = all(p.exists for p in o.parents)
+        if o.exists:
+            o.recompute()
+    self._mutation_count += 1
+
+
+def _new_init(self, *args, **kwargs):
+    _original_init(self, *args, **kwargs)
+    self.constraints = []
+
+
+def _new_recompute(self, roots):
+    _recompute_silent(self, roots)
+    self.changed.emit()
+
+
+def _new_remove(self, obj):
+    doomed = _original_remove(self, obj)
+    # 级联删除引用被删对象的约束
+    doomed_ids = {o.id for o in doomed}
+    if hasattr(self, 'constraints') and self.constraints:
+        to_remove = [
+            c for c in self.constraints
+            if any(getattr(p, 'id', None) in doomed_ids for p in c.involved_points())
+        ]
+        for c in to_remove:
+            self.constraints.remove(c)
+    return doomed
+
+
+def add_constraint(self, constraint):
+    """添加约束并立即求解。"""
+    self.constraints.append(constraint)
+    self.solve_constraints()
+    self.changed.emit()
+
+
+def remove_constraint(self, constraint):
+    """删除约束。"""
+    if constraint in self.constraints:
+        self.constraints.remove(constraint)
+        self.changed.emit()
+
+
+def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
+    """求解约束系统。
+
+    参数:
+        trigger_points: 触发求解的点（缩小范围），None 则求解全部
+        pinned_points: 固定不动的点（如正在拖动的点）
+    """
+    MAX_DEPTH = 5
+    if not self.constraints or _depth >= MAX_DEPTH:
+        return
+
+    if trigger_points:
+        affected = get_affected_constraints(trigger_points, self.constraints)
+    else:
+        affected = [c for c in self.constraints if c.enabled]
+
+    if not affected:
+        return
+
+    # 收集可移动的自由点
+    pinned_set = set(pinned_points or [])
+    free_set = set()
+    for c in affected:
+        for p in c.involved_points():
+            if isinstance(p, FreePoint) and p not in pinned_set:
+                free_set.add(p)
+
+    if not free_set:
+        return
+
+    # 求解
+    solver = ConstraintSolver(max_iter=50, tol=1e-9)
+    solver.solve(affected, list(free_set), list(pinned_set))
+
+    # ★ 关键：静默更新依赖图（让线段、圆等跟随点更新）
+    _recompute_silent(self, list(free_set))
+
+    # 检查是否有新约束被触发（链式传播）
+    moved = list(free_set)
+    if moved:
+        self.solve_constraints(moved, pinned_points, _depth + 1)
+
+
+def patch_document():
+    setattr(Document, "__init__", _new_init)
+    setattr(Document, "recompute_from", _new_recompute)
+    setattr(Document, "_recompute_silent", _recompute_silent)
+    setattr(Document, "_remove", _new_remove)
+    setattr(Document, "add_constraint", add_constraint)
+    setattr(Document, "remove_constraint", remove_constraint)
+    setattr(Document, "solve_constraints", solve_constraints)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\graph.py
+鏂囦欢鍚?   graph.py
+淇敼鏃堕棿: 08/13/2026 14:48:58
+============================================================
+
+"""约束图：用于寻找局部连通分量，避免全局求解。"""
+from typing import List, Any, Set
+from .base import GeometricConstraint
+
+def get_affected_constraints(
+    trigger_points: List[Any], 
+    all_constraints: List[GeometricConstraint]
+) -> List[GeometricConstraint]:
+    """获取受触发点影响的约束连通分量。"""
+    trigger_ids = {id(p) for p in trigger_points}
+    affected = []
+    
+    # 1. 找到直接涉及的约束
+    frontier = []
+    expanded_ids = set()
+    for c in all_constraints:
+        if any(id(p) in trigger_ids for p in c.involved_points()):
+            frontier.append(c)
+            
+    # 2. BFS 扩展连通分量
+    while frontier:
+        c = frontier.pop(0)
+        if id(c) in expanded_ids: continue
+        expanded_ids.add(id(c))
+        affected.append(c)
+        
+        for p in c.involved_points():
+            for c2 in all_constraints:
+                if id(c2) not in expanded_ids:
+                    if any(id(p2) == id(p) for p2 in c2.involved_points()):
+                        frontier.append(c2)
+                        
+    return affected
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\select_ext.py
+鏂囦欢鍚?   select_ext.py
+淇敼鏃堕棿: 08/13/2026 15:10:27
+============================================================
+
+"""SelectTool 补丁：拖动时触发约束求解。"""
+from tools.select import SelectTool
+
+_original_move = SelectTool.move
+_original_release = SelectTool.release
+
+
+def _new_move(self, canvas, wpt, hit):
+    # 先执行原有的拖动逻辑（移动点）
+    _original_move(self, canvas, wpt, hit)
+
+    # ★ 拖动后触发约束求解
+    doc = canvas.doc
+    if not hasattr(doc, 'constraints') or not doc.constraints:
+        return
+
+    # 收集正在被拖动的点作为 pinned（它们跟随鼠标，不被约束移动）
+    pinned = []
+    if self.drag_poo is not None:
+        pinned.append(self.drag_poo)
+    for p in self.drag_pts:
+        pinned.append(p)
+    if self.drag_media is not None:
+        pinned.append(self.drag_media)
+
+    if pinned:
+        try:
+            doc.solve_constraints(
+                trigger_points=pinned,
+                pinned_points=pinned,
+            )
+        except Exception:
+            pass  # 约束求解失败不应阻断拖动
+
+
+def _new_release(self, canvas, wpt, hit):
+    _original_release(self, canvas, wpt, hit)
+
+
+def patch_select_tool():
+    setattr(SelectTool, "move", _new_move)
+    setattr(SelectTool, "release", _new_release)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\serialization.py
+鏂囦欢鍚?   serialization.py
+淇敼鏃堕棿: 08/13/2026 15:10:35
+============================================================
+
+"""注入 Document.save / load：支持 constraints.json。"""
+from core.document import Document
+from .base import CONSTRAINT_REGISTRY
+import json, zipfile
+
+_original_save = Document.save
+_original_load = Document.load
+
+def _new_save(self, path):
+    _original_save(self, path)
+    if not hasattr(self, 'constraints') or not self.constraints: return
+    
+    data = []
+    for c in self.constraints:
+        data.append({
+            "id": c.cid,
+            "type": c.type_name,
+            "params": c.dump()
+        })
+        
+    with zipfile.ZipFile(path, "a") as zf:
+        zf.writestr("constraints.json", json.dumps(data, ensure_ascii=False, indent=1))
+
+def _new_load(self, path):
+    _original_load(self, path)
+    with zipfile.ZipFile(path, "r") as zf:
+        if "constraints.json" in zf.namelist():
+            data = json.loads(zf.read("constraints.json"))
+            point_map = {o.id: o for o in self.objects}
+            self.constraints = []
+            for item in data:
+                cls = CONSTRAINT_REGISTRY.get(item["type"])
+                if cls:
+                    try:
+                        c = cls.build(point_map, item["params"])
+                        c.cid = item["id"]
+                        self.constraints.append(c)
+                    except Exception: pass
+
+def patch_save_load():
+    setattr(Document, "save", _new_save)
+    setattr(Document, "load", _new_load)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\solver.py
+鏂囦欢鍚?   solver.py
+淇敼鏃堕棿: 08/13/2026 15:05:26
+============================================================
+
+"""Levenberg-Marquardt 约束求解器。纯 Python，无外部依赖。"""
+import math
+from typing import List, Any, Dict
+from .base import GeometricConstraint
+
+
+def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
+    """高斯消元（列主元）求解 Ax = b。返回 None 表示奇异。"""
+    n = len(b)
+    if n == 0:
+        return []
+    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(M[r][col]))
+        if abs(M[pivot][col]) < 1e-15:
+            return None
+        M[col], M[pivot] = M[pivot], M[col]
+        for row in range(col + 1, n):
+            f = M[row][col] / M[col][col]
+            for j in range(col, n + 1):
+                M[row][j] -= f * M[col][j]
+
+    x = [0.0] * n
+    for i in range(n - 1, -1, -1):
+        x[i] = M[i][n]
+        for j in range(i + 1, n):
+            x[i] -= M[i][j] * x[j]
+        x[i] /= M[i][i]
+    return x
+
+
+class ConstraintSolver:
+    """LM 求解器。"""
+
+    def __init__(self, max_iter=50, tol=1e-9):
+        self.max_iter = max_iter
+        self.tol = tol
+
+    def solve(
+        self,
+        constraints: List[GeometricConstraint],
+        free_points: List[Any],
+        pinned_points: List[Any],
+    ) -> bool:
+        """求解约束系统。
+
+        参数:
+            constraints: 需要满足的约束列表
+            free_points: 可以被移动的点（求解器会修改它们的坐标）
+            pinned_points: 固定不动的点（如用户正在拖动的点）
+
+        返回:
+            True = 收敛成功
+        """
+        valid = [c for c in constraints if c.enabled]
+        if not valid or not free_points:
+            return True
+
+        # ★ 变量映射：每个 free_point 贡献 x, y 两个变量
+        vars_map: Dict[int, int] = {id(p): i for i, p in enumerate(free_points)}
+        n_vars = 2 * len(free_points)  # ★ 修复：变量总数 = 2 × 点数
+
+        lam = 1e-3
+        lam_up, lam_down = 10.0, 0.1
+
+        for iteration in range(self.max_iter):
+            # ── 组装 F（残差向量）和 J（雅可比矩阵）──
+            F: List[float] = []
+            J: List[List[float]] = []
+
+            for c in valid:
+                try:
+                    r = c.residual()
+                    jac = c.jacobian(vars_map)
+                    F.extend(r)
+                    J.extend(jac)
+                except Exception:
+                    continue
+
+            if not F:
+                return True
+
+            n_eqs = len(F)
+
+            # 检查收敛
+            norm = math.sqrt(sum(f * f for f in F))
+            if norm < self.tol:
+                return True
+
+            # ── 构建法方程 (JᵀJ + λI)Δ = −JᵀF ──
+            JtJ = [[0.0] * n_vars for _ in range(n_vars)]
+            JtF = [0.0] * n_vars
+
+            for i in range(n_eqs):
+                if len(J[i]) != n_vars:
+                    continue  # 跳过维度不匹配的行
+                for j in range(n_vars):
+                    JtF[j] += J[i][j] * F[i]
+                    for k in range(n_vars):
+                        JtJ[j][k] += J[i][j] * J[i][k]
+
+            for i in range(n_vars):
+                JtJ[i][i] += lam
+
+            # ── 求解增量 ──
+            delta = _solve_linear(JtJ, [-f for f in JtF])
+            if delta is None:
+                lam *= lam_up
+                if lam > 1e10:
+                    return False
+                continue
+
+            # ── 试探步 ──
+            old_coords = [(p.x, p.y) for p in free_points]
+            for i, p in enumerate(free_points):
+                p.x += delta[2 * i]
+                p.y += delta[2 * i + 1]
+
+            # 计算新残差
+            new_F: List[float] = []
+            for c in valid:
+                try:
+                    new_F.extend(c.residual())
+                except Exception:
+                    continue
+            new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
+
+            if new_norm < norm:
+                lam = max(lam * lam_down, 1e-12)
+                if new_norm < self.tol:
+                    return True
+            else:
+                # 回退
+                for i, p in enumerate(free_points):
+                    p.x, p.y = old_coords[i]
+                lam *= lam_up
+                if lam > 1e10:
+                    return False
+
+        return False
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/13/2026 15:04:26
+============================================================
+
+# constraints/__init__.py
+
+def inject():
+    """将约束系统注入到 GeoSketch 核心中。"""
+    try:
+        from . import document_ext
+        from . import select_ext
+        from . import serialization
+        from .ui import overlay, tools
+
+        document_ext.patch_document()
+        select_ext.patch_select_tool()
+        serialization.patch_save_load()
+        overlay.patch_canvas()
+
+        # ★ 新增：注入“约束”菜单
+        patch_main_window_menu()
+
+        import logging
+        logging.getLogger(__name__).info("✔ 几何约束求解器已加载")
+        return True
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).warning(f"✘ 几何约束求解器加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def patch_main_window_menu():
+    """动态向 MainWindow 的菜单栏注入「约束」菜单。"""
+    from ui.main_window import MainWindow
+    from core.registry import TOOL_REGISTRY
+
+    original_init = MainWindow.__init__
+
+    def new_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+
+        # 获取菜单栏
+        mb = self.menuBar()
+
+        # 创建“约束”菜单
+        cm = mb.addMenu("约束(&C)")
+
+        # 收集 panel="constraint" 的工具
+        constraint_specs = sorted(
+            [s for s in TOOL_REGISTRY if s.get("panel") == "constraint"],
+            key=lambda s: s.get("order", 99)
+        )
+
+        # 添加菜单项
+        for spec in constraint_specs:
+            cm.addAction(self._actions[spec["cls"]])
+
+        # 如果没有约束工具，显示占位项
+        if not constraint_specs:
+            e = cm.addAction("（暂无约束工具）")
+            e.setEnabled(False)
+
+    MainWindow.__init__ = new_init
+
+
+# 模块被 import 时自动注入
+inject()
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\types\distance.py
+鏂囦欢鍚?   distance.py
+淇敼鏃堕棿: 08/13/2026 14:49:12
+============================================================
+
+import math
+from core.variables import eval_expr
+from ..base import GeometricConstraint, register_constraint
+
+@register_constraint("distance")
+class DistanceConstraint(GeometricConstraint):
+    def __init__(self, p1, p2, expr="1"):
+        super().__init__()
+        self.p1, self.p2 = p1, p2
+        self.expr = expr
+        
+    def involved_points(self):
+        return [self.p1, self.p2]
+        
+    def residual(self):
+        dx = self.p2.x - self.p1.x
+        dy = self.p2.y - self.p1.y
+        d = math.hypot(dx, dy)
+        target = eval_expr(self.expr)
+        if target is None: 
+            self.status = "invalid_expr"
+            return [0.0]
+        self.status = "ok"
+        return [d - target]
+        
+    def dump(self):
+        return {"p1": self.p1.id, "p2": self.p2.id, "expr": self.expr}
+        
+    @classmethod
+    def build(cls, point_map, params):
+        return cls(point_map[params["p1"]], point_map[params["p2"]], params["expr"])
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\types\fixed.py
+鏂囦欢鍚?   fixed.py
+淇敼鏃堕棿: 08/13/2026 14:49:28
+============================================================
+
+from ..base import GeometricConstraint, register_constraint
+
+@register_constraint("fixed")
+class FixedConstraint(GeometricConstraint):
+    def __init__(self, p, fx, fy):
+        super().__init__()
+        self.p = p
+        self.fx, self.fy = fx, fy
+        
+    def involved_points(self):
+        return [self.p]
+        
+    def residual(self):
+        return [self.p.x - self.fx, self.p.y - self.fy]
+        
+    def dump(self):
+        return {"p": self.p.id, "fx": self.fx, "fy": self.fy}
+        
+    @classmethod
+    def build(cls, point_map, params):
+        return cls(point_map[params["p"]], params["fx"], params["fy"])
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\types\__init__.py
+鏂囦欢鍚?   __init__.py
+淇敼鏃堕棿: 08/13/2026 14:56:15
+============================================================
+
+#from . import distance, fixed, horizontal, vertical, angle
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\ui\overlay.py
+鏂囦欢鍚?   overlay.py
+淇敼鏃堕棿: 08/13/2026 15:10:48
+============================================================
+
+"""注入 Canvas：在 paintEvent 中绘制约束标记。"""
+from ui.canvas import Canvas
+from ui import theme
+
+_original_paint = Canvas.paintEvent
+
+def _new_paint(self, ev):
+    _original_paint(self, ev)
+    # 在原绘制结束后，追加约束标记
+    if not hasattr(self.doc, 'constraints') or not self.doc.constraints: return
+    
+    from PySide6.QtGui import QPainter, QPen
+    p = QPainter(self)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    p.setPen(QPen(theme.MEASURE, 1.5))
+    p.setFont(theme.LABEL_FONT)
+    
+    for c in self.doc.constraints:
+        pts = c.involved_points()
+        if len(pts) >= 2:
+            sp1 = self.to_screen(pts[0].x, pts[0].y)
+            sp2 = self.to_screen(pts[1].x, pts[1].y)
+            p.drawLine(sp1, sp2)
+            mx, my = (sp1.x() + sp2.x())/2, (sp1.y() + sp2.y())/2
+            p.drawText(mx + 5, my - 5, c.type_name)
+    p.end()
+
+def patch_canvas():
+    setattr(Canvas, "paintEvent", _new_paint)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\constraints\ui\tools.py
+鏂囦欢鍚?   tools.py
+淇敼鏃堕棿: 08/13/2026 15:04:06
+============================================================
+
+"""约束创建工具。"""
+from PySide6.QtWidgets import QInputDialog
+from core.registry import register_tool
+from tools.base import Tool, point_or_snap
+from ..types.distance import DistanceConstraint
+from ..types.fixed import FixedConstraint
+
+@register_tool(name="距离约束", order=501, panel="constraint", icon="distance",
+               hint="点击两点，输入距离表达式")
+class DistanceConstraintTool(Tool):
+    def __init__(self): self.pts = []
+    def activated(self, canvas): self.pts = []
+    def press(self, canvas, wpt, hit):
+        pt = point_or_snap(canvas, wpt, hit)
+        self.pts.append(pt)
+        if len(self.pts) == 2:
+            expr, ok = QInputDialog.getText(canvas, "距离约束", "距离表达式：", text="5")
+            if ok and expr.strip():
+                c = DistanceConstraint(self.pts[0], self.pts[1], expr.strip())
+                canvas.doc.add_constraint(c)
+            self.pts = []
+
+@register_tool(name="固定约束", order=502, panel="constraint", icon="point",
+               hint="点击一个点，将其固定在当前位置")
+class FixedConstraintTool(Tool):
+    def press(self, canvas, wpt, hit):
+        pt = point_or_snap(canvas, wpt, hit)
+        if pt:
+            c = FixedConstraint(pt, pt.x, pt.y)
+            canvas.doc.add_constraint(c)
 
 
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\core\document.py
 鏂囦欢鍚?   document.py
-淇敼鏃堕棿: 08/07/2026 13:50:11
+淇敼鏃堕棿: 08/12/2026 23:36:11
 ============================================================
 
 import json
@@ -89,6 +839,12 @@ class Document(QObject):
         self.macros = []
         self._macro_suppress = False
         self.names = {}
+        self._objects_version = 0
+        self._type_cache = {}
+        self._type_cache_version = -1
+
+        # ★ 约束系统预留（当前为空列表，零开销）
+        self.constraints = []
         
     # ================= 对象命名 =================
 
@@ -180,15 +936,13 @@ class Document(QObject):
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
+        self._objects_version += 1          # ★ 结构变化
         self.objects.append(obj)
-
         if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
             self.expr_objects.append(obj)
-
         # ★ 宏录制：通知对象新增
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
-
         return obj
 
     def _collect_with_deps(self, objs):
@@ -254,6 +1008,7 @@ class Document(QObject):
     def _remove(self, obj):
         """级联删除（不入栈、不发信号），返回被删集合。"""
         self._mutation_count += 1
+        self._objects_version += 1          # ★ 结构变化
         doomed, stack = set(), [obj]
         while stack:
             o = stack.pop()
@@ -273,7 +1028,7 @@ class Document(QObject):
         if not getattr(self, "_macro_suppress", False):
             self.object_removed.emit(obj)
         return doomed
-
+    
     def remove(self, obj):
         if self._group_depth == 0:
             self._push_undo()
@@ -295,15 +1050,13 @@ class Document(QObject):
     def clear(self):
         if self.objects:
             self._push_undo()
-
-        self.objects.clear()
-        self.expr_objects.clear()
-
-        # ★ 宏录制：通知清空
-        if not getattr(self, "_macro_suppress", False):
-            self.cleared.emit()
-
-        self.changed.emit()
+            self.objects.clear()
+            self.expr_objects.clear()
+            self._objects_version += 1      # ★ 结构变化
+            # ★ 宏录制：通知清空
+            if not getattr(self, "_macro_suppress", False):
+                self.cleared.emit()
+            self.changed.emit()
         
     # ================= 选择 =================
     def set_selection(self, objs):
@@ -311,9 +1064,34 @@ class Document(QObject):
         for o in self.objects:
             o.selected = id(o) in target
         self.changed.emit()
+    # ================= 类型缓存 =================
 
-    # ================= 增量重算 =================
-    def recompute_from(self, roots):
+    def get_typed(self, type_name):
+        """按类型名返回对象列表（带缓存，对象增删时自动失效）。
+
+        用法示例：
+            for fc in doc.get_typed("FunctionCurve"):
+                fc.invalidate_cache()
+        """
+        if self._type_cache_version != self._objects_version:
+            self._type_cache.clear()
+            self._type_cache_version = self._objects_version
+        if type_name not in self._type_cache:
+            self._type_cache[type_name] = [
+                o for o in self.objects if type(o).__name__ == type_name
+            ]
+        return self._type_cache[type_name]
+
+    # ================= 静默重算 =================
+
+    def recompute_silent(self, roots):
+        """静默重算：与 recompute_from 相同的依赖传播，但不 emit changed。
+
+        用途：
+        - 约束求解器内部多轮迭代（每轮只改坐标，最后统一 emit）
+        - refresh_variables 内部（先静默重算，最后统一 emit）
+        - 任何需要"改完再刷新"的批量操作
+        """
         roots = roots if isinstance(roots, (list, tuple)) else [roots]
         dirty = set()
         stack = list(roots)
@@ -321,13 +1099,34 @@ class Document(QObject):
             o = stack.pop()
             if o in dirty:
                 continue
-            dirty.add(o)                 # ★ 根节点自己也加入重算集合
+            dirty.add(o)
             stack.extend(o.children)
         for o in sorted(dirty, key=lambda o: o.id):
             o.exists = all(p.exists for p in o.parents)
             if o.exists:
                 o.recompute()
         self._mutation_count += 1
+
+    # ================= 约束求解预留 =================
+
+    def solve_constraints(self, trigger_points=None, pinned_points=None):
+        """约束求解入口（预留）。
+
+        当前无约束时立即返回，零开销。
+        未来实现时：
+        1. 收集 trigger_points 所在的约束连通分量
+        2. 收集分量内的 FreePoint 作为自由变量
+        3. LM 迭代求解
+        4. recompute_silent(moved_points)
+        5. 链式检查是否有新约束被触发（最多 N 轮）
+        """
+        if not self.constraints:
+            return
+        
+    # ================= 增量重算 =================
+    def recompute_from(self, roots):
+        """增量重算 + emit changed（对外接口，行为不变）。"""
+        self.recompute_silent(roots)
         self.changed.emit()
 
     # ================= 撤销 / 重做 =================
@@ -360,21 +1159,25 @@ class Document(QObject):
 
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
-        # ★ 新增：标记所有函数曲线缓存失效
         from geo.function_curve import FunctionCurve
-        for obj in self.objects:
-            if isinstance(obj, FunctionCurve):
-                obj.invalidate_cache()
+
+        # ★ 优化：使用类型缓存，避免全量扫描 objects
+        for obj in self.get_typed("FunctionCurve"):
+            obj.invalidate_cache()
 
         moved = []
         for eo in sorted(self.expr_objects, key=lambda o: o.id):
             if eo.exists:
                 eo.recompute()
                 moved.extend(eo.moved_points())
+
         if moved:
-            self.recompute_from(moved)
-        else:
-            self.changed.emit()
+            self.recompute_silent(moved)    # ★ 静默重算，不单独 emit
+
+        # ★ 未来约束求解：变量变化后也需要求解
+        # self.solve_constraints()
+
+        self.changed.emit()                 # ★ 统一 emit 一次
 
     @contextmanager
     def action(self):
@@ -423,26 +1226,21 @@ class Document(QObject):
     def _load_state(self, data):
         self.objects.clear()
         self.expr_objects.clear()
-
+        self._objects_version += 1          # ★ 结构变化
         pool = {}
-
         # ★ 加载 / 撤销 / 重做期间不录制宏
         self._macro_suppress = True
-
         try:
             for item in data:
                 cls = GEO_REGISTRY[item["type"]]
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
-                obj.id = item["id"]          # ★ 恢复原始 id：修复撤销/重做后标签变大的 bug
+                obj.id = item["id"]
                 pool[item["id"]] = self._add(obj)
-
             if data:
                 GeoObject.bump_ids(max(item["id"] for item in data))
-
         finally:
             self._macro_suppress = False
-
         self.changed.emit()
 
     def save(self, path):
@@ -6802,15 +7600,16 @@ def draw_script_button(p, obj, view):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\media\script_button_tool.py
 鏂囦欢鍚?   script_button_tool.py
-淇敼鏃堕棿: 08/06/2026 15:59:31
+淇敼鏃堕棿: 08/10/2026 22:51:34
 ============================================================
 
-"""插入脚本按钮工具：注册到「插入」菜单。"""
+"""插入脚本按钮工具：注册到「插入」菜单。
 
-from PySide6.QtWidgets import QFileDialog  # noqa: F401  保持和其他 insert 工具一致
+点击画布后打开脚本按钮向导，而不是直接插入裸脚本。
+"""
+
 from core.registry import register_tool
 from tools.base import Tool
-
 from media.script_button import ScriptButtonObject
 
 
@@ -6827,28 +7626,298 @@ def _finish_insert(canvas, obj):
     order=5,
     panel="insert",
     icon="insert_table",
-    hint="点击画布插入脚本按钮"
+    hint="点击画布，通过向导创建脚本按钮"
 )
 class InsertScriptButtonTool(Tool):
     def press(self, canvas, wpt, hit):
+        from media.script_button_wizard import ScriptButtonWizard
+
+        dlg = ScriptButtonWizard(canvas, None, parent=canvas)
+        if not dlg.exec():
+            return
+
         obj = ScriptButtonObject(
             wpt[0],
             wpt[1],
-            width=4.0,
-            height=1.2,
-            text="运行",
-            script="""# 示例脚本
-set n = 3
-
-repeat n {
-    print("GeoSketch 脚本运行")
-}
-
-__keep = true
-"""
+            width=4.5,
+            height=1.3,
         )
 
+        dlg.apply_to(obj)
         _finish_insert(canvas, obj)
+
+
+============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\media\script_button_wizard.py
+鏂囦欢鍚?   script_button_wizard.py
+淇敼鏃堕棿: 08/10/2026 22:50:58
+============================================================
+
+"""脚本按钮向导：降低脚本按钮使用门槛。
+
+用户不需要理解 __keep / __allow_delete_user / 脚本语法细节。
+向导提供四种动作：
+1. 创建示例图形
+2. 清空脚本创建的对象
+3. 显示提示
+4. 自定义脚本
+"""
+
+import re
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+DEFAULT_CUSTOM_SCRIPT = """# 示例脚本：
+# point(x, y) 创建点
+# segment(A, B) 创建线段
+# circle(O, r) 创建圆
+
+A = point(0, 0)
+B = point(3, 0)
+segment(A, B)
+"""
+
+
+class ScriptButtonWizard(QDialog):
+    """脚本按钮创建 / 简单编辑向导。"""
+
+    def __init__(self, canvas, obj=None, parent=None):
+        super().__init__(parent)
+        self.canvas = canvas
+        self.obj = obj
+
+        self.setWindowTitle("脚本按钮")
+        self.setMinimumWidth(560)
+        self.resize(620, 560)
+
+        self.bg_color = QColor(getattr(obj, "color", "#1971c2") if obj else "#1971c2")
+        self.text_color = QColor(getattr(obj, "text_color", "#ffffff") if obj else "#ffffff")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(8)
+
+        # ---------- 按钮文字 ----------
+        layout.addWidget(QLabel("按钮文字"))
+        self.text_edit = QLineEdit(getattr(obj, "text", "运行") if obj else "运行")
+        layout.addWidget(self.text_edit)
+
+        # ---------- 动作类型 ----------
+        layout.addWidget(QLabel("点击按钮后执行的动作"))
+        self.action_combo = QComboBox()
+        self.action_combo.addItems(
+            [
+                "创建示例图形",
+                "清空脚本创建的对象",
+                "显示提示",
+                "自定义脚本",
+            ]
+        )
+        self.action_combo.setCurrentIndex(0 if obj is None else 3)
+        self.action_combo.currentIndexChanged.connect(lambda *_: self._sync_ui())
+        layout.addWidget(self.action_combo)
+
+        # ---------- 说明 ----------
+        self.note_label = QLabel()
+        self.note_label.setWordWrap(True)
+        layout.addWidget(self.note_label)
+
+        # ---------- 高级选项（用友好文案包装） ----------
+        self.keep_chk = QCheckBox("运行后保留创建的对象")
+        self.keep_chk.setChecked(True)
+
+        self.allow_delete_chk = QCheckBox("允许删除已有用户对象")
+        self.allow_delete_chk.setChecked(False)
+
+        layout.addWidget(self.keep_chk)
+        layout.addWidget(self.allow_delete_chk)
+
+        # ---------- 提示消息 ----------
+        self.message_label = QLabel("提示内容")
+        self.message_edit = QLineEdit("你好，GeoSketch！")
+        layout.addWidget(self.message_label)
+        layout.addWidget(self.message_edit)
+
+        # ---------- 自定义脚本 ----------
+        self.script_label = QLabel("自定义脚本")
+        self.script_edit = QPlainTextEdit(DEFAULT_CUSTOM_SCRIPT)
+        layout.addWidget(self.script_label)
+        layout.addWidget(self.script_edit, 1)
+
+        # ---------- 颜色 ----------
+        color_row = QHBoxLayout()
+
+        color_row.addWidget(QLabel("背景色"))
+        self.bg_btn = QPushButton()
+        self.bg_btn.setFixedSize(60, 22)
+        self.bg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.bg_btn.clicked.connect(self._pick_bg_color)
+        color_row.addWidget(self.bg_btn)
+
+        color_row.addSpacing(14)
+
+        color_row.addWidget(QLabel("文字颜色"))
+        self.text_btn = QPushButton()
+        self.text_btn.setFixedSize(60, 22)
+        self.text_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.text_btn.clicked.connect(self._pick_text_color)
+        color_row.addWidget(self.text_btn)
+
+        color_row.addStretch(1)
+        layout.addLayout(color_row)
+
+        self._paint_color_buttons()
+
+        # ---------- 按钮 ----------
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # ---------- 编辑已有按钮时预填 ----------
+        if obj is not None:
+            script = getattr(obj, "script", "") or ""
+            self.keep_chk.setChecked("__keep = false" not in script)
+            self.allow_delete_chk.setChecked("__allow_delete_user = true" in script)
+            self.script_edit.setPlainText(self._strip_flags(script))
+            self.action_combo.setCurrentIndex(3)
+
+        self._sync_ui()
+
+    # ================= UI 同步 =================
+
+    def _sync_ui(self):
+        idx = self.action_combo.currentIndex()
+
+        self.message_label.setVisible(idx == 2)
+        self.message_edit.setVisible(idx == 2)
+
+        self.script_label.setVisible(idx == 3)
+        self.script_edit.setVisible(idx == 3)
+
+        if idx == 0:
+            self.note_label.setText(
+                "点击按钮后会创建一组示例点、线段和圆。\n"
+                "适合快速体验脚本按钮。"
+            )
+        elif idx == 1:
+            self.note_label.setText(
+                "点击按钮后会删除由脚本按钮创建的对象。\n"
+                "不会删除你手动创建的对象，除非勾选“允许删除已有用户对象”。"
+            )
+        elif idx == 2:
+            self.note_label.setText(
+                "点击按钮后会在状态栏输出一条提示信息。"
+            )
+        else:
+            self.note_label.setText(
+                "使用自定义脚本。\n"
+                "可以使用 point / segment / circle / line / text 等函数。"
+            )
+
+    def _paint_color_buttons(self):
+        self.bg_btn.setStyleSheet(
+            f"background:{self.bg_color.name()};"
+            f"border:1px solid rgba(0,0,0,0.30);"
+            f"border-radius:5px;"
+        )
+        self.text_btn.setStyleSheet(
+            f"background:{self.text_color.name()};"
+            f"border:1px solid rgba(0,0,0,0.30);"
+            f"border-radius:5px;"
+        )
+
+    def _pick_bg_color(self):
+        c = QColorDialog.getColor(self.bg_color, self, "选择按钮背景色")
+        if c.isValid():
+            self.bg_color = c
+            self._paint_color_buttons()
+
+    def _pick_text_color(self):
+        c = QColorDialog.getColor(self.text_color, self, "选择按钮文字颜色")
+        if c.isValid():
+            self.text_color = c
+            self._paint_color_buttons()
+
+    # ================= 脚本生成 =================
+
+    @staticmethod
+    def _strip_flags(script: str) -> str:
+        return re.sub(
+            r"^\s*__(keep|allow_delete_user)\s*=.*$\n?",
+            "",
+            script,
+            flags=re.M,
+        ).strip()
+
+    def _example_lines(self):
+        return [
+            "# 示例图形",
+            "O = point(0, 0)",
+            "A = point(3, 0)",
+            "B = point(0, 2)",
+            "segment(O, A)",
+            "segment(A, B)",
+            "segment(B, O)",
+            "circle(O, 1)",
+        ]
+
+    def _build_script(self) -> str:
+        lines = []
+
+        if self.keep_chk.isChecked():
+            lines.append("__keep = true")
+        else:
+            lines.append("__keep = false")
+
+        if self.allow_delete_chk.isChecked():
+            lines.append("__allow_delete_user = true")
+
+        idx = self.action_combo.currentIndex()
+
+        if idx == 0:
+            lines.extend(self._example_lines())
+
+        elif idx == 1:
+            lines.append("# 清空脚本创建的对象")
+            lines.append("delete 脚本创建")
+
+        elif idx == 2:
+            msg = self.message_edit.text().strip().replace('"', '\\"')
+            lines.append(f'print("{msg}")')
+
+        else:
+            user_script = self.script_edit.toPlainText().strip()
+            user_script = self._strip_flags(user_script)
+            if user_script:
+                lines.append(user_script)
+
+        return "\n".join(lines)
+
+    # ================= 应用结果 =================
+
+    def apply_to(self, obj):
+        obj.text = self.text_edit.text().strip() or "运行"
+        obj.color = self.bg_color.name()
+        obj.text_color = self.text_color.name()
+        obj.script = self._build_script()
 
 
 ============================================================
@@ -8010,13 +9079,14 @@ class LineTool(Tool):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\plugins\measure_tools.py
 鏂囦欢鍚?   measure_tools.py
-淇敼鏃堕棿: 08/01/2026 22:47:37
+淇敼鏃堕棿: 08/13/2026 11:52:19
 ============================================================
 
 """度量工具集：长度、距离、角度、比值、面积、周长、半径、直径、斜率、坐标。
 统一用 Measure 对象显示度量值，随几何对象实时刷新。全部注册到「度量」菜单。"""
 import math
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPainterPath
 
 from core.registry import register_geo, register_renderer, register_tool
@@ -8345,6 +9415,131 @@ register_tool(name="斜率", order=9, panel="measure", icon="slope",
               hint="点击线段/直线度量斜率")(SlopeMeasureTool)
 register_tool(name="坐标", order=10, panel="measure", icon="coord",
               hint="点击点度量其坐标")(CoordMeasureTool)
+
+# ───────── 任意区域度量（类似链式填充的交互） ─────────
+@register_geo("RegionMeasure")
+class RegionMeasure(GeoObject):
+    """任意多边形区域度量：由一系列点围成，实时计算面积和周长。"""
+    def __init__(self, points):
+        super().__init__(parents=tuple(points))
+        self.pts = list(points)
+        self.area = 0.0
+        self.perimeter = 0.0
+        self.label_pos = (0.0, 0.0)
+        self.recompute()
+
+    def recompute(self):
+        n = len(self.pts)
+        if n < 3:
+            self.exists = False
+            return
+        self.exists = True
+        
+        # 1. 计算周长
+        peri = 0.0
+        for i in range(n):
+            p1 = self.pts[i]
+            p2 = self.pts[(i + 1) % n]
+            peri += math.hypot(p2.x - p1.x, p2.y - p1.y)
+        self.perimeter = peri
+        
+        # 2. 计算面积 (鞋带公式)
+        area = 0.0
+        for i in range(n):
+            p1 = self.pts[i]
+            p2 = self.pts[(i + 1) % n]
+            area += p1.x * p2.y - p2.x * p1.y
+        self.area = abs(area) / 2.0
+        
+        # 3. 标签位置：多边形重心
+        cx = sum(p.x for p in self.pts) / n
+        cy = sum(p.y for p in self.pts) / n
+        self.label_pos = (cx, cy)
+
+    def distance_to(self, x, y):
+        return math.hypot(x - self.label_pos[0], y - self.label_pos[1])
+
+    def dump(self):
+        return {}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(parents)
+
+@register_renderer(RegionMeasure)
+def draw_region_measure(p, obj, view):
+    if not obj.exists:
+        return
+    # 绘制半透明虚线边界
+    p.setPen(theme.dashed_pen(theme.MEASURE, 1.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    path.moveTo(view.to_screen(obj.pts[0].x, obj.pts[0].y))
+    for pt in obj.pts[1:]:
+        path.lineTo(view.to_screen(pt.x, pt.y))
+    path.closeSubpath()
+    p.drawPath(path)
+    
+    # 绘制面积与周长标签
+    sp = view.to_screen(*obj.label_pos)
+    text = f"S={obj.area:.2f}, L={obj.perimeter:.2f}"
+    draw_math(p, sp.x() - 40, sp.y(), text, 13, theme.MEASURE)
+
+class RegionMeasureTool(Tool):
+    """任意区域度量工具：依次点击顶点，再次点击起点闭合。"""
+    def __init__(self):
+        self.pts = []
+
+    def activated(self, canvas):
+        self.pts = []
+
+    def deactivated(self, canvas):
+        self.pts = []
+
+    def press(self, canvas, wpt, hit):
+        pt = point_or_snap(canvas, wpt, hit)
+        if pt is None:
+            return
+        
+        # 如果点击了起点（且已有至少3个点），则闭合
+        if len(self.pts) >= 3 and pt is self.pts[0]:
+            canvas.doc.add(RegionMeasure(self.pts))
+            self.pts = []
+            canvas.update()
+            return
+            
+        # 避免连续点击同一个点
+        if not self.pts or pt is not self.pts[-1]:
+            self.pts.append(pt)
+        canvas.update()
+
+    def cancel(self, canvas):
+        self.pts = []
+        canvas.update()
+
+    def draw_overlay(self, p, view):
+        if not self.pts:
+            return
+        # 预览多边形边界
+        p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        path = QPainterPath()
+        path.moveTo(view.to_screen(self.pts[0].x, self.pts[0].y))
+        for pt in self.pts[1:]:
+            path.lineTo(view.to_screen(pt.x, pt.y))
+        path.lineTo(view.to_screen(*view.cursor_wpt))
+        p.drawPath(path)
+        
+        # 绘制已选顶点（起点高亮）
+        for i, pt in enumerate(self.pts):
+            sp = view.to_screen(pt.x, pt.y)
+            p.setPen(theme.pen(theme.PREVIEW if i == 0 else theme.ACCENT, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.drawEllipse(sp, 5, 5)
+
+# 注册到度量菜单
+register_tool(name="任意区域", order=11, panel="measure", icon="area",
+              hint="依次点击多边形的顶点，再次点击起点闭合并度量面积和周长")(RegionMeasureTool)
 
 
 ============================================================
@@ -13914,7 +15109,7 @@ class IterPoint(AbstractPoint):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\transforms\tools.py
 鏂囦欢鍚?   tools.py
-淇敼鏃堕棿: 08/05/2026 13:56:39
+淇敼鏃堕棿: 08/13/2026 11:48:58
 ============================================================
 
 """变换工具：注册到主菜单「变换」。"""
@@ -14025,7 +15220,7 @@ class TransformTool(Tool):
 # 平移
 # ============================================================
 
-@register_tool(name="平移·坐标", order=301, panel="transform", icon="select",
+@register_tool(name="平移·坐标", order=301, panel="transform", icon="translate",
                hint="按 dx/dy 表达式平移选中对象，可绑定变量")
 class TranslateExprTool(TransformTool):
     def _start(self, canvas):
@@ -14052,7 +15247,7 @@ class TranslateExprTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="平移·两点向量", order=302, panel="transform", icon="select",
+@register_tool(name="平移·两点向量", order=302, panel="transform", icon="translate",
                hint="先选对象，再点击两个点 A→B 作为平移向量")
 class TranslateVectorTool(TransformTool):
     def _start(self, canvas):
@@ -14084,7 +15279,7 @@ class TranslateVectorTool(TransformTool):
         _back_select(canvas)
 
 
-@register_tool(name="平移·标记线段", order=303, panel="transform", icon="select",
+@register_tool(name="平移·标记线段", order=303, panel="transform", icon="translate",
                hint="先选对象，再点击一条线段/直线/射线作为平移向量")
 class TranslateSegmentTool(TransformTool):
     def _start(self, canvas):
@@ -14115,7 +15310,7 @@ class TranslateSegmentTool(TransformTool):
 # 旋转
 # ============================================================
 
-@register_tool(name="旋转·角度", order=311, panel="transform", icon="select",
+@register_tool(name="旋转·角度", order=311, panel="transform", icon="rotate",
                hint="先选对象，点击旋转中心，再输入角度表达式")
 class RotateTool(TransformTool):
     def _start(self, canvas):
@@ -14150,7 +15345,7 @@ class RotateTool(TransformTool):
 # 缩放
 # ============================================================
 
-@register_tool(name="缩放·比例", order=321, panel="transform", icon="select",
+@register_tool(name="缩放·比例", order=321, panel="transform", icon="scale",
                hint="先选对象，点击缩放中心，再输入比例表达式")
 class ScaleFactorTool(TransformTool):
     def _start(self, canvas):
@@ -14181,7 +15376,7 @@ class ScaleFactorTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="缩放·线段比", order=322, panel="transform", icon="select",
+@register_tool(name="缩放·线段比", order=322, panel="transform", icon="scale",
                hint="先选对象，点击缩放中心，再点两条线段，比例 = 线段1/线段2")
 class ScaleRatioTool(TransformTool):
     def _start(self, canvas):
@@ -14239,7 +15434,7 @@ class ScaleRatioTool(TransformTool):
 # 反射 / 中心对称
 # ============================================================
 
-@register_tool(name="反射·轴对称", order=331, panel="transform", icon="select",
+@register_tool(name="反射·轴对称", order=331, panel="transform", icon="reflect",
                hint="先选对象，再点击对称轴：可直接点线段/直线，或点两个点")
 class ReflectTool(TransformTool):
     def _start(self, canvas):
@@ -14285,7 +15480,7 @@ class ReflectTool(TransformTool):
         _back_select(canvas)
 
 
-@register_tool(name="反射·中心对称", order=332, panel="transform", icon="select",
+@register_tool(name="反射·中心对称", order=332, panel="transform", icon="reflect",
                hint="先选对象，再点击对称中心")
 class CentralSymmetryTool(TransformTool):
     def _start(self, canvas):
@@ -14314,7 +15509,7 @@ class CentralSymmetryTool(TransformTool):
 # 自定义仿射变换
 # ============================================================
 
-@register_tool(name="仿射·矩阵", order=341, panel="transform", icon="select",
+@register_tool(name="仿射·矩阵", order=341, panel="transform", icon="affine",
                hint="输入 2×3 矩阵实现任意仿射变换")
 class AffineMatrixTool(TransformTool):
     def _start(self, canvas):
@@ -14357,7 +15552,7 @@ class AffineMatrixTool(TransformTool):
         _apply_driver(canvas, driver, self.targets, depth)
 
 
-@register_tool(name="仿射·三对应点", order=342, panel="transform", icon="select",
+@register_tool(name="仿射·三对应点", order=342, panel="transform", icon="affine",
                hint="依次点 3 个源点，再点 3 个目标点，求仿射变换")
 class AffinePointsTool(TransformTool):
     def _start(self, canvas):
@@ -14402,7 +15597,7 @@ class AffinePointsTool(TransformTool):
 # 圆反演
 # ============================================================
 
-@register_tool(name="反演·圆内外翻转", order=351, panel="transform", icon="select",
+@register_tool(name="反演·圆内外翻转", order=351, panel="transform", icon="invert",
                hint="先选对象，点击反演圆；或点击空白设置中心后输入半径")
 class InversionTool(TransformTool):
     def _start(self, canvas):
@@ -14459,7 +15654,7 @@ class InversionTool(TransformTool):
 # 迭代点列 / 分形数列点
 # ============================================================
 
-@register_tool(name="迭代·数列点", order=361, panel="transform", icon="select",
+@register_tool(name="迭代·数列点", order=361, panel="transform", icon="iterate",
                hint="点击起点，输入迭代公式，生成点列")
 class IterationPointTool(Tool):
     def __init__(self):
@@ -14558,7 +15753,7 @@ for _m in pkgutil.iter_modules(__path__):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\canvas.py
 鏂囦欢鍚?   canvas.py
-淇敼鏃堕棿: 08/06/2026 23:06:20
+淇敼鏃堕棿: 08/12/2026 23:47:05
 ============================================================
 
 import math
@@ -14566,7 +15761,7 @@ import os
 import random
 
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import QWidget, QToolButton
 from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
 
@@ -14579,7 +15774,7 @@ from ui import theme
 from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
-from ui.info_panel import InfoPanel
+from ui.property_panel import PropertyPanel
 
 
 BASE_SCALE = 48.0
@@ -14623,8 +15818,13 @@ class Canvas(QWidget):
         self._trash.clicked.connect(self.doc.remove_selected)
         self._trash.hide()
 
-        self.info_panel = InfoPanel(self, self)
-
+        self.info_panel = PropertyPanel(self, self)
+        # ★ 性能优化：背景缓存 + 渲染列表缓存
+        self._bg_cache = None
+        self._bg_cache_key = None
+        self._render_list = []
+        self._render_list_version = -1
+        
         # ================= 雪花彩蛋 =================
         self._snow_active = False
         self._snowflakes = []
@@ -14747,21 +15947,89 @@ class Canvas(QWidget):
             p.end()
 
         self._place_trash()
+    # ================= 性能优化：背景缓存 =================
 
+    def _draw_background_cached(self, p: QPainter) -> None:
+        """背景 + 网格 + 坐标轴缓存渲染。视图/主题不变时直接 blit。"""
+        key = (self.width(), self.height(),
+               round(self.origin.x(), 2), round(self.origin.y(), 2),
+               round(self.scale, 2), theme.active_name())
+        if self._bg_cache is not None and self._bg_cache_key == key:
+            p.drawPixmap(0, 0, self._bg_cache)
+            return
+            
+        # ★ 修复 HiDPI 缩放导致背景/坐标轴无法占满窗口的问题
+        dpr = self.devicePixelRatioF()
+        # 必须用 逻辑尺寸 × DPR 来创建物理像素大小的 QPixmap
+        self._bg_cache = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
+        self._bg_cache.setDevicePixelRatio(dpr)
+        self._bg_cache.fill(Qt.GlobalColor.transparent)
+        
+        bg_p = QPainter(self._bg_cache)
+        bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # 此时 bg_p 的逻辑坐标系完美等同于 0~self.width(), 0~self.height()
+        self._draw_background(bg_p)
+        self._draw_grid(bg_p)
+        self._draw_axes(bg_p)
+        bg_p.end()
+        
+        self._bg_cache_key = key
+        p.drawPixmap(0, 0, self._bg_cache)
+
+    # ================= 性能优化：渲染列表缓存 =================
+
+    def _get_render_list(self):
+        """返回 [(obj, renderer), ...] 缓存列表。对象增删/显隐变化时重建。"""
+        ver = self.doc._mutation_count
+        if self._render_list_version != ver:
+            self._render_list = []
+            for obj in self.doc.objects:
+                if obj.visible and obj.exists:
+                    renderer = find_renderer(obj)
+                    if renderer is not None:
+                        self._render_list.append((obj, renderer))
+            self._render_list_version = ver
+        return self._render_list
+
+    # ================= 性能优化：视口裁剪 =================
+
+    def _in_viewport(self, obj) -> bool:
+        """快速判断对象是否在视口内（粗略检测，宁多画不漏画）。"""
+        margin = 60.0  # 像素边距
+        w, h = self.width(), self.height()
+        # 点类对象：直接坐标判断
+        if hasattr(obj, 'x') and hasattr(obj, 'y') and not hasattr(obj, 'width'):
+            sx = self.origin.x() + obj.x * self.scale
+            sy = self.origin.y() - obj.y * self.scale
+            return -margin <= sx <= w + margin and -margin <= sy <= h + margin
+        # 媒体对象：矩形判断
+        if hasattr(obj, 'width') and hasattr(obj, 'height') and hasattr(obj, 'x'):
+            x0 = self.origin.x() + obj.x * self.scale
+            y0 = self.origin.y() - obj.y * self.scale
+            x1 = x0 + obj.width * self.scale
+            y1 = y0 + obj.height * self.scale
+            return not (x1 < -margin or x0 > w + margin or
+                        y1 < -margin or y0 > h + margin)
+        # 线段/圆/曲线等：第一版不裁剪，默认可见
+        return True
+    
     def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
         """渲染几何场景（背景 + 可选网格/坐标轴 + 全部对象）。
         bg_mode: "grid"=网格+坐标轴, "axes"=仅坐标轴, "none"=都不画。"""
-        self._draw_background(p)
+
+        # ★ 优化：背景/网格/坐标轴使用缓存
         if bg_mode == "grid":
-            self._draw_grid(p)
-            self._draw_axes(p)
+            self._draw_background_cached(p)
         elif bg_mode == "axes":
+            self._draw_background(p)
             self._draw_axes(p)
-        for obj in self.doc.objects:
-            if obj.visible and obj.exists:
-                renderer = find_renderer(obj)
-                if renderer is not None:
-                    renderer(p, obj, self)
+        else:
+            self._draw_background(p)
+
+        # ★ 优化：使用渲染列表缓存 + 视口裁剪
+        for obj, renderer in self._get_render_list():
+            if self._in_viewport(obj):
+                renderer(p, obj, self)
 
         # ================= 图像导出 =================
         # ================= 图像导出 =================
@@ -14952,7 +16220,7 @@ class Canvas(QWidget):
                 self.height() - zb.height() - 16)
 
         self.info_panel.reposition()
-
+        self._bg_cache = None  
         # snow 彩蛋：如果当前没有雪花，但标题仍是 snow，则重新生成
         if self._snow_active and not self._snowflakes:
             self._init_snow()
@@ -15001,30 +16269,229 @@ class Canvas(QWidget):
         self.update()
         
     def contextMenuEvent(self, ev):
-        """右键菜单：支持脚本按钮编辑、对象删除等。"""
+        """增强右键菜单：对象编辑、层级、依赖、脚本按钮、文本、媒体对象等。"""
         from PySide6.QtWidgets import QMenu
+        from PySide6.QtCore import QPointF
+        from media.base import MediaObject
         from media.script_button import ScriptButtonObject
-        
-        hit = self.pick(ev.position())
+
+        # ★ 修复 1：QContextMenuEvent 没有 position()，必须使用 pos() 并转为 QPointF
+        local_pos = QPointF(ev.pos())
+        hit = self.pick(local_pos)
+        selected = [o for o in self.doc.objects if o.selected]
+
+        if hit is not None:
+            if hit not in selected:
+                self.doc.set_selection([hit])
+                selected = [hit]
+
         menu = QMenu(self)
-        
-        # 如果右键的是脚本按钮
-        if isinstance(hit, ScriptButtonObject):
-            act_edit = menu.addAction("✎ 编辑脚本")
-            act_edit.triggered.connect(lambda: hit.edit(self))
+
+        # ---------- 命中对象的快捷操作 ----------
+        if hit is not None:
+            if isinstance(hit, ScriptButtonObject):
+                menu.addAction("▶ 运行脚本", lambda: hit.run(self))
+                menu.addAction("🧩 简单编辑脚本", lambda: self._simple_edit_script_button(hit))
+                menu.addAction("✎ 高级编辑脚本", lambda: hit.edit(self))
+                menu.addSeparator()
+
+            if type(hit).__name__ == "TextObject":
+                menu.addAction("✎ 编辑文本", lambda: self._edit_text_object(hit))
+                menu.addSeparator()
+
+            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
+                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
+                menu.addSeparator()
+
+        # ---------- 选中对象通用操作 ----------
+        if selected:
+            menu.addAction("重命名…", lambda: self._rename_objects(selected))
+
+            visible_all = all(getattr(o, "visible", True) for o in selected)
+            menu.addAction(
+                "隐藏" if visible_all else "显示",
+                lambda: self._set_visible(selected, not visible_all),
+            )
+
             menu.addSeparator()
-            
-        # 如果有选中的对象，提供删除选项
-        sel = [o for o in self.doc.objects if o.selected]
-        if sel:
-            act_del = menu.addAction("🗑 删除选中对象")
-            act_del.triggered.connect(self.doc.remove_selected)
-            
+
+            menu.addAction("复制", self.doc.copy_selection)
+            menu.addAction("剪切", self.doc.cut_selection)
+            menu.addAction("复制一份", self._duplicate_selected)
+
+            menu.addSeparator()
+
+            menu.addAction("置顶", lambda: self._reorder_objects(selected, True))
+            menu.addAction("置底", lambda: self._reorder_objects(selected, False))
+
+            menu.addSeparator()
+
+            menu.addAction("选择父对象", lambda: self._select_related(selected, "parents"))
+            menu.addAction("选择子对象", lambda: self._select_related(selected, "children"))
+
+            menu.addSeparator()
+
+            menu.addAction("删除", self.doc.remove_selected)
+
+        # ---------- 粘贴 ----------
+        if getattr(self.doc, "_clipboard", None):
+            if not menu.isEmpty():
+                menu.addSeparator()
+            menu.addAction("粘贴", lambda: self.doc.paste())
+
         if not menu.isEmpty():
-            menu.exec(ev.globalPosition().toPoint())
+            # ★ 修复 2：QContextMenuEvent 没有 globalPosition()，必须使用 globalPos()
+            menu.exec(ev.globalPos())
         else:
             super().contextMenuEvent(ev)
             
+    # ================= 右键菜单辅助 =================
+
+    def _doc_action(self, fn):
+        """在撤销组中执行一个文档动作。"""
+        self.doc.begin_action()
+        try:
+            fn()
+        finally:
+            self.doc.end_action()
+        self.doc.changed.emit()
+
+    def _rename_objects(self, objs):
+        if len(objs) != 1:
+            return
+
+        from PySide6.QtWidgets import QInputDialog
+
+        obj = objs[0]
+        old_name = getattr(obj, "name", "") or ""
+        name, ok = QInputDialog.getText(
+            self,
+            "重命名对象",
+            "对象名称：",
+            text=old_name,
+        )
+        if ok and name.strip():
+            self.doc.rename_object(obj, name.strip())
+
+    def _set_visible(self, objs, visible):
+        def doit():
+            for o in objs:
+                o.visible = bool(visible)
+
+        self._doc_action(doit)
+
+    def _duplicate_selected(self):
+        self.doc.copy_selection()
+        self.doc.paste()
+
+    def _reorder_objects(self, objs, front):
+        def doit():
+            if front:
+                for o in objs:
+                    if o in self.doc.objects:
+                        self.doc.objects.remove(o)
+                        self.doc.objects.append(o)
+            else:
+                for o in reversed(objs):
+                    if o in self.doc.objects:
+                        self.doc.objects.remove(o)
+                        self.doc.objects.insert(0, o)
+
+        self._doc_action(doit)
+
+    def _select_related(self, objs, mode):
+        related = []
+        for o in objs:
+            if mode == "parents":
+                related.extend(o.parents)
+            else:
+                related.extend(o.children)
+
+        # 去重
+        unique = []
+        seen = set()
+        for o in related:
+            if id(o) not in seen:
+                seen.add(id(o))
+                unique.append(o)
+
+        self.doc.set_selection(unique)
+
+    def _simple_edit_script_button(self, obj):
+        from media.script_button_wizard import ScriptButtonWizard
+
+        dlg = ScriptButtonWizard(self, obj, parent=self)
+        if dlg.exec():
+            def doit():
+                dlg.apply_to(obj)
+
+            self._doc_action(doit)
+
+    def _edit_text_object(self, obj):
+        from PySide6.QtWidgets import (
+            QColorDialog,
+            QDialog,
+            QDialogButtonBox,
+            QFormLayout,
+            QLineEdit,
+            QPushButton,
+            QSpinBox,
+            QVBoxLayout,
+        )
+        from PySide6.QtGui import QColor
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("编辑文本")
+        dlg.setMinimumWidth(360)
+
+        layout = QVBoxLayout(dlg)
+        form = QFormLayout()
+
+        text_edit = QLineEdit(getattr(obj, "text", ""))
+        size_spin = QSpinBox()
+        size_spin.setRange(6, 200)
+        size_spin.setValue(int(getattr(obj, "size", 16)))
+
+        color_holder = [QColor(getattr(obj, "color", "#1f2937"))]
+        color_btn = QPushButton()
+        color_btn.setFixedHeight(22)
+
+        def paint_color():
+            color_btn.setStyleSheet(
+                f"background:{color_holder[0].name()};"
+                f"border:1px solid rgba(0,0,0,0.30);"
+                f"border-radius:5px;"
+            )
+
+        def pick_color():
+            c = QColorDialog.getColor(color_holder[0], self, "选择文本颜色")
+            if c.isValid():
+                color_holder[0] = c
+                paint_color()
+
+        color_btn.clicked.connect(pick_color)
+        paint_color()
+
+        form.addRow("文本内容", text_edit)
+        form.addRow("字号", size_spin)
+        form.addRow("颜色", color_btn)
+        layout.addLayout(form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addWidget(buttons)
+
+        if dlg.exec():
+            def doit():
+                obj.text = text_edit.text()
+                obj.size = int(size_spin.value())
+                obj.color = color_holder[0].name()
+
+            self._doc_action(doit)
+                       
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
@@ -15062,6 +16529,7 @@ class Canvas(QWidget):
         self._trash.setIcon(trash_icon())
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
+        self._bg_cache = None   
         self.update()
     # ================= snow 彩蛋 =================
 
@@ -16591,7 +18059,7 @@ class FunctionEditorDock(QDockWidget):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\icons.py
 鏂囦欢鍚?   icons.py
-淇敼鏃堕棿: 08/04/2026 20:24:10
+淇敼鏃堕棿: 08/13/2026 11:46:51
 ============================================================
 
 """图标库：基于轻量第三方库 qtawesome（内置 Font Awesome / Material Design Icons）。
@@ -16644,6 +18112,13 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "insert_table": ("fa5s.table", "mdi.table"),
     "insert_pie":   ("fa5s.chart-pie", "mdi.chart-pie"),
     "insert_bar":   ("fa5s.chart-bar", "mdi.chart-bar"),
+    "translate":   ("fa5s.arrows-alt", "mdi.arrow-right-bold"),
+    "rotate":      ("fa5s.sync-alt", "mdi.rotate-right"),
+    "scale":       ("fa5s.expand-arrows-alt", "mdi.resize"),
+    "reflect":     ("fa5s.exchange-alt", "mdi.swap-horizontal"),
+    "affine":      ("mdi.grid", "fa5s.drafting-compass"),
+    "invert":      ("mdi.circle-double", "fa5s.dot-circle"),
+    "iterate":     ("mdi.repeat", "fa5s.redo"),
 }
 
 
@@ -16686,137 +18161,6 @@ def zoom_icon(kind: str) -> QIcon:
 def build_tool_icon(spec: dict) -> QIcon:
     """tool_rail 的接口：从注册表里的字符串键解析图标。"""
     return tool_icon(spec.get("icon") or "")
-
-
-============================================================
-鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\info_panel.py
-鏂囦欢鍚?   info_panel.py
-淇敼鏃堕棿: 08/04/2026 20:21:43
-============================================================
-
-"""信息面板：选中几何图形后浮动显示其属性（支持多边形等全部对象），拖动时实时刷新。"""
-import math
-from collections import Counter
-
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QLabel
-
-from ui import theme
-
-_CN = {
-    "FreePoint": "自由点", "PointOnObject": "吸附点", "IntersectPoint": "交点",
-    "DivisionPoint": "等分点", "Midpoint": "中点", "PolygonVertex": "多边形顶点",
-    "Segment": "线段", "Circle": "圆", "Line": "直线", "Ray": "射线",
-    "PerpLine": "垂线", "ParallelLine": "平行线", "AngleBisector": "角平分线",
-    "AngleDivLine": "等分角线", "RegularPolygon": "正多边形", "Ellipse": "椭圆",
-    "CubicBezier": "贝塞尔曲线", "AngleMeasure": "角", "RatioMeasure": "比例",
-    "TextObject": "文本",
-}
-
-
-def describe(obj):
-    """返回 (标题, [(属性名, 值), ...])。按类名分发，兼容所有插件对象。"""
-    n = type(obj).__name__
-    title = _CN.get(n, n)
-    rows = []
-
-    if hasattr(obj, "x") and hasattr(obj, "y"):          # 点类
-        rows.append(("坐标", f"({obj.x:.2f}, {obj.y:.2f})"))
-
-    if n == "Segment":
-        rows.append(("长度", f"{obj.length():.3f}"))
-    elif n == "Circle":
-        rows.append(("半径", f"{obj.r:.3f}"))
-        rows.append(("圆心", f"({obj.center.x:.2f}, {obj.center.y:.2f})"))
-        rows.append(("周长", f"{2 * math.pi * obj.r:.3f}"))
-        rows.append(("面积", f"{math.pi * obj.r ** 2:.3f}"))
-    elif n == "RegularPolygon":
-        title = f"正{obj.n}边形"
-        rows.append(("边数", f"{obj.n}"))
-        if len(obj.verts) >= 2:
-            side = math.hypot(obj.verts[0][0] - obj.verts[1][0],
-                              obj.verts[0][1] - obj.verts[1][1])
-            rows.append(("边长", f"{side:.3f}"))
-            rows.append(("周长", f"{obj.n * side:.3f}"))
-        if obj.r > 0:
-            rows.append(("面积", f"{0.5 * obj.n * obj.r ** 2 * math.sin(2 * math.pi / obj.n):.3f}"))
-        rows.append(("中心", f"({obj.center.x:.2f}, {obj.center.y:.2f})"))
-    elif n == "Ellipse":
-        a = math.hypot(obj.ux, obj.uy)
-        b = math.hypot(obj.vx, obj.vy)
-        rows.append(("半轴 a", f"{a:.3f}"))
-        rows.append(("半轴 b", f"{b:.3f}"))
-        rows.append(("面积", f"{math.pi * abs(obj.ux * obj.vy - obj.uy * obj.vx):.3f}"))
-    elif n == "AngleMeasure":
-        rows.append(("角度", f"{obj.degrees:.2f}°"))
-    elif n == "RatioMeasure":
-        rows.append(("长度₁", f"{obj.l1:.3f}"))
-        rows.append(("长度₂", f"{obj.l2:.3f}"))
-        if obj.den:
-            rows.append(("比值", f"{obj.num / obj.den:.3f}"))
-        else:
-            rows.append(("比值", "∞"))
-    elif n == "Ray":
-        rows.append(("端点", f"({obj.origin.x:.2f}, {obj.origin.y:.2f})"))
-    elif n == "TextObject":
-        rows.append(("内容", obj.text))
-    elif n == "CubicBezier":
-        rows.append(("控制点", "4 个"))
-    elif n == "PointOnObject":
-        rows.append(("参数 t", f"{obj.t:.3f}"))
-    elif n == "DivisionPoint":
-        rows.append(("比例 t", f"{obj.t:.3f}"))
-    elif hasattr(obj, "dx") and hasattr(obj, "dy"):      # 方向直线类
-        rows.append(("方向", f"({obj.dx:.2f}, {obj.dy:.2f})"))
-    return title, rows
-
-
-class InfoPanel(QWidget):
-    def __init__(self, canvas, parent=None):
-        super().__init__(parent)
-        self.setObjectName("infoPanel")
-        self.canvas = canvas
-        self.setFixedWidth(215)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 10, 12, 10)
-        layout.setSpacing(5)
-        self._title = QLabel(self)
-        self._body = QLabel(self)
-        self._body.setWordWrap(True)
-        layout.addWidget(self._title)
-        layout.addWidget(self._body)
-
-        self._apply_style()
-        canvas.doc.changed.connect(self.refresh)
-        theme.bus.changed.connect(lambda _: (self._apply_style(), self.refresh()))
-        self.hide()
-
-    def _apply_style(self):
-        self._title.setStyleSheet(
-            f"color:{theme.INK.name()};font-weight:700;font-size:13px;")
-        self._body.setStyleSheet(f"color:{theme.SUBINK.name()};font-size:11px;")
-        self._body.setFont(theme.LABEL_FONT)
-
-    def refresh(self):
-        sel = [o for o in self.canvas.doc.objects if o.selected]
-        if not sel:
-            self.hide()
-            return
-        if len(sel) == 1:
-            title, rows = describe(sel[0])
-            self._title.setText(title)
-            self._body.setText("\n".join(f"{k}  {v}" for k, v in rows))
-        else:
-            cnt = Counter(_CN.get(type(o).__name__, type(o).__name__) for o in sel)
-            self._title.setText(f"已选 {len(sel)} 个对象")
-            self._body.setText("\n".join(f"{k} × {v}" for k, v in cnt.items()))
-        self.adjustSize()
-        self.reposition()
-        self.show()
-        self.raise_()
-
-    def reposition(self):
-        self.move(self.canvas.width() - self.width() - 16, 14)
 
 
 ============================================================
@@ -16954,7 +18298,7 @@ class MacroDialog(QDialog):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\main_window.py
 鏂囦欢鍚?   main_window.py
-淇敼鏃堕棿: 08/07/2026 13:48:03
+淇敼鏃堕棿: 08/13/2026 11:50:34
 ============================================================
 
 import datetime
@@ -17006,7 +18350,7 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
         self._build_var_menu()
-        self._build_macro_menu()
+        self._build_advanced_menu()  # ★ 宏与脚本库移入高级菜单
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
@@ -17123,7 +18467,8 @@ class MainWindow(QMainWindow):
 
     def _build_menubar(self) -> None:
         mb = self.menuBar()
-
+        
+        # ================= 1. 文件 =================
         fm = mb.addMenu("文件(&F)")
         for text, slot, key in (
             ("新建(&N)", self.doc.clear, QKeySequence.StandardKey.New),
@@ -17134,80 +18479,43 @@ class MainWindow(QMainWindow):
             act.setShortcut(key)
             act.triggered.connect(slot)
             fm.addAction(act)
+            
         info_act = QAction("文档信息(&I)…", self)
         info_act.triggered.connect(self._doc_info)
         fm.addAction(info_act)
+        
+        fm.addSeparator()
         export_act = QAction("导出图像(&E)…", self)
         export_act.setShortcut(QKeySequence("Ctrl+E"))
         export_act.triggered.connect(self._export_image)
         fm.addAction(export_act)
-        fm.addSeparator()
+        
         export_cw = QAction("导出到课件(&C)…", self)
         export_cw.triggered.connect(self._export_courseware)
-        fm.addAction(export_cw)        
+        fm.addAction(export_cw)
+        
+        fm.addSeparator()
         quit_act = QAction("退出(&X)", self)
         quit_act.setShortcut(QKeySequence.StandardKey.Quit)
         quit_act.triggered.connect(self.close)
         fm.addAction(quit_act)
 
-        # 工具菜单：插件工具
-        tm = mb.addMenu("工具(&T)")
-        plugin_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "menu"]
-        for spec in plugin_specs:
-            tm.addAction(self._actions[spec["cls"]])
-        if not plugin_specs:
-            e = tm.addAction("（暂无插件工具）"); e.setEnabled(False)
-        # ================= 变换菜单 =================
-        gm = mb.addMenu("变换(&G)")
-
-        transform_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "transform"],
-            key=lambda s: s.get("order", 99)
-        )
-
-        for spec in transform_specs:
-            gm.addAction(self._actions[spec["cls"]])
-
-        if not transform_specs:
-            e = gm.addAction("（暂无变换工具）")
-            e.setEnabled(False)
-        # 插入菜单：媒体对象
-        im = mb.addMenu("插入(&I)")
-        insert_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "insert"],
-            key=lambda s: s.get("order", 99))
-        for spec in insert_specs:
-            im.addAction(self._actions[spec["cls"]])
-        if not insert_specs:
-            e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
-        # 度量菜单：panel="measure" 的工具
-        mm = mb.addMenu("度量(&L)")
-        measure_specs = sorted(
-            [s for s in TOOL_REGISTRY if s.get("panel") == "measure"],
-            key=lambda s: s.get("order", 99))
-        for spec in measure_specs:
-            mm.addAction(self._actions[spec["cls"]])
-        if not measure_specs:
-            e = mm.addAction("（暂无度量工具）"); e.setEnabled(False)
-                # 视图菜单：撤销 / 重做
-        vm = mb.addMenu("视图(&W)")
+        # ================= 2. 编辑 (从原视图菜单独立) =================
+        em = mb.addMenu("编辑(&E)")
         self._undo_act = QAction("撤销(&U)", self)
-        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)      # Ctrl+Z
+        self._undo_act.setShortcut(QKeySequence.StandardKey.Undo)
         self._undo_act.triggered.connect(self.doc.undo)
-        vm.addAction(self._undo_act)
+        em.addAction(self._undo_act)
+        
         self._redo_act = QAction("重做(&R)", self)
-        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)      # Ctrl+Shift+Z
+        self._redo_act.setShortcut(QKeySequence.StandardKey.Redo)
         self._redo_act.triggered.connect(self.doc.redo)
-        vm.addAction(self._redo_act)
+        em.addAction(self._redo_act)
+        
         self.doc.history_changed.connect(self._update_history_actions)
         self._update_history_actions()
-        self._func_editor_act = QAction("函数编辑器", self, checkable=True)
-        self._func_editor_act.setChecked(True)
-        self._func_editor_act.toggled.connect(self.function_dock.setVisible)
-        self.function_dock.visibilityChanged.connect(self._func_editor_act.setChecked)
-        # 加到「视图」菜单
-        vm.addAction(self._func_editor_act)
-        vm.addSeparator()
+        
+        em.addSeparator()
         for text, key, slot in (
             ("剪切(&T)", QKeySequence.StandardKey.Cut, lambda: self.doc.cut_selection()),
             ("复制(&C)", QKeySequence.StandardKey.Copy, lambda: self.doc.copy_selection()),
@@ -17216,15 +18524,26 @@ class MainWindow(QMainWindow):
             a = QAction(text, self)
             a.setShortcut(key)
             a.triggered.connect(slot)
-            vm.addAction(a)
-        # ================= 脚本库菜单 =================
-        sm = mb.addMenu("脚本库(&L)")
-        mgr_act = QAction("管理脚本库...", self)
-        mgr_act.triggered.connect(self._open_script_library_manager)
-        sm.addAction(mgr_act)
+            em.addAction(a)
+            
+        em.addSeparator()
+        del_act = QAction("删除选中(&D)", self)
+        del_act.setShortcut(QKeySequence.StandardKey.Delete)
+        del_act.triggered.connect(self.doc.remove_selected)
+        em.addAction(del_act)
+
+        # ================= 3. 视图 =================
+        vm = mb.addMenu("视图(&V)")
+        self._func_editor_act = QAction("函数编辑器", self, checkable=True)
+        self._func_editor_act.setChecked(True)
+        self._func_editor_act.toggled.connect(self.function_dock.setVisible)
+        self.function_dock.visibilityChanged.connect(self._func_editor_act.setChecked)
+        vm.addAction(self._func_editor_act)
         
-        # 主题菜单：互斥单选
-        thm = mb.addMenu("主题(&M)")
+        vm.addSeparator()
+        
+        # 主题菜单移入视图
+        thm = vm.addMenu("主题(&M)")
         tgroup = QActionGroup(self)
         tgroup.setExclusive(True)
         for name in theme.theme_names():
@@ -17234,10 +18553,41 @@ class MainWindow(QMainWindow):
             tgroup.addAction(act)
             thm.addAction(act)
         thm.addSeparator()
-        thm.addSeparator()
         custom_act = QAction("自定义主题…", self)
         custom_act.triggered.connect(self._open_theme_editor)
         thm.addAction(custom_act)
+
+        # ================= 4. 构造 (原"工具"菜单，预留未来扩展) =================
+        cm = mb.addMenu("构造(&C)")
+        plugin_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "menu"]
+        for spec in sorted(plugin_specs, key=lambda s: s.get("order", 99)):
+            cm.addAction(self._actions[spec["cls"]])
+        if not plugin_specs:
+            e = cm.addAction("（暂无构造工具）"); e.setEnabled(False)
+
+        # ================= 5. 度量 =================
+        mm = mb.addMenu("度量(&M)")
+        measure_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "measure"]
+        for spec in sorted(measure_specs, key=lambda s: s.get("order", 99)):
+            mm.addAction(self._actions[spec["cls"]])
+        if not measure_specs:
+            e = mm.addAction("（暂无度量工具）"); e.setEnabled(False)
+
+        # ================= 6. 变换 =================
+        gm = mb.addMenu("变换(&T)")
+        transform_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "transform"]
+        for spec in sorted(transform_specs, key=lambda s: s.get("order", 99)):
+            gm.addAction(self._actions[spec["cls"]])
+        if not transform_specs:
+            e = gm.addAction("（暂无变换工具）"); e.setEnabled(False)
+
+        # ================= 7. 插入 =================
+        im = mb.addMenu("插入(&I)")
+        insert_specs = [s for s in TOOL_REGISTRY if s.get("panel") == "insert"]
+        for spec in sorted(insert_specs, key=lambda s: s.get("order", 99)):
+            im.addAction(self._actions[spec["cls"]])
+        if not insert_specs:
+            e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
         
     def _open_script_library_manager(self):
         from ui.script_library_manager import ScriptLibraryManager
@@ -17314,26 +18664,34 @@ class MainWindow(QMainWindow):
                 
     # ================= 宏系统 =================
 
-    def _build_macro_menu(self) -> None:
+    def _build_advanced_menu(self) -> None:
+        """高级功能菜单：脚本库与宏系统。"""
         mb = self.menuBar()
-        mm = mb.addMenu("宏(&M)")
-
-        self._record_act = QAction("● 开始录制", self, checkable=True)
+        am = mb.addMenu("高级(&A)")
+        
+        # 1. 脚本库
+        mgr_act = QAction("管理脚本库...", self)
+        mgr_act.triggered.connect(self._open_script_library_manager)
+        am.addAction(mgr_act)
+        
+        am.addSeparator()
+        
+        # 2. 宏系统
+        self._record_act = QAction("● 开始录制宏", self, checkable=True)
         self._record_act.setShortcut(QKeySequence("Ctrl+Shift+R"))
         self._record_act.triggered.connect(self._toggle_macro_recording)
-        mm.addAction(self._record_act)
-
+        am.addAction(self._record_act)
+        
         self._play_last_act = QAction("回放最新宏", self)
         self._play_last_act.setShortcut(QKeySequence("Ctrl+Shift+P"))
         self._play_last_act.triggered.connect(self._play_last_macro)
-        mm.addAction(self._play_last_act)
-
-        mm.addSeparator()
-
-        mgr_act = QAction("宏管理器…", self)
-        mgr_act.triggered.connect(self._open_macro_dialog)
-        mm.addAction(mgr_act)
-
+        am.addAction(self._play_last_act)
+        
+        am.addSeparator()
+        macro_mgr_act = QAction("宏管理器…", self)
+        macro_mgr_act.triggered.connect(self._open_macro_dialog)
+        am.addAction(macro_mgr_act)
+        
         self._update_macro_actions()
 
     def _toggle_macro_recording(self):
@@ -17407,9 +18765,724 @@ class MainWindow(QMainWindow):
 
 
 ============================================================
+鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\property_panel.py
+鏂囦欢鍚?   property_panel.py
+淇敼鏃堕棿: 08/13/2026 14:43:07
+============================================================
+
+"""统一对象属性面板 (v3 - 折叠功能 + Pylance 零报错)。"""
+from __future__ import annotations
+
+from typing import Any, Callable
+
+from PySide6.QtCore import QTimer, Qt
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QColorDialog,
+    QComboBox,
+    QDoubleSpinBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QScrollArea,
+    QVBoxLayout,
+    QWidget,
+)
+
+from geo.points import AbstractPoint, FreePoint, PointOnObject
+from media.base import MediaObject
+from ui import theme
+
+
+class PropertyPanel(QWidget):
+    """统一对象属性面板，支持折叠/展开。"""
+
+    def __init__(self, canvas: Any, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.canvas = canvas
+        self.setObjectName("propertyPanel")
+        self._collapsed: bool = False
+        self._expanded_width: int = 300
+        self._collapsed_width: int = 36
+
+        # ══════════════════════════════════════════
+        # 主布局：只放两个容器，切换显示
+        # ══════════════════════════════════════════
+        self._outer = QVBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._outer.setSpacing(0)
+
+        # ──────────────────────────────────────────
+        # 容器 A：展开状态（完整面板）
+        # ──────────────────────────────────────────
+        self._expanded_widget = QWidget()
+        self._expanded_layout = QVBoxLayout(self._expanded_widget)
+        self._expanded_layout.setContentsMargins(12, 10, 12, 10)
+        self._expanded_layout.setSpacing(6)
+
+        # 标题行 + 折叠按钮
+        head = QHBoxLayout()
+        self.title = QLabel("属性")
+        self.title.setObjectName("panelTitle")
+        head.addWidget(self.title)
+        head.addStretch(1)
+
+        # ★ 折叠按钮：透明背景 + 灰色边框，明显区别于面板内其他按钮
+        self._collapse_btn = QPushButton("»")
+        self._collapse_btn.setFixedSize(22, 22)
+        self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._collapse_btn.setToolTip("折叠属性面板")
+        self._collapse_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            "  border: 1px solid rgba(120,140,170,0.5);"
+            "  border-radius: 4px;"
+            "  color: #777;"
+            "  font-size: 13px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(120,140,170,0.15);"
+            "  border-color: rgba(120,140,170,0.8);"
+            "}"
+        )
+        self._collapse_btn.clicked.connect(self._toggle_collapse)
+        head.addWidget(self._collapse_btn)
+        self._expanded_layout.addLayout(head)
+
+        # 类型标签
+        self.type_label = QLabel("")
+        self.type_label.setObjectName("panelSubtitle")
+        self.type_label.setWordWrap(True)
+        self._expanded_layout.addWidget(self.type_label)
+
+        # 滚动区域
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self._scroll_area.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+
+        self._content = QWidget()
+        self.form = QVBoxLayout(self._content)
+        self.form.setContentsMargins(0, 0, 0, 0)
+        self.form.setSpacing(10)
+
+        self._scroll_area.setWidget(self._content)
+        self._expanded_layout.addWidget(self._scroll_area, 1)
+
+        # ──────────────────────────────────────────
+        # 容器 B：折叠状态（窄条）
+        # ──────────────────────────────────────────
+        self._collapsed_widget = QWidget()
+        self._collapsed_layout = QVBoxLayout(self._collapsed_widget)
+        self._collapsed_layout.setContentsMargins(4, 10, 4, 10)
+        self._collapsed_layout.setSpacing(8)
+
+        # ★ 展开按钮：同样透明背景 + 灰色边框
+        self._expand_btn = QPushButton("«")
+        self._expand_btn.setFixedSize(24, 24)
+        self._expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._expand_btn.setToolTip("展开属性面板")
+        self._expand_btn.setStyleSheet(
+            "QPushButton {"
+            "  background: transparent;"
+            "  border: 1px solid rgba(120,140,170,0.5);"
+            "  border-radius: 4px;"
+            "  color: #777;"
+            "  font-size: 14px;"
+            "  font-weight: bold;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(120,140,170,0.15);"
+            "  border-color: rgba(120,140,170,0.8);"
+            "}"
+        )
+        self._expand_btn.clicked.connect(self._toggle_collapse)
+        self._collapsed_layout.addWidget(
+            self._expand_btn, 0, Qt.AlignmentFlag.AlignHCenter
+        )
+
+        # 竖排文字提示
+        self._collapsed_label = QLabel("属\n性")
+        self._collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._collapsed_label.setStyleSheet(
+            "font-size: 11px; color: #999; letter-spacing: 2px;"
+        )
+        self._collapsed_layout.addWidget(self._collapsed_label)
+        self._collapsed_layout.addStretch(1)
+
+        # ──────────────────────────────────────────
+        # 组装
+        # ──────────────────────────────────────────
+        self._outer.addWidget(self._expanded_widget)
+        self._outer.addWidget(self._collapsed_widget)
+        self._collapsed_widget.hide()
+
+        # 初始状态：展开
+        self.setFixedWidth(self._expanded_width)
+
+        # 信号连接
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.setInterval(80)
+        self._timer.timeout.connect(self._do_refresh)
+        self.canvas.doc.changed.connect(self._schedule_refresh)
+        theme.bus.changed.connect(self._on_theme_changed)
+
+        self.hide()
+
+    # ══════════════════════════════════════════
+    # 刷新调度
+    # ══════════════════════════════════════════
+
+    def _schedule_refresh(self) -> None:
+        if not self._collapsed:
+            self._timer.start()
+
+    def _on_theme_changed(self, *_: Any) -> None:
+        self.style().unpolish(self)
+        self.style().polish(self)
+        self.update()
+
+    def refresh(self) -> None:
+        self._timer.start()
+
+    # ══════════════════════════════════════════
+    # 折叠 / 展开
+    # ══════════════════════════════════════════
+
+    def _toggle_collapse(self) -> None:
+        self._collapsed = not self._collapsed
+        if self._collapsed:
+            self._expanded_widget.hide()
+            self._collapsed_widget.show()
+            self.setFixedWidth(self._collapsed_width)
+            self.setFixedHeight(90)
+        else:
+            self._collapsed_widget.hide()
+            self._expanded_widget.show()
+            self.setFixedWidth(self._expanded_width)
+            self.setMaximumHeight(max(240, self.canvas.height() - 110))
+            self.setMinimumHeight(0)
+        self.reposition()
+        self.raise_()
+
+    def reposition(self) -> None:
+        x = max(10, self.canvas.width() - self.width() - 16)
+        y = 14
+        self.move(x, y)
+        if not self._collapsed:
+            self.setMaximumHeight(max(240, self.canvas.height() - 110))
+
+    # ══════════════════════════════════════════
+    # 表单构建工具
+    # ══════════════════════════════════════════
+
+    def _clear_form(self) -> None:
+        """安全清理表单。"""
+        while self.form.count():
+            item = self.form.takeAt(0)
+            if item is None:
+                continue
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+                continue
+            sub_layout = item.layout()
+            if sub_layout is not None:
+                while sub_layout.count():
+                    sub_item = sub_layout.takeAt(0)
+                    if sub_item is not None:
+                        sub_w = sub_item.widget()
+                        if sub_w is not None:
+                            sub_w.deleteLater()
+
+    def _add_section(self, title_text: str) -> None:
+        lbl = QLabel(title_text)
+        lbl.setStyleSheet(
+            f"color: {theme.ACCENT.name()}; font-weight: bold; "
+            f"font-size: 12px; margin-top: 6px;"
+        )
+        self.form.addWidget(lbl)
+
+    def _add_row(self, label_text: str, widget: QWidget) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        label = QLabel(label_text)
+        label.setFixedWidth(76)
+        label.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        label.setStyleSheet(f"color: {theme.SUBINK.name()}; font-size: 12px;")
+        row.addWidget(label)
+        row.addWidget(widget, 1)
+        self.form.addLayout(row)
+
+    def _add_buttons(self, buttons: list[tuple[str, Callable[[], Any]]]) -> None:
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        for text, slot in buttons:
+            btn = QPushButton(text)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(slot)
+            row.addWidget(btn)
+        row.addStretch(1)
+        self.form.addLayout(row)
+
+    def _make_line(self, text: Any, on_commit: Callable[[str], Any]) -> QLineEdit:
+        edit = QLineEdit(str(text))
+        edit.editingFinished.connect(lambda: on_commit(edit.text().strip()))
+        return edit
+
+    def _make_spin(
+        self,
+        value: Any,
+        vmin: float,
+        vmax: float,
+        decimals: int,
+        on_commit: Callable[[float], Any],
+    ) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setRange(vmin, vmax)
+        spin.setDecimals(decimals)
+        spin.setValue(float(value))
+        spin.setKeyboardTracking(False)
+        spin.editingFinished.connect(lambda: on_commit(spin.value()))
+        return spin
+
+    def _make_check(
+        self, checked: Any, on_toggle: Callable[[bool], Any]
+    ) -> QCheckBox:
+        check = QCheckBox()
+        check.setChecked(bool(checked))
+        check.toggled.connect(on_toggle)
+        return check
+
+    def _make_combo(
+        self,
+        items: list[str],
+        current: Any,
+        on_change: Callable[[str], Any],
+    ) -> QComboBox:
+        combo = QComboBox()
+        combo.addItems(items)
+        if str(current) in items:
+            combo.setCurrentText(str(current))
+        combo.currentTextChanged.connect(on_change)
+        return combo
+
+    def _make_color_button(
+        self, color: QColor, on_commit: Callable[[QColor], Any]
+    ) -> QPushButton:
+        btn = QPushButton()
+        btn.setFixedHeight(24)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        local_color = QColor(color)
+
+        def paint() -> None:
+            btn.setStyleSheet(
+                f"background:{local_color.name()};"
+                f"border:1px solid {theme.PANEL_BORDER.name()};"
+                f"border-radius:4px;"
+            )
+
+        def pick() -> None:
+            nonlocal local_color
+            c = QColorDialog.getColor(local_color, self, "选择颜色")
+            if c.isValid():
+                local_color = c
+                paint()
+                on_commit(c)
+
+        btn.clicked.connect(pick)
+        paint()
+        return btn
+
+    def _doc_action(self, fn: Callable[[], Any]) -> None:
+        doc = self.canvas.doc
+        doc.begin_action()
+        try:
+            fn()
+        finally:
+            doc.end_action()
+        doc.changed.emit()
+
+    # ══════════════════════════════════════════
+    # 刷新内容
+    # ══════════════════════════════════════════
+
+    def _do_refresh(self) -> None:
+        if self._collapsed:
+            return
+
+        doc = self.canvas.doc
+        selected = [o for o in doc.objects if o.selected and o in doc.objects]
+
+        if not selected:
+            self.hide()
+            return
+
+        self._clear_form()
+
+        if len(selected) == 1:
+            obj = selected[0]
+            self.title.setText(
+                getattr(obj, "name", "") or self._get_type_label(obj)
+            )
+            self.type_label.setText(self._get_type_label(obj))
+            self._build_single(obj)
+        else:
+            self.title.setText(f"已选 {len(selected)} 个对象")
+            self.type_label.setText("批量操作")
+            self._build_multi(selected)
+
+        self.form.addStretch(1)
+        self.reposition()
+        if not self._collapsed:
+            self.show()
+        self.raise_()
+
+    def _get_type_label(self, obj: Any) -> str:
+        name = type(obj).__name__
+        cn: dict[str, str] = {
+            "FreePoint": "自由点",
+            "PointOnObject": "吸附点",
+            "IntersectPoint": "交点",
+            "DivisionPoint": "等分点",
+            "Segment": "线段",
+            "Circle": "圆",
+            "ExprCircle": "表达式圆",
+            "ExprSegment": "表达式线段",
+            "ExprAngle": "表达式角度",
+            "ExprPoint": "表达式点",
+            "Line": "直线",
+            "Ray": "射线",
+            "RegularPolygon": "正多边形",
+            "Ellipse": "椭圆",
+            "CubicBezier": "贝塞尔曲线",
+            "FunctionCurve": "函数曲线",
+            "ChainFill": "链式填充",
+            "TextObject": "文本",
+            "ScriptButtonObject": "脚本按钮",
+            "TableObject": "表格",
+            "PieChartObject": "饼图",
+            "BarChartObject": "柱状图",
+            "ImageObject": "图片",
+            "InkStroke": "墨迹",
+            "Measure": "度量",
+            "AngleMeasure": "角度",
+            "RatioMeasure": "比例",
+            "TransformPoint": "变换点",
+            "IterPoint": "迭代点",
+        }
+        return cn.get(name, name)
+
+    # ══════════════════════════════════════════
+    # 多选批量操作
+    # ══════════════════════════════════════════
+
+    def _build_multi(self, objs: list[Any]) -> None:
+        self._add_section("批量操作")
+        visible_all = all(getattr(o, "visible", True) for o in objs)
+        self._add_buttons([
+            (
+                "隐藏" if visible_all else "显示",
+                lambda: self._set_visible(objs, not visible_all),
+            ),
+            ("删除", self.canvas.doc.remove_selected),
+            ("置顶", lambda: self._reorder(objs, True)),
+            ("置底", lambda: self._reorder(objs, False)),
+        ])
+
+    # ══════════════════════════════════════════
+    # 单选属性编辑
+    # ══════════════════════════════════════════
+
+    def _build_single(self, obj: Any) -> None:
+        doc = self.canvas.doc
+        tn = type(obj).__name__
+
+        self._add_section("基础")
+        self._add_row(
+            "名称",
+            self._make_line(
+                getattr(obj, "name", ""),
+                lambda t: doc.rename_object(obj, t),
+            ),
+        )
+        self._add_row(
+            "可见",
+            self._make_check(
+                getattr(obj, "visible", True),
+                lambda v: self._set_visible([obj], v),
+            ),
+        )
+        self._add_buttons([
+            ("删除", lambda: doc.remove(obj)),
+            ("置顶", lambda: self._reorder([obj], True)),
+            ("置底", lambda: self._reorder([obj], False)),
+        ])
+
+        if isinstance(obj, FreePoint):
+            self._add_section("坐标")
+            self._add_row(
+                "X",
+                self._make_spin(
+                    obj.x, -1e6, 1e6, 3,
+                    lambda v: self._set_point_coord(obj, "x", v),
+                ),
+            )
+            self._add_row(
+                "Y",
+                self._make_spin(
+                    obj.y, -1e6, 1e6, 3,
+                    lambda v: self._set_point_coord(obj, "y", v),
+                ),
+            )
+
+        elif isinstance(obj, PointOnObject):
+            self._add_section("参数")
+            self._add_row(
+                "t",
+                self._make_spin(
+                    obj.t, 0.0, 1.0, 4,
+                    lambda v: self._set_attr_and_recompute(obj, "t", v),
+                ),
+            )
+
+        elif isinstance(obj, MediaObject):
+            self._add_section("布局")
+            self._add_row(
+                "X",
+                self._make_spin(
+                    obj.x, -1e6, 1e6, 3,
+                    lambda v: self._set_attr_and_changed(obj, "x", v),
+                ),
+            )
+            self._add_row(
+                "Y",
+                self._make_spin(
+                    obj.y, -1e6, 1e6, 3,
+                    lambda v: self._set_attr_and_changed(obj, "y", v),
+                ),
+            )
+            self._add_row(
+                "宽度",
+                self._make_spin(
+                    obj.width, 0.1, 1000.0, 3,
+                    lambda v: self._set_attr_and_changed(obj, "width", v),
+                ),
+            )
+            self._add_row(
+                "高度",
+                self._make_spin(
+                    obj.height, 0.1, 1000.0, 3,
+                    lambda v: self._set_attr_and_changed(obj, "height", v),
+                ),
+            )
+            if hasattr(obj, "rotation"):
+                self._add_row(
+                    "旋转",
+                    self._make_spin(
+                        getattr(obj, "rotation", 0.0),
+                        0.0, 360.0, 1,
+                        lambda v: self._set_attr_and_changed(obj, "rotation", v),
+                    ),
+                )
+
+        # ★ 全部使用 getattr 绕过 Pylance 对特定子类属性的误报
+        if tn == "ScriptButtonObject":
+            self._add_section("按钮样式")
+            self._add_row(
+                "文字",
+                self._make_line(
+                    getattr(obj, "text", ""),
+                    lambda t: self._set_attr_and_changed(obj, "text", t),
+                ),
+            )
+            self._add_row(
+                "背景",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1971c2")),
+                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                ),
+            )
+            self._add_row(
+                "字色",
+                self._make_color_button(
+                    QColor(getattr(obj, "text_color", "#ffffff")),
+                    lambda c: self._set_attr_and_changed(
+                        obj, "text_color", c.name()
+                    ),
+                ),
+            )
+            run_fn = getattr(obj, "run", None)
+            edit_fn = getattr(obj, "edit", None)
+            btns: list[tuple[str, Callable[[], Any]]] = []
+            if callable(run_fn):
+                btns.append(("▶ 运行", lambda: run_fn(self.canvas)))
+            if callable(edit_fn):
+                btns.append(("✎ 编辑", lambda: edit_fn(self.canvas)))
+            if btns:
+                self._add_buttons(btns)
+
+        elif tn == "TextObject":
+            self._add_section("文本样式")
+            self._add_row(
+                "内容",
+                self._make_line(
+                    getattr(obj, "text", ""),
+                    lambda t: self._set_attr_and_changed(obj, "text", t),
+                ),
+            )
+            self._add_row(
+                "颜色",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1f2937")),
+                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                ),
+            )
+            self._add_row(
+                "字号",
+                self._make_spin(
+                    getattr(obj, "size", 16),
+                    6, 200, 0,
+                    lambda v: self._set_attr_and_changed(obj, "size", int(v)),
+                ),
+            )
+
+        elif tn == "FunctionCurve":
+            self._add_section("函数")
+            self._add_row(
+                "表达式",
+                self._make_line(
+                    getattr(obj, "expr", ""),
+                    lambda t: self._set_function_curve_expr(obj, "expr", t),
+                ),
+            )
+            if getattr(obj, "kind", "") == "parametric":
+                self._add_row(
+                    "Y 表达式",
+                    self._make_line(
+                        getattr(obj, "expr2", ""),
+                        lambda t: self._set_function_curve_expr(obj, "expr2", t),
+                    ),
+                )
+            self._add_row(
+                "颜色",
+                self._make_color_button(
+                    QColor(getattr(obj, "color", "#1971c2")),
+                    lambda c: self._set_function_curve_color(obj, c),
+                ),
+            )
+
+        elif tn in ("ExprSegment", "ExprAngle", "ExprCircle"):
+            self._add_section("约束")
+            self._add_row(
+                "表达式",
+                self._make_line(
+                    getattr(obj, "expr", ""),
+                    lambda t: self._set_expr(obj, t),
+                ),
+            )
+
+        self._add_section("依赖")
+        parents = getattr(obj, "parents", [])
+        children = getattr(obj, "children", [])
+        self._add_row(
+            "关系", QLabel(f"{len(parents)} 父 / {len(children)} 子")
+        )
+        self._add_buttons([
+            ("选父", lambda: self._select_related(obj, "parents")),
+            ("选子", lambda: self._select_related(obj, "children")),
+        ])
+
+    # ══════════════════════════════════════════
+    # 提交逻辑
+    # ══════════════════════════════════════════
+
+    def _set_visible(self, objs: list[Any], visible: bool) -> None:
+        self._doc_action(
+            lambda: [setattr(o, "visible", bool(visible)) for o in objs]
+        )
+
+    def _reorder(self, objs: list[Any], front: bool) -> None:
+        def doit() -> None:
+            doc_objects = self.canvas.doc.objects
+            if front:
+                for o in objs:
+                    if o in doc_objects:
+                        doc_objects.remove(o)
+                        doc_objects.append(o)
+            else:
+                for o in reversed(objs):
+                    if o in doc_objects:
+                        doc_objects.remove(o)
+                        doc_objects.insert(0, o)
+
+        self._doc_action(doit)
+
+    def _select_related(self, obj: Any, mode: str) -> None:
+        related = list(obj.parents) if mode == "parents" else list(obj.children)
+        self.canvas.doc.set_selection(related)
+
+    def _set_point_coord(self, obj: Any, axis: str, value: float) -> None:
+        def doit() -> None:
+            setattr(obj, axis, float(value))
+            self.canvas.doc.recompute_from(obj)
+
+        self._doc_action(doit)
+
+    def _set_attr_and_recompute(
+        self, obj: Any, name: str, value: Any
+    ) -> None:
+        def doit() -> None:
+            setattr(obj, name, value)
+            self.canvas.doc.recompute_from(obj)
+
+        self._doc_action(doit)
+
+    def _set_attr_and_changed(
+        self, obj: Any, name: str, value: Any
+    ) -> None:
+        self._doc_action(lambda: setattr(obj, name, value))
+
+    def _set_expr(self, obj: Any, text: str) -> None:
+        def doit() -> None:
+            setattr(obj, "expr", text)
+            self.canvas.doc.refresh_variables()
+
+        self._doc_action(doit)
+
+    def _set_function_curve_expr(
+        self, obj: Any, field: str, text: str
+    ) -> None:
+        def doit() -> None:
+            setattr(obj, field, text)
+            if hasattr(obj, "invalidate_cache"):
+                obj.invalidate_cache()
+
+        self._doc_action(doit)
+
+    def _set_function_curve_color(self, obj: Any, color: QColor) -> None:
+        def doit() -> None:
+            obj.color = color.name()
+            if hasattr(obj, "invalidate_cache"):
+                obj.invalidate_cache()
+
+        self._doc_action(doit)
+
+
+============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\script_editor.py
 鏂囦欢鍚?   script_editor.py
-淇敼鏃堕棿: 08/07/2026 13:45:30
+淇敼鏃堕棿: 08/11/2026 12:15:27
 ============================================================
 
 """脚本编辑器 v2：适配全新 DSL 语法。
@@ -17426,7 +19499,7 @@ from PySide6.QtGui import (QColor, QFont, QSyntaxHighlighter, QTextCharFormat,
                            QPainter, QTextCursor, QTextFormat, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPlainTextEdit,
                                QPushButton, QWidget, QTextEdit, QComboBox,
-                               QLabel, QMessageBox, QCompleter)
+                               QLabel, QMessageBox, QCompleter, QApplication)
 
 from core.scripting import run_script, parse
 from core.scripting.errors import ScriptError
@@ -17973,22 +20046,19 @@ class ScriptLibraryManager(QDialog):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\theme.py
 鏂囦欢鍚?   theme.py
-淇敼鏃堕棿: 08/05/2026 12:30:36
+淇敼鏃堕棿: 08/12/2026 23:38:49
 ============================================================
 
 """多主题系统：内置 4 套主题，运行时动态切换。
-
 所有渲染代码照旧写 theme.XXX —— 模块级 __getattr__（PEP 562）
 始终返回当前主题的颜色，换肤时无需触碰任何绘制代码。
 """
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPen
 
-
 def _c(v):
     """hex 字符串或 (r,g,b,a) 元组 → QColor"""
     return QColor(v) if isinstance(v, str) else QColor(*v)
-
 
 THEMES = {
     "纸白": {
@@ -18059,38 +20129,47 @@ THEMES = {
 
 _active = "纸白"
 
+_color_cache: dict[tuple, QColor] = {}
+_pen_cache: dict[tuple, QPen] = {}
+_brush_cache: dict[str, QBrush] = {}
 
 class _Bus(QObject):
     changed = Signal(str)
 
-
 bus = _Bus()
-
 
 def theme_names():
     return list(THEMES)
 
-
 def active_name():
     return _active
-
 
 def set_theme(name):
     global _active
     if name in THEMES and name != _active:
         _active = name
+        # ★ 切换主题时清空所有缓存
+        _color_cache.clear()
+        _pen_cache.clear()
+        _brush_cache.clear()
         bus.changed.emit(name)
 
-
 def __getattr__(name):
-    """动态取色：永远返回当前主题下的 QColor（缺失键回退到纸白）。"""
+    """动态取色：永远返回当前主题下的 QColor（带缓存）。"""
+    key = (_active, name)
+    cached = _color_cache.get(key)
+    if cached is not None:
+        return cached
     t = THEMES[_active]
     if name in t:
-        return _c(t[name])
+        c = _c(t[name])
+        _color_cache[key] = c
+        return c
     if name in THEMES["纸白"]:
-        return _c(THEMES["纸白"][name])
+        c = _c(THEMES["纸白"][name])
+        _color_cache[key] = c
+        return c
     raise AttributeError(name)
-
 
 # ───────────────────────── 样式表生成 ─────────────────────────
 def app_stylesheet() -> str:
@@ -18104,28 +20183,27 @@ def app_stylesheet() -> str:
     }}
     QMainWindow {{ background: {t["WINDOW_BG"]}; }}
     QMenuBar {{ background: {t["MENU_BG"]}; color: {t["INK"]};
-               border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
+                border-bottom: 1px solid {t["BORDER"]}; padding: 2px; }}
     QMenuBar::item {{ padding: 5px 10px; border-radius: 6px; }}
     QMenuBar::item:selected {{ background: {t["MENU_HOVER"]}; }}
     QMenu {{ background: {t["MENU_BG"]}; color: {t["INK"]};
-            border: 1px solid {t["BORDER"]}; }}
+             border: 1px solid {t["BORDER"]}; }}
     QMenu::item {{ padding: 6px 24px; }}
     QMenu::item:selected {{ background: {t["MENU_HOVER"]}; }}
     QStatusBar {{ background: {t["MENU_BG"]}; border-top: 1px solid {t["BORDER"]}; }}
     QStatusBar QLabel {{ color: {t["SUBINK"]}; }}
-    QComboBox, QLineEdit, QCheckBox {{
-        background: {t["PANEL_BG"]}; color: {t["INK"]};
+    QComboBox, QLineEdit, QCheckBox, QDoubleSpinBox, QSpinBox {{
+        background: {t["WINDOW_BG"]}; color: {t["INK"]};
         border: 1px solid {t["PANEL_BORDER"]}; border-radius: 6px; padding: 3px 6px;
     }}
     """
-
 
 def canvas_qss() -> str:
     """画布内全部悬浮面板的样式（磨砂玻璃）——面板都是 canvas 子控件，必须放这里。"""
     t = THEMES[_active]
     return f"""
     #toolRail, #zoomBar, #sidesPicker, #dividePicker, #textEditor,
-    #infoPanel, #lengthPanel, #anglePanel, #fillConfigPanel,
+    #infoPanel, #propertyPanel, #lengthPanel, #anglePanel, #fillConfigPanel,
     #varSliderPanel, #exprPanel, #functionPanel {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["PANEL_BORDER"]};
@@ -18139,6 +20217,7 @@ def canvas_qss() -> str:
     #toolRail QToolButton {{ padding: 7px; }}
     #zoomBar QToolButton {{ padding: 4px 9px; }}
     #sidesPicker QToolButton, #dividePicker QToolButton {{ padding: 5px 8px; }}
+    
     #toolRail QToolButton:hover, #zoomBar QToolButton:hover,
     #sidesPicker QToolButton:hover, #dividePicker QToolButton:hover {{
         background: {t["PANEL_HOVER"]};
@@ -18147,19 +20226,22 @@ def canvas_qss() -> str:
     #sidesPicker QToolButton:checked, #dividePicker QToolButton:checked {{
         background: {t["ACCENT"]}; color: #ffffff;
     }}
+    
     #zoomBar QLabel, #sidesPicker QLabel, #dividePicker QLabel {{
         color: {t["SUBINK"]}; font-weight: 600;
     }}
     #varSliderPanel QLabel {{ color: {t["INK"]}; }}
     #varSliderPanel QPushButton {{ color: {t["SELECTED"]}; border: none; font-weight: 700; }}
     #exprPanel QLabel {{ color: {t["INK"]}; }}
+    
     #trashBtn {{
         background: {t["PANEL_BG"]};
         border: 1px solid {t["SELECTED"]};
         border-radius: 14px;
     }}
     #trashBtn:hover {{ background: {t["SELECTED"]}; }}
-        #functionPanel QScrollBar:vertical {{
+    
+    #functionPanel QScrollBar:vertical {{
         background: transparent; width: 8px; margin: 2px;
     }}
     #functionPanel QScrollBar::handle:vertical {{
@@ -18170,36 +20252,105 @@ def canvas_qss() -> str:
     }}
     #functionPanel QScrollBar::add-line:vertical,
     #functionPanel QScrollBar::sub-line:vertical {{ height: 0px; }}
+
+    /* ================= 属性面板专属样式 ================= */
+    #propertyPanel QLabel {{
+        color: {t["INK"]};
+        background: transparent;
+    }}
+    #propertyPanel #panelTitle {{
+        font-size: 15px;
+        font-weight: 700;
+        color: {t["INK"]};
+    }}
+    #propertyPanel #panelSubtitle {{
+        font-size: 11px;
+        color: {t["SUBINK"]};
+    }}
+    #propertyPanel QLineEdit,
+    #propertyPanel QDoubleSpinBox,
+    #propertyPanel QComboBox {{
+        background: {t["WINDOW_BG"]};
+        color: {t["INK"]};
+        border: 1px solid {t["PANEL_BORDER"]};
+        border-radius: 6px;
+        padding: 3px 6px;
+        font-size: 12px;
+    }}
+    #propertyPanel QCheckBox {{
+        color: {t["INK"]};
+        background: transparent;
+    }}
+    #propertyPanel QPushButton {{
+        background: {t["ACCENT"]};
+        color: #ffffff;
+        border: none;
+        border-radius: 6px;
+        padding: 5px 12px;
+        font-weight: 600;
+        font-size: 12px;
+    }}
+    #propertyPanel QPushButton:hover {{
+        background: {t["SELECTED"]};
+    }}
+    #propertyPanel QPushButton:pressed {{
+        background: {t["INK"]};
+    }}
+    /* ===================================================== */
     """
 
-
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
-def pen(color, width=1.0):
-    return QPen(QColor(color), float(width))
+# ───────────────────────── 绘图工具（带缓存）─────────────────────────
 
+def pen(color, width=1.0):
+    """实线画笔（带缓存）。返回副本，调用者可安全修改。"""
+    if isinstance(color, QColor):
+        ckey = color.name(QColor.NameFormat.HexArgb)
+    else:
+        ckey = str(color)
+    key = (ckey, float(width))
+    cached = _pen_cache.get(key)
+    if cached is not None:
+        return QPen(cached)           # 隐式共享副本，极低成本
+    p = QPen(QColor(color), float(width))
+    _pen_cache[key] = p
+    return QPen(p)
 
 def dashed_pen(color, width=1.0):
-    """虚线画笔：显式 CustomDashLine + 浮点 dash pattern。"""
+    """虚线画笔（带缓存）。返回副本，调用者可安全修改。"""
     if isinstance(color, QColor):
-        c = QColor(color)
+        ckey = color.name(QColor.NameFormat.HexArgb)
     else:
-        c = _c(color)
-
+        ckey = str(color)
+    key = ("dash", ckey, float(width))
+    cached = _pen_cache.get(key)
+    if cached is not None:
+        return QPen(cached)
+    c = QColor(color) if isinstance(color, QColor) else _c(color)
     p = QPen(c, float(width))
     p.setStyle(Qt.PenStyle.CustomDashLine)
     p.setDashPattern([6.0, 4.0])
     p.setCapStyle(Qt.PenCapStyle.FlatCap)
     p.setJoinStyle(Qt.PenJoinStyle.MiterJoin)
-
-    return p
-
+    _pen_cache[key] = p
+    return QPen(p)
 
 def brush(color):
-    return QBrush(QColor(color))
-
+    """画刷（带缓存）。返回副本，调用者可安全修改。"""
+    if isinstance(color, QColor):
+        key = color.name(QColor.NameFormat.HexArgb)
+    else:
+        key = str(color)
+    cached = _brush_cache.get(key)
+    if cached is not None:
+        return QBrush(cached)
+    b = QBrush(QColor(color))
+    _brush_cache[key] = b
+    return QBrush(b)
 
 LABEL_FONT = QFont("Consolas", 9)
 LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
+
 AXIS_FONT = QFont("Georgia", 11, QFont.Weight.DemiBold)
 AXIS_FONT.setItalic(True)
 
@@ -18888,7 +21039,7 @@ def family_name():
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\layout.py
 鏂囦欢鍚?   layout.py
-淇敼鏃堕棿: 08/05/2026 22:32:00
+淇敼鏃堕棿: 08/12/2026 23:43:13
 ============================================================
 
 """布局引擎：两遍走 AST——measure 算出 (宽, 升, 降)，draw 按基线矢量绘制。
@@ -18899,20 +21050,23 @@ def family_name():
 """
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QPainterPath, QPen
+from PySide6.QtGui import QColor, QPainterPath, QPen, QFontMetricsF
 
 from . import font as mfont
 from .parser import (
     Ord, Bin, Sup, Sub, SubSup, Frac, Sqrt, Over, Paren, Row, is_cjk
 )
 
+# ★ 性能优化：字体度量全局缓存（跨 MathLayout 实例共享）
+_GLOBAL_METRICS_CACHE: dict[tuple, object] = {}
 
 class MathLayout:
     def __init__(self, painter, size, color):
         self.p = painter
         self.size = float(size)
         self.color = QColor(color)
-        self._mcache = {}
+        # ★ 改为引用模块级缓存，不再每实例新建
+        self._mcache: dict[tuple, QFontMetricsF] = {}
 
     # ── 字体与度量 ──
 
@@ -19631,14 +21785,35 @@ def parse(text):
 ============================================================
 鏂囦欢璺緞: C:\PythonProjects\geosketch\ui\math\__init__.py
 鏂囦欢鍚?   __init__.py
-淇敼鏃堕棿: 07/29/2026 14:09:18
+淇敼鏃堕棿: 08/12/2026 23:40:32
 ============================================================
 
-"""迷你数学排版器对外接口：draw_math / measure_math。"""
-from PySide6.QtGui import QColor, QPen
+"""迷你数学排版器对外接口：draw_math / measure_math。
+★ 新增：parse 缓存 + measure 缓存，避免每帧重复解析。"""
 
+from PySide6.QtGui import QColor, QPen
 from .parser import parse
 from .layout import MathLayout
+
+# ★ 性能优化：AST 缓存（文本 → AST）
+_parse_cache: dict[str, object] = {}
+_PARSE_CACHE_MAX = 512
+
+# ★ 性能优化：measure 缓存（(文本, 字号) → (宽, 升, 降)）
+_measure_cache: dict[tuple, tuple] = {}
+_MEASURE_CACHE_MAX = 512
+
+
+def parse_cached(text: str):
+    """带缓存的 parse。AST 是只读的（layout 只遍历不修改），缓存安全。"""
+    cached = _parse_cache.get(text)
+    if cached is not None:
+        return cached
+    result = parse(text)
+    if len(_parse_cache) >= _PARSE_CACHE_MAX:
+        _parse_cache.clear()
+    _parse_cache[text] = result
+    return result
 
 
 def draw_math(p, x, y, text, size=13, color=None):
@@ -19649,12 +21824,26 @@ def draw_math(p, x, y, text, size=13, color=None):
     color = QColor(color)
     p.setPen(QPen(color, 1.0))
     lay = MathLayout(p, size, color)
-    return lay.draw(parse(text), x, y)
+    return lay.draw(parse_cached(text), x, y)    # ★ 使用缓存
 
 
 def measure_math(text, size=13):
-    """只度量不绘制，返回 (宽, 升, 降)。"""
+    """只度量不绘制，返回 (宽, 升, 降)。带缓存。"""
+    key = (text, size)
+    cached = _measure_cache.get(key)
+    if cached is not None:
+        return cached
     lay = MathLayout(None, size, QColor(0, 0, 0))
-    return lay.measure(parse(text))
+    result = lay.measure(parse_cached(text))     # ★ 使用缓存
+    if len(_measure_cache) >= _MEASURE_CACHE_MAX:
+        _measure_cache.clear()
+    _measure_cache[key] = result
+    return result
+
+
+def clear_math_caches():
+    """清空数学排版缓存（主题切换 / 文档切换时调用）。"""
+    _parse_cache.clear()
+    _measure_cache.clear()
 
 
