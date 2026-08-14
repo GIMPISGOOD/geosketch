@@ -96,7 +96,7 @@ text
 geosketch
 原作者：GIMPISGOOD
 版权声明：Copyright (c) 2026 GIMPISGOOD
-原仓库地址：*
+原仓库地址：https://github.com/GIMPISGOOD/geosketch
 此后，不得在每次模块执行前重复显示，除非被许可人自行选择。
 
 被许可人可通过设置环境变量（例如 GEOSKETCH_NO_BANNER=1）或等效机制禁用后续显示，但默认行为必须显示。被许可人不得通过修改源代码或配置文件的方式永久移除默认显示；环境变量禁用属允许的合理机制。
