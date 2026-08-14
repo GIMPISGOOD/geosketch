@@ -195,10 +195,14 @@ class PropertyPanel(QWidget):
             self._collapsed_widget.hide()
             self._expanded_widget.show()
             self.setFixedWidth(self._expanded_width)
-            self.setMaximumHeight(max(240, self.canvas.height() - 110))
+            # ★ 修复：解除折叠时的固定高度，恢复弹性布局
             self.setMinimumHeight(0)
-        self.reposition()
-        self.raise_()
+            self.setMaximumHeight(16777215)   # QWIDGETSIZE_MAX
+            # 恢复合理显示高度
+            target_h = max(320, min(600, self.canvas.height() - 80))
+            self.resize(self._expanded_width, target_h)
+            self.reposition()
+            self.raise_()
 
     def reposition(self) -> None:
         x = max(10, self.canvas.width() - self.width() - 16)
