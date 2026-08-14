@@ -1,7 +1,8 @@
 """选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
 from typing import Optional, Tuple, List
 from PySide6.QtGui import QColor
-
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject
 from media.base import MediaObject
@@ -27,9 +28,7 @@ def _free_points_of(obj, acc, seen):
 class SelectTool(Tool):
     def __init__(self):
         self._reset()
-
-    def activated(self, canvas):
-        self._reset()
+        self._script_timer = None          # ★ 脚本按钮单击延迟运行定时器
 
     def _reset(self):
         self.drag_pts: list[FreePoint] = []
@@ -47,7 +46,13 @@ class SelectTool(Tool):
         self._click_media = None
         self._press_wpt = None
         self._moved = False# ★ 智能参考线
-
+        
+    def cancel_pending_script(self):
+        """取消待运行的脚本按钮单击（双击编辑时调用）。"""
+        if self._script_timer is not None:
+            self._script_timer.stop()
+            self._script_timer = None
+            
     def _detect_snap(self, canvas, x, y) -> Tuple[float, float, List[Tuple[str, float]]]:
         """检测对齐吸附：坐标轴 / 其他点。返回 (吸附后x, 吸附后y, 参考线列表)。"""
         THRESHOLD_PX = 12.0
@@ -256,32 +261,45 @@ class SelectTool(Tool):
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
+        # ★ 脚本按钮单击运行（延迟以区分双击编辑）
+        if self._click_media is not None and not self._moved:
+            from media.script_button import ScriptButtonObject
+            if isinstance(self._click_media, ScriptButtonObject):
+                btn = self._click_media
+                self.cancel_pending_script()
+                self._script_timer = QTimer()
+                self._script_timer.setSingleShot(True)
+                interval = max(200, QApplication.doubleClickInterval())
+                self._script_timer.setInterval(interval)
+                self._script_timer.timeout.connect(lambda: btn.run(canvas))
+                self._script_timer.start()
+
         if self._drag_undo_begun:
-            # ★ 宏录制：记录拖动结果
+            # 宏录制：记录拖动结果
             from core.macro import get_macro_manager
-
             mm = get_macro_manager()
-
             if mm is not None and mm.is_recording():
                 if self.drag_poo is not None:
                     mm.recorder.record_move(self.drag_poo)
-
                 for p in self.drag_pts:
                     mm.recorder.record_move(p)
-
                 if self.drag_media is not None:
                     mm.recorder.record_move(self.drag_media)
-
                 if self.resize_media is not None:
                     mm.recorder.record_move(self.resize_media)
-
                 if self.rotate_media is not None:
                     mm.recorder.record_move(self.rotate_media)
-
             canvas.doc.end_action()
-
+        self._reset()
+        
+    def activated(self, canvas):
+        self.cancel_pending_script()       # ★ 切回选择工具时也清理
         self._reset()
 
+    def deactivated(self, canvas):         # ★ 新增：切离选择工具时清理
+        self.cancel_pending_script()
+        self._reset()
+        
     def cancel(self, canvas):
         self._reset()
 
