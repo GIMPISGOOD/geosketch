@@ -11,6 +11,7 @@ from ..types.angle import AngleConstraint
 from ..types.parallel import ParallelConstraint
 from ..types.perpendicular import PerpendicularConstraint
 from ..types.collinear import CollinearConstraint
+from ..types.tangent import TangentCC, TangentCL
 
 def _extract_points(hit):
     """★ 智能拾取引擎：自动从几何对象中提取定义点。
@@ -76,8 +77,10 @@ class BaseConstraintTool(Tool):
             if not (ok and expr.strip()):
                 self.pts = []
                 return
+            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts, expr.strip())
         else:
+            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts)
             
         canvas.doc.add_constraint(c)
@@ -157,3 +160,47 @@ class PerpendicularTool(LineConstraintTool):
 class CollinearTool(BaseConstraintTool):
     constraint_cls = CollinearConstraint
     n_points = 3
+    
+# ───────── 圆-圆外切 ─────────
+@register_tool(name="圆-圆外切", order=509, panel="constraint",
+               icon="constraint_tangent",
+               hint="依次点击两个圆，使它们外切")
+class TangentCCExtTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "external")
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()
+
+
+# ───────── 圆-圆内切 ─────────
+@register_tool(name="圆-圆内切", order=510, panel="constraint",
+               icon="constraint_tangent",
+               hint="依次点击两个圆，使它们内切")
+class TangentCCIntTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "internal")
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()
+
+
+# ───────── 圆-线相切 ─────────
+@register_tool(name="圆-线相切", order=511, panel="constraint",
+               icon="constraint_tangent",
+               hint="先点击一个圆，再点击一条线段/直线，使它们相切")
+class TangentCLTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCL(pts[0], pts[1], pts[2], pts[3])
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()

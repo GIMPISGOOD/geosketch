@@ -42,6 +42,7 @@ def inject():
             "constraint_parallel": ("fa5s.equals", "mdi.vector-parallel"),
             "constraint_perpendicular": ("mdi.angle-right", "fa5s.drafting-compass"),
             "constraint_collinear": ("mdi.vector-line", "fa5s.minus"),
+            "constraint_tangent": ("fa5s.circle-notch", "mdi.circle-double"),
         })
 
         # 8. 动态向 MainWindow 的菜单栏注入「约束」菜单
