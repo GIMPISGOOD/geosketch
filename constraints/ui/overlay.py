@@ -1,28 +1,51 @@
 """注入 Canvas：在 paintEvent 中绘制约束标记。"""
 from ui.canvas import Canvas
 from ui import theme
+from PySide6.QtGui import QPainter, QPen, QFont
 
 _original_paint = Canvas.paintEvent
 
 def _new_paint(self, ev):
     _original_paint(self, ev)
-    # 在原绘制结束后，追加约束标记
-    if not hasattr(self.doc, 'constraints') or not self.doc.constraints: return
     
-    from PySide6.QtGui import QPainter, QPen
+    if not hasattr(self.doc, 'constraints') or not self.doc.constraints: 
+        return
+    
     p = QPainter(self)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.setPen(QPen(theme.MEASURE, 1.5))
-    p.setFont(theme.LABEL_FONT)
+    
+    font = QFont("Segoe UI Symbol", 12, QFont.Weight.Bold)
+    p.setFont(font)
+    p.setPen(QPen(theme.MEASURE, 2.0))
     
     for c in self.doc.constraints:
         pts = c.involved_points()
-        if len(pts) >= 2:
-            sp1 = self.to_screen(pts[0].x, pts[0].y)
-            sp2 = self.to_screen(pts[1].x, pts[1].y)
-            p.drawLine(sp1, sp2)
-            mx, my = (sp1.x() + sp2.x())/2, (sp1.y() + sp2.y())/2
-            p.drawText(mx + 5, my - 5, c.type_name)
+        if not pts: continue
+        
+        # 计算中心点
+        cx = sum(pt.x for pt in pts) / len(pts)
+        cy = sum(pt.y for pt in pts) / len(pts)
+        sp = self.to_screen(cx, cy)
+        
+        # 根据约束类型绘制标记
+        t = c.type_name
+        marker = ""
+        if t == "distance": marker = "↔"
+        elif t == "horizontal": marker = "─"
+        elif t == "vertical": marker = "│"
+        elif t == "parallel": marker = "∥"
+        elif t == "perpendicular": marker = "⊥"
+        elif t == "angle": marker = "∠"
+        elif t == "collinear": marker = "⋯"
+        elif t == "fixed": marker = "📌"
+        
+        if marker:
+            # 绘制背景白底防止看不清
+            p.setPen(QPen(theme.BG_TOP, 4.0))
+            p.drawText(sp.x() + 10, sp.y() - 10, marker)
+            p.setPen(QPen(theme.MEASURE, 2.0))
+            p.drawText(sp.x() + 10, sp.y() - 10, marker)
+            
     p.end()
 
 def patch_canvas():
