@@ -35,6 +35,7 @@ def inject():
             "constraint_parallel": ("fa5s.equals", "mdi.vector-parallel"),
             "constraint_perpendicular": ("mdi.angle-right", "fa5s.drafting-compass"),
             "constraint_collinear": ("mdi.vector-line", "fa5s.minus"),
+            "constraint_tangent": ("fa5s.circle-notch", "mdi.circle-double"),
         })
 
         patch_main_window_menu()
@@ -85,65 +86,64 @@ from typing import List, Any, Dict, Type
 
 class GeometricConstraint:
     """几何约束基类。不继承 GeoObject，独立于依赖图。"""
+
     _next_id = 1
 
     def __init__(self):
         self.cid = f"c{GeometricConstraint._next_id}"
         GeometricConstraint._next_id += 1
         self.enabled = True
-        self.status = "ok"  # ok / conflict / degenerate / invalid_expr
+        self.status = "ok"
 
     def involved_points(self) -> List[Any]:
-        """返回此约束涉及的所有点对象。"""
         raise NotImplementedError
 
     def residual(self) -> List[float]:
-        """残差向量。约束满足时全为 0。"""
         raise NotImplementedError
 
+
     def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """数值雅可比矩阵（中心差分）。
+        """雅可比矩阵。子类实现 _jacobian_analytic(vars_map) 即可启用解析版本；
+        未实现时自动回退数值中心差分。"""
+        analytic = getattr(self, '_jacobian_analytic', None)
+        if analytic is not None:
+            try:
+                return analytic(vars_map)
+            except Exception:
+                pass
+        return self._jacobian_numeric(vars_map)
 
-        参数:
-            vars_map: {id(point): 该点在 free_points 中的索引}
-
-        返回:
-            矩阵行数 = len(residual())
-            矩阵列数 = 2 * len(vars_map)  ← 每个点贡献 x, y 两列
-        """
+    def _jacobian_numeric(self, vars_map: Dict[int, int]) -> List[List[float]]:
+        """数值雅可比（中心差分）。"""
         eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
         jac = [[0.0] * n_cols for _ in range(n_res)]
-
         for p in pts:
             if id(p) not in vars_map:
                 continue
             idx = vars_map[id(p)]
-            for axis in range(2):  # 0=x, 1=y
+            for axis in range(2):
                 old = p.x if axis == 0 else p.y
                 if axis == 0:
                     p.x = old + eps
                 else:
                     p.y = old + eps
                 r_plus = self.residual()
-
                 if axis == 0:
                     p.x = old - eps
                 else:
                     p.y = old - eps
                 r_minus = self.residual()
-
                 if axis == 0:
                     p.x = old
                 else:
                     p.y = old
-
                 for j in range(n_res):
                     jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
-
         return jac
+
 
     def dump(self) -> dict:
         raise NotImplementedError
@@ -151,6 +151,7 @@ class GeometricConstraint:
     @classmethod
     def build(cls, point_map: dict, params: dict) -> 'GeometricConstraint':
         raise NotImplementedError
+
 
 
 CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
@@ -392,130 +393,171 @@ def patch_save_load():
     setattr(Document, "save", _new_save)
     setattr(Document, "load", _new_load)
 
-"""Levenberg-Marquardt 约束求解器。纯 Python，无外部依赖。"""
+"""Levenberg-Marquardt 约束求解器（优化版）。
+优化点：
+1. Cholesky 分解替代高斯消元（对称正定，快约 2 倍）
+2. 稀疏法方程组装（只累加约束涉及点的列）
+3. 独立连通分量分组求解（减小矩阵规模）
+4. λ 复用（拒绝步时不重新组装雅可比）
+5. 解析雅可比优先（通过 base.py 钩子）
+"""
 import math
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Optional
+
 from .base import GeometricConstraint
 
 
-def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
-    """高斯消元（列主元）求解 Ax = b。返回 None 表示奇异。"""
+
+def _cholesky(A: List[List[float]]) -> Optional[List[List[float]]]:
+    """对称正定矩阵 Cholesky 分解 A = L·Lᵀ。失败返回 None。"""
+    n = len(A)
+    L = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(i + 1):
+            s = 0.0
+            for k in range(j):
+                s += L[i][k] * L[j][k]
+            if i == j:
+                val = A[i][i] - s
+                if val <= 1e-15:
+                    return None
+                L[i][j] = math.sqrt(val)
+            else:
+                if abs(L[j][j]) < 1e-15:
+                    return None
+                L[i][j] = (A[i][j] - s) / L[j][j]
+    return L
+
+
+def _cholesky_solve(L: List[List[float]], b: List[float]) -> List[float]:
+    """前代 + 回代求解 L·Lᵀ·x = b。"""
     n = len(b)
-    if n == 0:
-        return []
-    M = [row[:] + [b[i]] for i, row in enumerate(A)]
-
-    for col in range(n):
-        pivot = max(range(col, n), key=lambda r: abs(M[r][col]))
-        if abs(M[pivot][col]) < 1e-15:
-            return None
-        M[col], M[pivot] = M[pivot], M[col]
-        for row in range(col + 1, n):
-            f = M[row][col] / M[col][col]
-            for j in range(col, n + 1):
-                M[row][j] -= f * M[col][j]
-
+    y = [0.0] * n
+    for i in range(n):
+        s = 0.0
+        for k in range(i):
+            s += L[i][k] * y[k]
+        y[i] = (b[i] - s) / L[i][i]
     x = [0.0] * n
     for i in range(n - 1, -1, -1):
-        x[i] = M[i][n]
-        for j in range(i + 1, n):
-            x[i] -= M[i][j] * x[j]
-        x[i] /= M[i][i]
+        s = 0.0
+        for k in range(i + 1, n):
+            s += L[k][i] * x[k]
+        x[i] = (y[i] - s) / L[i][i]
     return x
 
 
+
+def _group_independent(constraints, free_points):
+    """用并查集将共享自由点的约束分组，返回 [(constraints, points), ...]。
+    不共享点的约束组互相独立，可分别求解小矩阵。"""
+    if not free_points:
+        return []
+    fp_ids = {id(p) for p in free_points}
+    parent = {pid: pid for pid in fp_ids}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x, y):
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for c in constraints:
+        pts = [id(p) for p in c.involved_points() if id(p) in fp_ids]
+        for i in range(1, len(pts)):
+            union(pts[0], pts[i])
+
+    groups = {}
+    for p in free_points:
+        root = find(id(p))
+        groups.setdefault(root, []).append(p)
+
+    result = []
+    for root, pts in groups.items():
+        pt_set = {id(p) for p in pts}
+        cs = [c for c in constraints
+              if any(id(p) in pt_set for p in c.involved_points())]
+        if cs:
+            result.append((cs, pts))
+    return result
+
+
+
 class ConstraintSolver:
-    """LM 求解器。"""
+    """LM 求解器（优化版）。"""
 
     def __init__(self, max_iter=50, tol=1e-9):
         self.max_iter = max_iter
         self.tol = tol
 
-    def solve(
-        self,
-        constraints: List[GeometricConstraint],
-        free_points: List[Any],
-        pinned_points: List[Any],
-    ) -> bool:
-        """求解约束系统。
-
-        参数:
-            constraints: 需要满足的约束列表
-            free_points: 可以被移动的点（求解器会修改它们的坐标）
-            pinned_points: 固定不动的点（如用户正在拖动的点）
-
-        返回:
-            True = 收敛成功
-        """
+    def solve(self, constraints, free_points, pinned_points) -> bool:
         valid = [c for c in constraints if c.enabled]
         if not valid or not free_points:
             return True
+        groups = _group_independent(valid, free_points)
+        if not groups:
+            return True
+        all_ok = True
+        for group_cs, group_pts in groups:
+            if not self._solve_group(group_cs, group_pts):
+                all_ok = False
+        return all_ok
 
+    def _solve_group(self, constraints, free_points) -> bool:
+        """对单个连通分量执行 LM 迭代。"""
         vars_map: Dict[int, int] = {id(p): i for i, p in enumerate(free_points)}
-        n_vars = 2 * len(free_points)  # ★ 修复：变量总数 = 2 × 点数
+        n_vars = 2 * len(free_points)
+        if n_vars == 0:
+            return True
 
         lam = 1e-3
         lam_up, lam_down = 10.0, 0.1
 
-        for iteration in range(self.max_iter):
-            F: List[float] = []
-            J: List[List[float]] = []
+        F: List[float] = []
+        JtJ_base: List[List[float]] = []
+        JtF: List[float] = []
+        norm = float('inf')
+        need_assemble = True
 
-            for c in valid:
-                try:
-                    r = c.residual()
-                    jac = c.jacobian(vars_map)
-                    F.extend(r)
-                    J.extend(jac)
-                except Exception:
-                    continue
+        for _ in range(self.max_iter):
+            if need_assemble:
+                F, JtJ_base, JtF, norm = self._assemble(
+                    constraints, vars_map, n_vars)
+                need_assemble = False
+                if not F:
+                    return True
+                if norm < self.tol:
+                    return True
 
-            if not F:
-                return True
-
-            n_eqs = len(F)
-
-            norm = math.sqrt(sum(f * f for f in F))
-            if norm < self.tol:
-                return True
-
-            JtJ = [[0.0] * n_vars for _ in range(n_vars)]
-            JtF = [0.0] * n_vars
-
-            for i in range(n_eqs):
-                if len(J[i]) != n_vars:
-                    continue  # 跳过维度不匹配的行
-                for j in range(n_vars):
-                    JtF[j] += J[i][j] * F[i]
-                    for k in range(n_vars):
-                        JtJ[j][k] += J[i][j] * J[i][k]
-
+            JtJ = [row[:] for row in JtJ_base]
             for i in range(n_vars):
                 JtJ[i][i] += lam
 
-            delta = _solve_linear(JtJ, [-f for f in JtF])
-            if delta is None:
+            L = _cholesky(JtJ)
+            if L is None:
                 lam *= lam_up
                 if lam > 1e10:
                     return False
                 continue
+
+            delta = _cholesky_solve(L, [-f for f in JtF])
 
             old_coords = [(p.x, p.y) for p in free_points]
             for i, p in enumerate(free_points):
                 p.x += delta[2 * i]
                 p.y += delta[2 * i + 1]
 
-            new_F: List[float] = []
-            for c in valid:
-                try:
-                    new_F.extend(c.residual())
-                except Exception:
-                    continue
-            new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
-
+            new_norm = self._residual_norm(constraints)
             if new_norm < norm:
                 lam = max(lam * lam_down, 1e-12)
-                if new_norm < self.tol:
+                norm = new_norm
+                need_assemble = True          # 点变了，下次重新组装
+                if norm < self.tol:
                     return True
             else:
                 for i, p in enumerate(free_points):
@@ -523,8 +565,54 @@ class ConstraintSolver:
                 lam *= lam_up
                 if lam > 1e10:
                     return False
-
         return False
+
+    def _assemble(self, constraints, vars_map, n_vars):
+        """组装 F、JᵀJ（不含 λ）、JᵀF。稀疏累加：只遍历约束涉及点的列。"""
+        F: List[float] = []
+        JtJ = [[0.0] * n_vars for _ in range(n_vars)]
+        JtF = [0.0] * n_vars
+
+        for c in constraints:
+            try:
+                r = c.residual()
+                jac = c.jacobian(vars_map)
+            except Exception:
+                continue
+
+            cols = []
+            for p in c.involved_points():
+                if id(p) in vars_map:
+                    idx = vars_map[id(p)]
+                    cols.extend([idx * 2, idx * 2 + 1])
+            cols = sorted(set(cols))
+
+            for i in range(len(r)):
+                fi = r[i]
+                F.append(fi)
+                if i >= len(jac):
+                    continue
+                row = jac[i]
+                if len(row) != n_vars:
+                    continue
+                for j in cols:
+                    JtF[j] += row[j] * fi
+                    for k in cols:
+                        JtJ[j][k] += row[j] * row[k]
+
+        norm = math.sqrt(sum(f * f for f in F)) if F else 0.0
+        return F, JtJ, JtF, norm
+
+    @staticmethod
+    def _residual_norm(constraints) -> float:
+        total = 0.0
+        for c in constraints:
+            try:
+                for f in c.residual():
+                    total += f * f
+            except Exception:
+                pass
+        return math.sqrt(total)
 
 
 import math
@@ -607,35 +695,57 @@ import math
 from core.variables import eval_expr
 from ..base import GeometricConstraint, register_constraint
 
+
 @register_constraint("distance")
 class DistanceConstraint(GeometricConstraint):
     def __init__(self, p1, p2, expr="1"):
         super().__init__()
         self.p1, self.p2 = p1, p2
         self.expr = expr
-        
+
     def involved_points(self):
         return [self.p1, self.p2]
-        
+
     def residual(self):
         dx = self.p2.x - self.p1.x
         dy = self.p2.y - self.p1.y
         d = math.hypot(dx, dy)
         target = eval_expr(self.expr)
-        if target is None: 
+        if target is None:
             self.status = "invalid_expr"
             return [0.0]
         self.status = "ok"
         return [d - target]
-        
+
+    def _jacobian_analytic(self, vars_map):
+        dx = self.p2.x - self.p1.x
+        dy = self.p2.y - self.p1.y
+        d = math.hypot(dx, dy)
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols]
+        if d < 1e-9:
+            return jac
+        ux, uy = dx / d, dy / d
+        if id(self.p1) in vars_map:
+            idx = vars_map[id(self.p1)]
+            jac[0][idx * 2] = -ux
+            jac[0][idx * 2 + 1] = -uy
+        if id(self.p2) in vars_map:
+            idx = vars_map[id(self.p2)]
+            jac[0][idx * 2] = ux
+            jac[0][idx * 2 + 1] = uy
+        return jac
+
     def dump(self):
         return {"p1": self.p1.id, "p2": self.p2.id, "expr": self.expr}
-        
+
     @classmethod
     def build(cls, point_map, params):
-        return cls(point_map[params["p1"]], point_map[params["p2"]], params["expr"])
+        return cls(point_map[params["p1"]], point_map[params["p2"]],
+                   params["expr"])
 
 from ..base import GeometricConstraint, register_constraint
+
 
 @register_constraint("fixed")
 class FixedConstraint(GeometricConstraint):
@@ -643,37 +753,56 @@ class FixedConstraint(GeometricConstraint):
         super().__init__()
         self.p = p
         self.fx, self.fy = fx, fy
-        
+
     def involved_points(self):
         return [self.p]
-        
+
     def residual(self):
         return [self.p.x - self.fx, self.p.y - self.fy]
-        
+
+    def _jacobian_analytic(self, vars_map):
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols, [0.0] * n_cols]
+        if id(self.p) in vars_map:
+            idx = vars_map[id(self.p)]
+            jac[0][idx * 2] = 1.0
+            jac[1][idx * 2 + 1] = 1.0
+        return jac
+
     def dump(self):
         return {"p": self.p.id, "fx": self.fx, "fy": self.fy}
-        
+
     @classmethod
     def build(cls, point_map, params):
         return cls(point_map[params["p"]], params["fx"], params["fy"])
 
 from ..base import GeometricConstraint, register_constraint
 
+
 @register_constraint("horizontal")
 class HorizontalConstraint(GeometricConstraint):
     def __init__(self, p1, p2):
         super().__init__()
         self.p1, self.p2 = p1, p2
-        
+
     def involved_points(self):
         return [self.p1, self.p2]
-        
+
     def residual(self):
         return [self.p2.y - self.p1.y]
-        
+
+    def _jacobian_analytic(self, vars_map):
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols]
+        if id(self.p1) in vars_map:
+            jac[0][vars_map[id(self.p1)] * 2 + 1] = -1.0
+        if id(self.p2) in vars_map:
+            jac[0][vars_map[id(self.p2)] * 2 + 1] = 1.0
+        return jac
+
     def dump(self):
         return {"p1": self.p1.id, "p2": self.p2.id}
-        
+
     @classmethod
     def build(cls, point_map, params):
         return cls(point_map[params["p1"]], point_map[params["p2"]])
@@ -740,23 +869,179 @@ class PerpendicularConstraint(GeometricConstraint):
         return cls(point_map[params["a1"]], point_map[params["b1"]], 
                    point_map[params["a2"]], point_map[params["b2"]])
 
+"""相切约束：圆-圆相切（外切/内切）、圆-线相切。"""
+import math
 from ..base import GeometricConstraint, register_constraint
+
+
+@register_constraint("tangent_cc")
+class TangentCC(GeometricConstraint):
+    """圆与圆相切。
+    参数：
+        c1_center, c1_through: 圆1的圆心和圆周点
+        c2_center, c2_through: 圆2的圆心和圆周点
+        mode: "external"（外切）或 "internal"（内切）
+    """
+
+    def __init__(self, c1_center, c1_through, c2_center, c2_through,
+                 mode="external"):
+        super().__init__()
+        self.c1_center = c1_center
+        self.c1_through = c1_through
+        self.c2_center = c2_center
+        self.c2_through = c2_through
+        self.mode = mode
+
+    def involved_points(self):
+        return [self.c1_center, self.c1_through,
+                self.c2_center, self.c2_through]
+
+    def residual(self):
+        dx = self.c2_center.x - self.c1_center.x
+        dy = self.c2_center.y - self.c1_center.y
+        d = math.hypot(dx, dy)
+        r1 = math.hypot(self.c1_through.x - self.c1_center.x,
+                        self.c1_through.y - self.c1_center.y)
+        r2 = math.hypot(self.c2_through.x - self.c2_center.x,
+                        self.c2_through.y - self.c2_center.y)
+        if d < 1e-9 or r1 < 1e-9 or r2 < 1e-9:
+            self.status = "degenerate"
+            return [0.0]
+        self.status = "ok"
+        if self.mode == "external":
+            return [d - (r1 + r2)]
+        return [d - abs(r1 - r2)]
+
+    def _jacobian_analytic(self, vars_map):
+        """解析雅可比：避免数值差分。"""
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols]
+
+        dx = self.c2_center.x - self.c1_center.x
+        dy = self.c2_center.y - self.c1_center.y
+        d = math.hypot(dx, dy)
+        r1 = math.hypot(self.c1_through.x - self.c1_center.x,
+                        self.c1_through.y - self.c1_center.y)
+        r2 = math.hypot(self.c2_through.x - self.c2_center.x,
+                        self.c2_through.y - self.c2_center.y)
+        if d < 1e-9 or r1 < 1e-9 or r2 < 1e-9:
+            return jac
+
+        ux, uy = dx / d, dy / d
+        u1x = (self.c1_through.x - self.c1_center.x) / r1
+        u1y = (self.c1_through.y - self.c1_center.y) / r1
+        u2x = (self.c2_through.x - self.c2_center.x) / r2
+        u2y = (self.c2_through.y - self.c2_center.y) / r2
+
+        if self.mode == "external":
+            dc1x, dc1y = u1x - ux, u1y - uy
+            dt1x, dt1y = -u1x, -u1y
+            dc2x, dc2y = ux + u2x, uy + u2y
+            dt2x, dt2y = -u2x, -u2y
+        else:
+            s = 1.0 if r1 >= r2 else -1.0
+            dc1x, dc1y = s * u1x - ux, s * u1y - uy
+            dt1x, dt1y = -s * u1x, -s * u1y
+            dc2x, dc2y = ux - s * u2x, uy - s * u2y
+            dt2x, dt2y = s * u2x, s * u2y
+
+        for p, gx, gy in ((self.c1_center, dc1x, dc1y),
+                          (self.c1_through, dt1x, dt1y),
+                          (self.c2_center, dc2x, dc2y),
+                          (self.c2_through, dt2x, dt2y)):
+            if id(p) in vars_map:
+                idx = vars_map[id(p)]
+                jac[0][idx * 2] = gx
+                jac[0][idx * 2 + 1] = gy
+        return jac
+
+    def dump(self):
+        return {"c1_center": self.c1_center.id,
+                "c1_through": self.c1_through.id,
+                "c2_center": self.c2_center.id,
+                "c2_through": self.c2_through.id,
+                "mode": self.mode}
+
+    @classmethod
+    def build(cls, point_map, params):
+        return cls(point_map[params["c1_center"]],
+                   point_map[params["c1_through"]],
+                   point_map[params["c2_center"]],
+                   point_map[params["c2_through"]],
+                   params.get("mode", "external"))
+
+
+@register_constraint("tangent_cl")
+class TangentCL(GeometricConstraint):
+    """圆与直线/线段相切。
+    参数：
+        center, through: 圆的圆心和圆周点
+        a, b: 直线/线段的两个端点
+    """
+
+    def __init__(self, center, through, a, b):
+        super().__init__()
+        self.center = center
+        self.through = through
+        self.a = a
+        self.b = b
+
+    def involved_points(self):
+        return [self.center, self.through, self.a, self.b]
+
+    def residual(self):
+        dx = self.b.x - self.a.x
+        dy = self.b.y - self.a.y
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            self.status = "degenerate"
+            return [0.0]
+        cross = dx * (self.center.y - self.a.y) - \
+                dy * (self.center.x - self.a.x)
+        dist = abs(cross) / L
+        r = math.hypot(self.through.x - self.center.x,
+                       self.through.y - self.center.y)
+        self.status = "ok"
+        return [dist - r]
+
+    def dump(self):
+        return {"center": self.center.id, "through": self.through.id,
+                "a": self.a.id, "b": self.b.id}
+
+    @classmethod
+    def build(cls, point_map, params):
+        return cls(point_map[params["center"]],
+                   point_map[params["through"]],
+                   point_map[params["a"]],
+                   point_map[params["b"]])
+
+from ..base import GeometricConstraint, register_constraint
+
 
 @register_constraint("vertical")
 class VerticalConstraint(GeometricConstraint):
     def __init__(self, p1, p2):
         super().__init__()
         self.p1, self.p2 = p1, p2
-        
+
     def involved_points(self):
         return [self.p1, self.p2]
-        
+
     def residual(self):
         return [self.p2.x - self.p1.x]
-        
+
+    def _jacobian_analytic(self, vars_map):
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols]
+        if id(self.p1) in vars_map:
+            jac[0][vars_map[id(self.p1)] * 2] = -1.0
+        if id(self.p2) in vars_map:
+            jac[0][vars_map[id(self.p2)] * 2] = 1.0
+        return jac
+
     def dump(self):
         return {"p1": self.p1.id, "p2": self.p2.id}
-        
+
     @classmethod
     def build(cls, point_map, params):
         return cls(point_map[params["p1"]], point_map[params["p2"]])
@@ -828,6 +1113,7 @@ from ..types.angle import AngleConstraint
 from ..types.parallel import ParallelConstraint
 from ..types.perpendicular import PerpendicularConstraint
 from ..types.collinear import CollinearConstraint
+from ..types.tangent import TangentCC, TangentCL
 
 def _extract_points(hit):
     """★ 智能拾取引擎：自动从几何对象中提取定义点。
@@ -889,8 +1175,10 @@ class BaseConstraintTool(Tool):
             if not (ok and expr.strip()):
                 self.pts = []
                 return
+            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts, expr.strip())
         else:
+            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts)
             
         canvas.doc.add_constraint(c)
@@ -963,6 +1251,47 @@ class PerpendicularTool(LineConstraintTool):
 class CollinearTool(BaseConstraintTool):
     constraint_cls = CollinearConstraint
     n_points = 3
+    
+@register_tool(name="圆-圆外切", order=509, panel="constraint",
+               icon="constraint_tangent",
+               hint="依次点击两个圆，使它们外切")
+class TangentCCExtTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "external")
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()
+
+
+@register_tool(name="圆-圆内切", order=510, panel="constraint",
+               icon="constraint_tangent",
+               hint="依次点击两个圆，使它们内切")
+class TangentCCIntTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "internal")
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()
+
+
+@register_tool(name="圆-线相切", order=511, panel="constraint",
+               icon="constraint_tangent",
+               hint="先点击一个圆，再点击一条线段/直线，使它们相切")
+class TangentCLTool(BaseConstraintTool):
+    n_points = 4
+
+    def _finalize(self, canvas):
+        pts = self.pts[:4]
+        c = TangentCL(pts[0], pts[1], pts[2], pts[3])
+        canvas.doc.add_constraint(c)
+        self.pts = []
+        canvas.update()
 
 
 import json
