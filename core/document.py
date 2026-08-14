@@ -444,14 +444,12 @@ class Document(QObject):
     def save(self, path):
         import zipfile
         import datetime
+        import os
         from ui import theme as _theme
-
         self.meta["theme"] = _theme.active_name()
         self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")
-
         if not self.meta.get("created"):
             self.meta["created"] = self.meta["modified"]
-
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(
                 "sketch.json",
@@ -465,34 +463,66 @@ class Document(QObject):
                 "variables.json",
                 json.dumps(self.vars.to_dict(), ensure_ascii=False, indent=1)
             )
-            # ★ 保存宏
             zf.writestr(
                 "macros.json",
                 json.dumps(getattr(self, "macros", []), ensure_ascii=False, indent=1)
             )
-            # ★ 保存脚本库
             if hasattr(self, "script_libs") and self.script_libs:
                 zf.writestr(
                     "script_libs.json",
                     json.dumps(self.script_libs, ensure_ascii=False, indent=1)
                 )
+            # ★ 内嵌图片：把 ImageObject 的图片写入 media/images/
+            for obj in self.objects:
+                if type(obj).__name__ == "ImageObject":
+                    img_path = getattr(obj, "path", None)
+                    if img_path and os.path.exists(img_path):
+                        ext = os.path.splitext(img_path)[1] or ".png"
+                        arcname = f"media/images/{obj.id}{ext}"
+                        try:
+                            zf.write(img_path, arcname)
+                        except Exception:
+                            pass
 
     def load(self, path):
         import zipfile
+        import tempfile
+        import os
         from ui import theme as _theme
-
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
 
-            # ★ 先恢复变量，再重建对象，避免表达式对象初始化时变量缺失
+            # ★ 解压内嵌图片到临时目录
+            self._temp_image_dir = tempfile.mkdtemp(prefix="geosketch_img_")
+            for name in names:
+                if name.startswith("media/images/"):
+                    try:
+                        data = zf.read(name)
+                        fname = os.path.basename(name)
+                        tmp_path = os.path.join(self._temp_image_dir, fname)
+                        with open(tmp_path, "wb") as f:
+                            f.write(data)
+                    except Exception:
+                        pass
+
             if "variables.json" in names:
                 self.vars.load_dict(json.loads(zf.read("variables.json")))
             else:
-                # 旧文件没有变量时，清空当前变量，避免文档间污染
                 self.vars.load_dict({})
-                
-            self._load_state(json.loads(zf.read("sketch.json")))
-            # ★ 载入脚本库
+
+            # ★ 把 sketch.json 中 ImageObject 的 image_name 转为临时路径
+            sketch_data = json.loads(zf.read("sketch.json"))
+            for item in sketch_data:
+                if item.get("type") == "ImageObject":
+                    params = item.get("params", {})
+                    img_name = params.get("image_name")
+                    if img_name:
+                        params["path"] = os.path.join(
+                            self._temp_image_dir, img_name)
+                        params.pop("image_name", None)
+
+            self._load_state(sketch_data)
+
             if "script_libs.json" in names:
                 try:
                     self.script_libs = json.loads(zf.read("script_libs.json"))
@@ -500,13 +530,10 @@ class Document(QObject):
                     self.script_libs = {}
             else:
                 self.script_libs = {}
-                
             if "meta.data" in names:
                 self.meta = json.loads(zf.read("meta.data"))
-
-            if self.meta.get("theme") in _theme.theme_names():
-                _theme.set_theme(self.meta["theme"])
-                
+                if self.meta.get("theme") in _theme.theme_names():
+                    _theme.set_theme(self.meta["theme"])
             if "macros.json" in names:
                 try:
                     self.macros = json.loads(zf.read("macros.json"))
@@ -514,5 +541,4 @@ class Document(QObject):
                     self.macros = []
             else:
                 self.macros = []
-        # 载入后统一刷新表达式约束与依赖对象
-        self.refresh_variables()
+            self.refresh_variables()

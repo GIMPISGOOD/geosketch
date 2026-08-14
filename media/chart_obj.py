@@ -162,3 +162,176 @@ def draw_bar(p, obj, view):
         p.drawText(QRectF(plot.x() + i * slot, plot.bottom() + 2, slot, rect.height() * 0.15),
                    Qt.AlignmentFlag.AlignCenter, label)
     draw_media_decorations(p, obj, view)
+
+# ═══════════════════════════════════════════════════════
+#  折线统计图
+# ═══════════════════════════════════════════════════════
+@register_geo("LineChartObject")
+class LineChartObject(MediaObject):
+    def __init__(self, x, y, data=None, labels=None, colors=None,
+                 width=6.0, height=4.0):
+        super().__init__(x, y, width, height)
+        self.data = data if data is not None else [30.0, 50.0, 40.0, 70.0, 60.0]
+        n = len(self.data)
+        self.labels = labels or [f"项{i+1}" for i in range(n)]
+        self.colors = colors or [CHART_COLORS[0]]
+
+    def get_values(self):
+        return [_eval_value(v) for v in self.data]
+
+    def dump(self):
+        d = super().dump()
+        d.update({"data": self.data, "labels": self.labels,
+                  "colors": self.colors})
+        return d
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["x"], params["y"], params.get("data"),
+                   params.get("labels"), params.get("colors"),
+                   params.get("width", 6.0), params.get("height", 4.0))
+
+    def edit(self, canvas):
+        from media.pie_wizard import PieChartWizard
+        wiz = PieChartWizard(canvas, self.data, self.labels, self.colors)
+        if wiz.exec():
+            data, labels, colors = wiz.get_data()
+            self.data, self.labels, self.colors = data, labels, colors
+
+
+@register_renderer(LineChartObject)
+def draw_line_chart(p, obj, view):
+    rect = obj.screen_rect(view)
+    values = obj.get_values()
+    n = len(values)
+    if n == 0:
+        return
+    max_val = max(abs(v) for v in values) or 1.0
+    min_val = min(0.0, min(values))
+    span = (max_val - min_val) or 1.0
+
+    plot = QRectF(rect.x() + rect.width() * 0.06,
+                  rect.y() + rect.height() * 0.06,
+                  rect.width() * 0.88,
+                  rect.height() * 0.72)
+
+    color = QColor(obj.colors[0]) if obj.colors else QColor(CHART_COLORS[0])
+
+    # 折线
+    p.setPen(theme.pen(color, 2.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    pts = []
+    for i in range(n):
+        x = plot.x() + plot.width() * i / max(n - 1, 1) if n > 1 \
+            else plot.center().x()
+        y = plot.bottom() - (values[i] - min_val) / span * plot.height()
+        pt = QPointF(x, y)
+        pts.append(pt)
+        if i == 0:
+            path.moveTo(pt)
+        else:
+            path.lineTo(pt)
+    p.drawPath(path)
+
+    # 数据点
+    p.setBrush(theme.brush(color))
+    p.setPen(theme.pen(theme.BG_TOP, 1.5))
+    for pt in pts:
+        p.drawEllipse(pt, 4.0, 4.0)
+
+    # 底部标签
+    fh = max(int(rect.height() * 0.06), 8)
+    f = p.font()
+    f.setPixelSize(fh)
+    p.setFont(f)
+    p.setPen(theme.pen(theme.INK, 1))
+    slot = plot.width() / max(n, 1)
+    for i in range(n):
+        label = render_template(obj.labels[i]) if i < len(obj.labels) \
+            else f"项{i+1}"
+        p.drawText(QRectF(plot.x() + i * slot,
+                          plot.bottom() + 2, slot, rect.height() * 0.15),
+                   Qt.AlignmentFlag.AlignCenter, label)
+    draw_media_decorations(p, obj, view)
+
+
+# ═══════════════════════════════════════════════════════
+#  环形图（四等分 / 多等分）
+# ═══════════════════════════════════════════════════════
+@register_geo("DonutChartObject")
+class DonutChartObject(MediaObject):
+    def __init__(self, x, y, data=None, labels=None, colors=None,
+                 width=5.0, height=5.0, hole=0.55):
+        super().__init__(x, y, width, height)
+        self.data = data if data is not None else [25.0, 25.0, 25.0, 25.0]
+        n = len(self.data)
+        self.labels = labels or [f"项{i+1}" for i in range(n)]
+        self.colors = colors or [CHART_COLORS[i % len(CHART_COLORS)]
+                                 for i in range(n)]
+        self.hole = max(0.1, min(0.9, hole))
+
+    def get_values(self):
+        return [_eval_value(v) for v in self.data]
+
+    def dump(self):
+        d = super().dump()
+        d.update({"data": self.data, "labels": self.labels,
+                  "colors": self.colors, "hole": self.hole})
+        return d
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["x"], params["y"], params.get("data"),
+                   params.get("labels"), params.get("colors"),
+                   params.get("width", 5.0), params.get("height", 5.0),
+                   params.get("hole", 0.55))
+
+    def edit(self, canvas):
+        from media.pie_wizard import PieChartWizard
+        wiz = PieChartWizard(canvas, self.data, self.labels, self.colors)
+        if wiz.exec():
+            data, labels, colors = wiz.get_data()
+            self.data, self.labels, self.colors = data, labels, colors
+
+
+@register_renderer(DonutChartObject)
+def draw_donut(p, obj, view):
+    rect = obj.screen_rect(view)
+    values = obj.get_values()
+    total = sum(abs(v) for v in values) or 1.0
+    n = len(values)
+    if n == 0:
+        return
+
+    side = min(rect.width(), rect.height()) * 0.92
+    cx, cy = rect.center().x(), rect.center().y()
+    pie_sq = QRectF(cx - side / 2, cy - side / 2, side, side)
+
+    start = 0.0
+    for i in range(n):
+        span = abs(values[i]) / total * 360.0
+        color = obj.colors[i] if i < len(obj.colors) \
+            else CHART_COLORS[i % len(CHART_COLORS)]
+        p.setBrush(theme.brush(QColor(color)))
+        p.setPen(theme.pen(theme.BG_TOP, 1))
+        p.drawPie(pie_sq.toRect(), int(start * 16), int(span * 16))
+        start += span
+
+    # 挖空中心形成环形
+    hole_side = side * obj.hole
+    hole_sq = QRectF(cx - hole_side / 2, cy - hole_side / 2,
+                     hole_side, hole_side)
+    p.setBrush(theme.brush(theme.BG_TOP))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(hole_sq)
+
+    # 中心显示总数
+    p.setPen(theme.pen(theme.INK, 1))
+    f = p.font()
+    f.setPixelSize(max(int(hole_side * 0.22), 10))
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(hole_sq, Qt.AlignmentFlag.AlignCenter, f"{total:.0f}")
+
+    draw_media_decorations(p, obj, view)

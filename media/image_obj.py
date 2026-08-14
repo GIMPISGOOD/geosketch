@@ -41,25 +41,23 @@ class ImageObject(MediaObject):
         self.height = max(new_width * self.aspect, 0.5)
 
     def dump(self):
+        import os
         d = super().dump()
-        d["path"] = self.path
+        # ★ 内嵌图片：只存文件名，不存绝对路径
+        ext = os.path.splitext(self.path)[1] if self.path else ".png"
+        d["image_name"] = f"{self.id}{ext}"
         return d
 
     @classmethod
     def build(cls, parents, params):
+        path = params.get("path", "")
         obj = cls(
-            params["x"],
-            params["y"],
-            params["path"],
-            params.get("width"),
-            params.get("height")
+            params["x"], params["y"], path,
+            params.get("width"), params.get("height")
         )
-
         obj.rotation = params.get("rotation", 0.0)
-
         if obj.width > 0:
             obj.aspect = obj.height / obj.width
-
         return obj
 
 

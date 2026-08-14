@@ -5,6 +5,7 @@ from PySide6.QtWidgets import QFileDialog
 from core.registry import register_tool
 from tools.base import Tool
 
+from media.chart_obj import LineChartObject, DonutChartObject
 from media.image_obj import ImageObject
 from media.table_obj import TableObject
 from media.chart_obj import PieChartObject, BarChartObject
@@ -60,4 +61,19 @@ class InsertPieTool(Tool):
 class InsertBarTool(Tool):
     def press(self, canvas, wpt, hit):
         obj = BarChartObject(wpt[0], wpt[1])
+        _finish_insert(canvas, obj)
+        
+@register_tool(name="插入折线图", order=5, panel="insert", icon="insert_bar",
+               hint="点击画布插入折线统计图（点 ✎ 编辑数据）")
+class InsertLineTool(Tool):
+    def press(self, canvas, wpt, hit):
+        obj = LineChartObject(wpt[0], wpt[1])
+        _finish_insert(canvas, obj)
+
+
+@register_tool(name="插入环形图", order=6, panel="insert", icon="insert_pie",
+               hint="点击画布插入环形图 / 四等分图（点 ✎ 编辑数据）")
+class InsertDonutTool(Tool):
+    def press(self, canvas, wpt, hit):
+        obj = DonutChartObject(wpt[0], wpt[1])
         _finish_insert(canvas, obj)
