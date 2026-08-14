@@ -358,7 +358,7 @@ class Document(QObject):
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
         from geo.function_curve import FunctionCurve
-        # ★ 优化：使用类型缓存
+        # ★ 使用类型缓存，避免全量扫描 objects
         for obj in self.get_typed("FunctionCurve"):
             obj.invalidate_cache()
         # ★ 新增：隐函数曲线缓存失效
@@ -371,7 +371,7 @@ class Document(QObject):
             moved.extend(eo.moved_points())
         if moved:
             self.recompute_silent(moved)
-        self.changed.emit()               # ★ 统一 emit 一次
+        self.changed.emit()
 
     @contextmanager
     def action(self):

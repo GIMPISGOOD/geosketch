@@ -11,6 +11,7 @@ from ui.math import draw_math
 
 # 分页定义
 PAGES = [
+    ("all", "全部"),
     ("explicit", "显函数"),
     ("parametric", "参数"),
     ("polar", "极坐标"),
@@ -86,7 +87,7 @@ class FunctionRow(QWidget):
     def _get_label(func):
         from geo.implicit_curve import ImplicitCurve
         if isinstance(func, ImplicitCurve):
-            return f"{func.expr} = 0"
+            return func.expr
         if hasattr(func, "default_label"):
             return func.default_label()
         return getattr(func, "expr", "")
@@ -114,7 +115,7 @@ class FunctionEditorWidget(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
-        self._current_page = "explicit"
+        self._current_page = "all"
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 9, 8, 9)
@@ -177,7 +178,7 @@ class FunctionEditorWidget(QWidget):
         self._scroll.setWidget(self._content)
         outer.addWidget(self._scroll, 1)
 
-        self._switch_page("explicit")
+        self._switch_page("all")
 
     def _switch_page(self, kind):
         self._current_page = kind
@@ -216,16 +217,16 @@ class FunctionEditorWidget(QWidget):
 
         # 按当前分页填充
         from geo.implicit_curve import ImplicitCurve
-        funcs = []
         for o in self.canvas.doc.objects:
-            if self._current_page == "implicit":
+            if self._current_page == "all":
+                if isinstance(o, (FunctionCurve, ImplicitCurve)):
+                    self._func_rows.addWidget(FunctionRow(o, self))
+            elif self._current_page == "implicit":
                 if isinstance(o, ImplicitCurve):
-                    funcs.append(o)
+                    self._func_rows.addWidget(FunctionRow(o, self))
             else:
                 if isinstance(o, FunctionCurve) and o.kind == self._current_page:
-                    funcs.append(o)
-        for f in funcs:
-            self._func_rows.addWidget(FunctionRow(f, self))
+                    self._func_rows.addWidget(FunctionRow(o, self))
 
     # ───────── 操作 ─────────
     def new_function(self):
@@ -238,23 +239,12 @@ class FunctionEditorWidget(QWidget):
                 self.refresh()
 
     def edit(self, f):
-        from geo.implicit_curve import ImplicitCurve
-        if isinstance(f, ImplicitCurve):
-            from PySide6.QtWidgets import QInputDialog
-            expr, ok = QInputDialog.getText(
-                self, "隐函数", "F(x,y) = 0：", text=f.expr)
-            if ok and expr.strip():
-                f.expr = expr.strip()
-                f.invalidate_cache()
-                self.canvas.doc.changed.emit()
-                self.refresh()
-        else:
-            from ui.formula_editor import FormulaEditor
-            dlg = FormulaEditor(self.canvas, f, self)
-            if dlg.exec():
-                dlg.build_function()
-                self.canvas.doc.changed.emit()
-                self.refresh()
+        from ui.formula_editor import FormulaEditor
+        dlg = FormulaEditor(self.canvas, f, self)
+        if dlg.exec():
+            dlg.build_function()
+            self.canvas.doc.changed.emit()
+            self.refresh()
 
     def recolor(self, f):
         c = QColorDialog.getColor(QColor(getattr(f, "color", "#1971c2")),

@@ -1,18 +1,16 @@
-"""函数编辑器：Desmos 风格 —— 虚拟数学键盘 + 实时数学预览。"""
+"""函数编辑器：支持 显函数/参数方程/极坐标/隐函数，虚拟键盘含 y、=、θ。"""
 from PySide6.QtCore import Qt, QEvent, QPointF
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLabel, QLineEdit, QRadioButton, QButtonGroup,
                                QCheckBox, QDoubleSpinBox, QPushButton,
                                QColorDialog, QDialogButtonBox, QWidget)
-
 from geo.function_curve import FunctionCurve, PALETTE
 from ui import theme
 from ui.math import draw_math
-
+from geo.implicit_curve import ImplicitCurve, parse_equation
 
 class MathPreview(QWidget):
-    """实时把表达式渲染成排版后的数学式。"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
@@ -34,14 +32,22 @@ class MathPreview(QWidget):
 
 
 class FormulaKeypad(QWidget):
-    """Desmos 风格虚拟数学键盘：按键不抢焦点，直接插入当前输入框。"""
+    """虚拟键盘：包含 x, y, t, θ, = 等隐函数所需按键。"""
     KEYS = [
-        ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"), ("a⁄b", "/", "op"), ("⌫", None, "util"),
-        ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"), ("×", "*", "op"), ("AC", None, "util"),
-        ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"), ("−", "-", "op"), ("sin(", "sin(", "fn"),
-        ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"), ("(", "(", "op"), ("cos(", "cos(", "fn"),
-        ("x", "x", "var"), ("t", "t", "var"), ("^", "^", "op"), (")", ")", "op"), ("tan(", "tan(", "fn"),
-        ("π", "π", "const"), ("e", "e", "const"), ("√(", "sqrt(", "fn"), ("ln(", "ln(", "fn"), ("abs(", "abs(", "fn"),
+        ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"),
+        ("÷", "/", "op"), ("⌫", None, "util"),
+        ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"),
+        ("×", "*", "op"), ("AC", None, "util"),
+        ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"),
+        ("−", "-", "op"), ("sin(", "sin(", "fn"),
+        ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"),
+        ("=", "=", "eq"), ("cos(", "cos(", "fn"),
+        ("x", "x", "var"), ("y", "y", "var"), ("t", "t", "var"),
+        ("θ", "θ", "var"), ("tan(", "tan(", "fn"),
+        ("(", "(", "op"), (")", ")", "op"), ("^", "^", "op"),
+        ("√(", "sqrt(", "fn"), ("π", "π", "const"),
+        ("e", "e", "const"), ("ln(", "ln(", "fn"), ("|x|", "abs(", "fn"),
+        ("", "", "empty"), ("", "", "empty"),
     ]
 
     def __init__(self, target_getter, parent=None):
@@ -52,9 +58,11 @@ class FormulaKeypad(QWidget):
         grid.setSpacing(5)
         grid.setContentsMargins(10, 10, 10, 10)
         for idx, (label, ins, cls) in enumerate(self.KEYS):
+            if cls == "empty":
+                continue
             b = QPushButton(label)
             b.setProperty("keyclass", cls)
-            b.setFixedHeight(38)
+            b.setFixedHeight(36)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             if ins is None:
@@ -68,23 +76,36 @@ class FormulaKeypad(QWidget):
         self.setStyleSheet(self._style())
 
     def _style(self):
-        ink, sub = theme.INK.name(), theme.SUBINK.name()
+        ink = theme.INK.name()
+        sub = theme.SUBINK.name()
         accent = theme.ACCENT.name()
         return f"""
-        #formulaKeypad QPushButton {{
-            border: none; border-radius: 8px;
-            font-size: 15px; font-weight: 600; color: {ink};
-            background: rgba(120,140,170,0.12);
-        }}
-        #formulaKeypad QPushButton:hover {{ background: rgba(120,140,170,0.28); }}
-        #formulaKeypad QPushButton:pressed {{ background: {accent}; color: #ffffff; }}
-        #formulaKeypad QPushButton[keyclass="op"] {{ background: rgba(25,113,194,0.14); color: {accent}; }}
-        #formulaKeypad QPushButton[keyclass="op"]:hover {{ background: rgba(25,113,194,0.30); }}
-        #formulaKeypad QPushButton[keyclass="fn"] {{ background: rgba(90,105,130,0.10); color: {sub}; font-size: 13px; }}
-        #formulaKeypad QPushButton[keyclass="var"] {{ background: rgba(240,140,0,0.16); color: #e8590c; }}
-        #formulaKeypad QPushButton[keyclass="const"] {{ background: rgba(47,158,68,0.16); color: #2f9e44; }}
-        #formulaKeypad QPushButton[keyclass="util"] {{ background: rgba(230,73,128,0.12); color: {sub}; }}
-        """
+#formulaKeypad QPushButton {{
+    border: none; border-radius: 7px;
+    font-size: 14px; font-weight: 600; color: {ink};
+    background: rgba(120,140,170,0.12);
+}}
+#formulaKeypad QPushButton:hover {{ background: rgba(120,140,170,0.28); }}
+#formulaKeypad QPushButton:pressed {{ background: {accent}; color: #fff; }}
+#formulaKeypad QPushButton[keyclass="op"] {{
+    background: rgba(25,113,194,0.14); color: {accent};
+}}
+#formulaKeypad QPushButton[keyclass="fn"] {{
+    background: rgba(90,105,130,0.10); color: {sub}; font-size: 12px;
+}}
+#formulaKeypad QPushButton[keyclass="var"] {{
+    background: rgba(240,140,0,0.16); color: #e8590c;
+}}
+#formulaKeypad QPushButton[keyclass="eq"] {{
+    background: rgba(47,158,68,0.18); color: #2f9e44; font-size: 16px;
+}}
+#formulaKeypad QPushButton[keyclass="const"] {{
+    background: rgba(47,158,68,0.16); color: #2f9e44;
+}}
+#formulaKeypad QPushButton[keyclass="util"] {{
+    background: rgba(230,73,128,0.12); color: {sub};
+}}
+"""
 
     def _insert(self, text):
         le = self._get_target()
@@ -109,20 +130,22 @@ class FormulaEditor(QDialog):
         self.func = func
         self._active_field = None
         self.setWindowTitle("编辑函数" if func else "新建函数")
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(460)
         self._build()
         self._load()
 
     def _build(self):
         root = QVBoxLayout(self)
         root.setSpacing(10)
+
+        # 类型选择
         kind_row = QHBoxLayout()
         self._kind_group = QButtonGroup(self)
         self._kinds = {}
-        for key, label in [("explicit", "显函数 y=f(x)"),
-                           ("parametric", "参数方程"),
-                           ("polar", "极坐标 r=f(θ)"),
-                           ("implicit", "隐函数 F(x,y)=0")]:
+        for key, label in [("explicit", "y=f(x)"),
+                           ("parametric", "参数"),
+                           ("polar", "极坐标"),
+                           ("implicit", "隐函数")]:
             rb = QRadioButton(label)
             self._kind_group.addButton(rb)
             self._kinds[key] = rb
@@ -130,40 +153,55 @@ class FormulaEditor(QDialog):
             kind_row.addWidget(rb)
         root.addLayout(kind_row)
 
+        # 表达式输入
         self._expr1_lbl = QLabel("y =")
         self._expr1 = QLineEdit()
         self._expr1.installEventFilter(self)
         self._expr1.textChanged.connect(self._update_preview)
-        row1 = QHBoxLayout(); row1.addWidget(self._expr1_lbl); row1.addWidget(self._expr1)
+        row1 = QHBoxLayout()
+        row1.addWidget(self._expr1_lbl)
+        row1.addWidget(self._expr1)
         root.addLayout(row1)
 
+        # 第二表达式（参数方程用）
         self._expr2_row = QHBoxLayout()
         self._expr2_lbl = QLabel("y(t) =")
         self._expr2 = QLineEdit()
         self._expr2.installEventFilter(self)
         self._expr2.textChanged.connect(self._update_preview)
-        self._expr2_row.addWidget(self._expr2_lbl); self._expr2_row.addWidget(self._expr2)
+        self._expr2_row.addWidget(self._expr2_lbl)
+        self._expr2_row.addWidget(self._expr2)
         root.addLayout(self._expr2_row)
 
+        # 预览
         self._preview = MathPreview()
         root.addWidget(self._preview)
 
+        # 键盘
         self._keypad = FormulaKeypad(lambda: self._active_field or self._expr1)
         root.addWidget(self._keypad)
 
+        # 定义域
         dom = QHBoxLayout()
-        self._auto_dom = QCheckBox("自动（跟随视窗）")
+        self._auto_dom = QCheckBox("自动")
         self._auto_dom.toggled.connect(self._on_auto_toggled)
         dom.addWidget(self._auto_dom)
         dom.addWidget(QLabel("从"))
-        self._dom_a = QDoubleSpinBox(); self._dom_a.setRange(-1e6, 1e6); self._dom_a.setDecimals(3); self._dom_a.setValue(0)
+        self._dom_a = QDoubleSpinBox()
+        self._dom_a.setRange(-1e6, 1e6)
+        self._dom_a.setDecimals(3)
+        self._dom_a.setValue(0)
         dom.addWidget(self._dom_a)
         dom.addWidget(QLabel("到"))
-        self._dom_b = QDoubleSpinBox(); self._dom_b.setRange(-1e6, 1e6); self._dom_b.setDecimals(3); self._dom_b.setValue(6.283)
+        self._dom_b = QDoubleSpinBox()
+        self._dom_b.setRange(-1e6, 1e6)
+        self._dom_b.setDecimals(3)
+        self._dom_b.setValue(6.283)
         dom.addWidget(self._dom_b)
         dom.addStretch(1)
         root.addLayout(dom)
 
+        # 颜色
         crow = QHBoxLayout()
         crow.addWidget(QLabel("颜色"))
         self._color = QColor(self.func.color if self.func else PALETTE[0])
@@ -176,7 +214,9 @@ class FormulaEditor(QDialog):
         crow.addStretch(1)
         root.addLayout(crow)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        # 确认/取消
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
@@ -187,17 +227,23 @@ class FormulaEditor(QDialog):
         return super().eventFilter(obj, ev)
 
     def _load(self):
+        from geo.implicit_curve import ImplicitCurve
         f = self.func
         if f:
-            self._kinds[f.kind].setChecked(True)
-            self._expr1.setText(f.expr)
-            self._expr2.setText(f.expr2)
-            if f.domain:
-                self._auto_dom.setChecked(False)
-                self._dom_a.setValue(f.domain[0])
-                self._dom_b.setValue(f.domain[1])
+            if isinstance(f, ImplicitCurve):
+                self._kinds["implicit"].setChecked(True)
+                self._expr1.setText(f.expr)
             else:
-                self._auto_dom.setChecked(True)
+                self._kinds[f.kind].setChecked(True)
+                self._expr1.setText(f.expr)
+                self._expr2.setText(f.expr2)
+                if f.domain:
+                    self._auto_dom.setChecked(False)
+                    self._dom_a.setValue(f.domain[0])
+                    self._dom_b.setValue(f.domain[1])
+                else:
+                    self._auto_dom.setChecked(True)
+            self._color = QColor(f.color)
         else:
             self._kinds["explicit"].setChecked(True)
             self._auto_dom.setChecked(True)
@@ -213,7 +259,6 @@ class FormulaEditor(QDialog):
     def _on_kind_changed(self, *a):
         kind = self._current_kind()
         is_param = (kind == "parametric")
-        is_implicit = (kind == "implicit")
         for i in range(self._expr2_row.count()):
             item = self._expr2_row.itemAt(i)
             if item is not None:
@@ -231,10 +276,11 @@ class FormulaEditor(QDialog):
             self._auto_dom.setVisible(False)
         elif kind == "implicit":
             self._expr1_lbl.setText("F(x,y) =")
+            self._expr1.setPlaceholderText("如 x^2+y^2=1 或 sin(x)*cos(y)=0.5")
             self._auto_dom.setVisible(False)
         self._on_auto_toggled()
         self._update_preview()
-        
+
     def _on_auto_toggled(self, *a):
         auto = self._auto_dom.isChecked() and self._current_kind() == "explicit"
         self._dom_a.setEnabled(not auto)
@@ -251,7 +297,7 @@ class FormulaEditor(QDialog):
         elif kind == "polar":
             self._preview.set_text(f"r = {e1}" if e1 else "")
         elif kind == "implicit":
-            self._preview.set_text(f"{e1} = 0" if e1 else "")
+            self._preview.set_text(e1 if e1 else "")
 
     def _pick_color(self):
         c = QColorDialog.getColor(self._color, self, "选择曲线颜色")
@@ -261,24 +307,28 @@ class FormulaEditor(QDialog):
 
     def _update_color_btn(self):
         self._color_btn.setStyleSheet(
-            f"background:{self._color.name()};border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
+            f"background:{self._color.name()};"
+            f"border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
 
     def build_function(self):
+        from geo.implicit_curve import ImplicitCurve
         kind = self._current_kind()
         e1 = self._expr1.text().strip()
         e2 = self._expr2.text().strip()
 
+        # ★ 隐函数
         if kind == "implicit":
             if not e1:
                 return None
-            from geo.implicit_curve import ImplicitCurve
             if self.func and isinstance(self.func, ImplicitCurve):
                 self.func.expr = e1
+                self.func._resolved_expr = parse_equation(e1)
                 self.func.color = self._color.name()
                 self.func.invalidate_cache()
                 return self.func
             return ImplicitCurve(e1, color=self._color.name())
 
+        # 其他类型
         if not e1 or (kind == "parametric" and not e2):
             return None
         if self._auto_dom.isChecked() and kind == "explicit":
@@ -288,7 +338,7 @@ class FormulaEditor(QDialog):
             if a > b:
                 a, b = b, a
             domain = (a, b)
-        if self.func:
+        if self.func and not isinstance(self.func, ImplicitCurve):
             f = self.func
             f.kind, f.expr, f.expr2, f.domain = kind, e1, e2, domain
             f.color = self._color.name()

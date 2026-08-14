@@ -383,36 +383,59 @@ class PropertyPanel(QWidget):
     def _get_type_label(self, obj: Any) -> str:
         name = type(obj).__name__
         cn: dict[str, str] = {
+            # 点类
             "FreePoint": "自由点",
             "PointOnObject": "吸附点",
             "IntersectPoint": "交点",
             "DivisionPoint": "等分点",
-            "Segment": "线段",
-            "Circle": "圆",
-            "ExprCircle": "表达式圆",
-            "ExprSegment": "表达式线段",
-            "ExprAngle": "表达式角度",
+            "PolygonVertex": "多边形顶点",
+            "Incenter": "内心",
+            "Centroid": "重心",
             "ExprPoint": "表达式点",
+            "TransformPoint": "变换点",
+            "IterPoint": "迭代点",
+            "CircleAxisPoint": "圆轴点",
+            # 线/面类
+            "Segment": "线段",
             "Line": "直线",
             "Ray": "射线",
-            "RegularPolygon": "正多边形",
+            "ParallelLine": "平行线",
+            "PerpLine": "垂线",
+            "AngleBisector": "角平分线",
+            "AngleDivLine": "等分角线",
+            "PerpBisector": "中垂线",
+            "DirectedLine": "方向直线",
+            # 圆/曲线类
+            "Circle": "圆",
+            "ThreePointCircle": "过三点圆",
+            "ExprCircle": "表达式圆",
+            "InvertedCircle": "反演圆",
             "Ellipse": "椭圆",
+            "RegularPolygon": "正多边形",
             "CubicBezier": "贝塞尔曲线",
             "FunctionCurve": "函数曲线",
+            "ImplicitCurve": "隐函数曲线",
             "ChainFill": "链式填充",
+            # 媒体/标注类
             "TextObject": "文本",
             "ScriptButtonObject": "脚本按钮",
             "TableObject": "表格",
             "PieChartObject": "饼图",
             "BarChartObject": "柱状图",
+            "LineChartObject": "折线图",
+            "DonutChartObject": "环形图",
             "ImageObject": "图片",
             "InkStroke": "墨迹",
+            # 度量/约束/变换类
             "Measure": "度量",
             "AngleMeasure": "角度",
             "RatioMeasure": "比例",
-            "TransformPoint": "变换点",
-            "IterPoint": "迭代点",
+            "RegionMeasure": "区域度量",
+            "ExprSegment": "表达式线段",
+            "ExprAngle": "表达式角度",
+            "TransformDriver": "变换驱动器",
         }
+        return cn.get(name, name)
         return cn.get(name, name)
 
     # ══════════════════════════════════════════

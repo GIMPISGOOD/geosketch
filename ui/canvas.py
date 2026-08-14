@@ -80,7 +80,22 @@ class Canvas(QWidget):
         from geo.function_sampler import get_sampler
         self._sampler = get_sampler()
         self._sampler.sampled.connect(self._on_function_sampled)
-
+        # ★ 隐函数采样器信号
+        from geo.implicit_sampler import get_implicit_sampler
+        self._implicit_sampler = get_implicit_sampler()
+        self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
+        
+    def _on_implicit_sampled(self, curve_id, segments):
+        """隐函数采样完成 → 更新缓存 → 触发重绘。"""
+        from geo.implicit_curve import ImplicitCurve
+        store = get_store()
+        for obj in self.doc.objects:
+            if isinstance(obj, ImplicitCurve) and obj.id == curve_id:
+                domain = obj.get_domain(self)
+                obj.update_cache(segments, store.version, domain)
+                self.update()
+                break
+                    
     def _on_function_sampled(self, curve_id, points):
         """子线程采样完成 → 更新对应曲线的缓存 → 触发重绘。"""
         from geo.function_curve import FunctionCurve
@@ -544,7 +559,15 @@ class Canvas(QWidget):
             if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
                 menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
                 menu.addSeparator()
-
+            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
+                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
+                menu.addSeparator()
+                
+            # ★ 新增：函数曲线与隐函数的右键编辑入口
+            if type(hit).__name__ in ("FunctionCurve", "ImplicitCurve"):
+                menu.addAction("✎ 编辑函数", lambda: self._edit_function_object(hit))
+                menu.addSeparator()
+                
         # ---------- 选中对象通用操作 ----------
         if selected:
             menu.addAction("重命名…", lambda: self._rename_objects(selected))
@@ -588,7 +611,15 @@ class Canvas(QWidget):
             super().contextMenuEvent(ev)
             
     # ================= 右键菜单辅助 =================
-
+    
+    def _edit_function_object(self, obj):
+        """右键菜单：编辑函数曲线 / 隐函数。"""
+        from ui.formula_editor import FormulaEditor
+        dlg = FormulaEditor(self, obj, self)
+        if dlg.exec():
+            dlg.build_function()
+            self.doc.changed.emit()
+            
     def _doc_action(self, fn):
         """在撤销组中执行一个文档动作。"""
         self.doc.begin_action()
