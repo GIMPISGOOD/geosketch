@@ -64,7 +64,11 @@ class ImplicitCurve(GeoObject):
         vd = get_store().as_dict()
         vd["x"] = x
         vd["y"] = y
-        return evaluate(self._resolved_expr, vd)
+        v = evaluate(self._resolved_expr, vd)
+        # ★ 修复：复数结果视为无效（负数分数次幂、sqrt负数等）
+        if isinstance(v, complex):
+            return None
+        return v
 
     def _marching_squares(self):
         x0, x1, y0, y1 = self.domain
@@ -79,7 +83,11 @@ class ImplicitCurve(GeoObject):
             for j in range(n + 1):
                 xx = x0 + j * dx
                 v = self._eval(xx, yy)
-                grid[i][j] = v if v is not None else 1e18
+                # ★ 修复：None / 复数 / 非有限值 均视为无效
+                if v is None or isinstance(v, complex) or not math.isfinite(v):
+                    grid[i][j] = 1e18
+                else:
+                    grid[i][j] = v
 
         segments = []
         for i in range(n):

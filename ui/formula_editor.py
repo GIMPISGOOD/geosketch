@@ -320,13 +320,22 @@ class FormulaEditor(QDialog):
         if kind == "implicit":
             if not e1:
                 return None
+            from geo.implicit_curve import ImplicitCurve, parse_equation
+
+            # ★ 修复：读取用户设置的域，构造方形域 (x0, x1, y0, y1)
+            a, b = self._dom_a.value(), self._dom_b.value()
+            if a > b:
+                a, b = b, a
+            domain = (a, b, a, b)
+            
             if self.func and isinstance(self.func, ImplicitCurve):
                 self.func.expr = e1
                 self.func._resolved_expr = parse_equation(e1)
                 self.func.color = self._color.name()
+                self.func.domain = domain  
                 self.func.invalidate_cache()
                 return self.func
-            return ImplicitCurve(e1, color=self._color.name())
+            return ImplicitCurve(e1, domain=domain, color=self._color.name())
 
         # 其他类型
         if not e1 or (kind == "parametric" and not e2):
