@@ -318,3 +318,21 @@ class ObjectFactory:
 
         obj = FunctionCurve("polar", expr, "", (start, end))
         return self.interp.add_created_object(obj)
+    
+    # -------------------- 隐函数曲线 --------------------
+    def implicit_curve(self, expr, domain=None, color=None):
+        """创建隐函数曲线 F(x,y)=0。
+        expr: 方程字符串，如 "x^2+y^2=1" 或 "sin(x)*cos(y)=0.5"
+        domain: 可选 (x0, x1, y0, y1)，默认 (-5, 5, -5, 5)
+        color: 可选颜色字符串
+        """
+        from geo.implicit_curve import ImplicitCurve
+        expr = self._text(expr)
+        if domain is not None:
+            if isinstance(domain, (list, tuple)) and len(domain) == 4:
+                domain = tuple(self._num(v) for v in domain)
+            else:
+                domain = None
+        color_str = self._text(color) if color is not None else None
+        obj = ImplicitCurve(expr, domain=domain, color=color_str)
+        return self.interp.add_created_object(obj)

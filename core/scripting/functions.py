@@ -79,6 +79,11 @@ def build_global_env(interp):
         "function": factory.function,
         "parametric": factory.parametric,
         "polar": factory.polar,
+        
+        # 隐函数曲线
+        "implicit_curve": factory.implicit_curve,
+        "隐函数": factory.implicit_curve,
+        "implicit": factory.implicit_curve,
     }
 
     return env

@@ -1,9 +1,12 @@
-"""隐函数曲线：F(x,y)=0 的等值线。"""
+"""隐函数曲线：F(x,y) = 0 的等值线绘制（Marching Squares）。
+支持变量联动，表达式可含滑杆变量。
+"""
 import math
+from typing import List, Tuple, Optional
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QPainterPath
 from core.registry import register_geo, register_renderer
-from core.variables import get_store
+from core.variables import evaluate, get_store
 from geo.base import GeoObject
 from ui import theme
 
@@ -18,8 +21,8 @@ def next_color():
     return c
 
 
-def parse_equation(expr):
-    """'x^2+y^2=1' → '(x^2+y^2)-(1)'；无等号则原样返回。"""
+def parse_equation(expr: str) -> str:
+    """把 'x^2+y^2=1' 转为 '(x^2+y^2)-(1)'；无等号则原样返回。"""
     expr = expr.strip()
     if "=" in expr:
         parts = expr.split("=", 1)
@@ -29,74 +32,131 @@ def parse_equation(expr):
 
 @register_geo("ImplicitCurve")
 class ImplicitCurve(GeoObject):
+    """隐函数曲线 F(x,y)=0。"""
+
     def __init__(self, expr="x^2+y^2=1", domain=None,
-                 color=None, resolution=100, label_text=None):
+                 color=None, resolution=80, label_text=None):
         super().__init__(parents=())
         self.expr = expr
         self._resolved_expr = parse_equation(expr)
-        self.domain = domain
+        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)  # x0, x1, y0, y1
         self.color = color or next_color()
-        self.resolution = max(30, min(250, resolution))
+        self.resolution = max(30, min(200, resolution))
         self.label_text = label_text
-        self._cached_segments = []
-        self._cache_version = -1
-        self._cache_domain = (None, None, None, None)
-        self._cache_dirty = True
+        self._segments: List[Tuple[float, float, float, float]] = []
+        self._cache_version: int = -1
+        self._cache_dirty: bool = True
+        self.recompute()
 
     def invalidate_cache(self):
         self._cache_dirty = True
 
-    def _cache_valid(self, var_version, domain):
-        return (not self._cache_dirty
-                and self._cache_version == var_version
-                and self._cache_domain == domain
-                and len(self._cached_segments) > 0)
-
-    def update_cache(self, segments, var_version, domain):
-        self._cached_segments = segments
-        self._cache_version = var_version
-        self._cache_domain = domain
-        self._cache_dirty = False
-
-    def get_domain(self, view):
-        if self.domain:
-            return self.domain
-        x0, _ = view.to_world(QPointF(0, 0))
-        x1, _ = view.to_world(QPointF(view.width(), 0))
-        _, y0 = view.to_world(QPointF(0, view.height()))
-        _, y1 = view.to_world(QPointF(0, 0))
-        return (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
-
-    def get_cached_or_request(self, view):
-        domain = self.get_domain(view)
+    def recompute(self):
         store = get_store()
-        var_version = store.version
-        if self._cache_valid(var_version, domain):
-            return self._cached_segments, True
-        from geo.implicit_sampler import get_implicit_sampler
-        get_implicit_sampler().submit(
-            curve_id=self.id,
-            expr=self._resolved_expr,
-            domain=domain,
-            n=self.resolution,
-            var_snapshot=store.as_dict()
-        )
-        return self._cached_segments, False
+        if not self._cache_dirty and store.version == self._cache_version:
+            return
+        self._segments = self._marching_squares()
+        self._cache_version = store.version
+        self._cache_dirty = False
+        self.exists = len(self._segments) > 0
+
+    def _eval(self, x, y):
+        vd = get_store().as_dict()
+        vd["x"] = x
+        vd["y"] = y
+        return evaluate(self._resolved_expr, vd)
+
+    def _marching_squares(self):
+        x0, x1, y0, y1 = self.domain
+        n = self.resolution
+        dx = (x1 - x0) / n
+        dy = (y1 - y0) / n
+
+        # 采样网格
+        grid = [[0.0] * (n + 1) for _ in range(n + 1)]
+        for i in range(n + 1):
+            yy = y0 + i * dy
+            for j in range(n + 1):
+                xx = x0 + j * dx
+                v = self._eval(xx, yy)
+                grid[i][j] = v if v is not None else 1e18
+
+        segments = []
+        for i in range(n):
+            y_b = y0 + i * dy
+            y_t = y_b + dy
+            row0 = grid[i]
+            row1 = grid[i + 1]
+            for j in range(n):
+                v00 = row0[j]
+                v10 = row0[j + 1]
+                v11 = row1[j + 1]
+                v01 = row1[j]
+
+                if v00 > 1e17 or v10 > 1e17 or v11 > 1e17 or v01 > 1e17:
+                    continue
+
+                case = 0
+                if v00 > 0: case |= 1
+                if v10 > 0: case |= 2
+                if v11 > 0: case |= 4
+                if v01 > 0: case |= 8
+
+                if case == 0 or case == 15:
+                    continue
+
+                x_l = x0 + j * dx
+                x_r = x_l + dx
+
+                pts = []
+                if (v00 > 0) != (v10 > 0):
+                    d = v00 - v10
+                    t = v00 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l + t * dx, y_b))
+                if (v10 > 0) != (v11 > 0):
+                    d = v10 - v11
+                    t = v10 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_r, y_b + t * dy))
+                if (v01 > 0) != (v11 > 0):
+                    d = v01 - v11
+                    t = v01 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l + t * dx, y_t))
+                if (v00 > 0) != (v01 > 0):
+                    d = v00 - v01
+                    t = v00 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l, y_b + t * dy))
+
+                if len(pts) == 2:
+                    segments.append((pts[0][0], pts[0][1],
+                                     pts[1][0], pts[1][1]))
+                elif len(pts) == 4:
+                    center = (v00 + v10 + v11 + v01) * 0.25
+                    if center > 0:
+                        segments.append((pts[0][0], pts[0][1],
+                                         pts[1][0], pts[1][1]))
+                        segments.append((pts[2][0], pts[2][1],
+                                         pts[3][0], pts[3][1]))
+                    else:
+                        segments.append((pts[0][0], pts[0][1],
+                                         pts[3][0], pts[3][1]))
+                        segments.append((pts[1][0], pts[1][1],
+                                         pts[2][0], pts[2][1]))
+        return segments
 
     def distance_to(self, x, y):
-        if not self._cached_segments:
+        if not self._segments:
             return None
         best = float("inf")
-        for x1, y1, x2, y2 in self._cached_segments:
-            dx, dy = x2 - x1, y2 - y1
-            denom = dx * dx + dy * dy
+        for x1, y1, x2, y2 in self._segments:
+            ddx, ddy = x2 - x1, y2 - y1
+            denom = ddx * ddx + ddy * ddy
             if denom < 1e-12:
                 d = math.hypot(x - x1, y - y1)
             else:
-                t = max(0.0, min(1.0, ((x - x1) * dx + (y - y1) * dy) / denom))
-                d = math.hypot(x - (x1 + t * dx), y - (y1 + t * dy))
-            if d < best:
-                best = d
+                t = max(0.0, min(1.0,
+                                 ((x - x1) * ddx + (y - y1) * ddy) / denom))
+                d = math.hypot(x - (x1 + t * ddx), y - (y1 + t * ddy))
+            best = min(best, d)
         return best
 
     def default_label(self):
@@ -104,7 +164,7 @@ class ImplicitCurve(GeoObject):
 
     def dump(self):
         return {"expr": self.expr,
-                "domain": list(self.domain) if self.domain else None,
+                "domain": list(self.domain),
                 "color": self.color,
                 "resolution": self.resolution,
                 "label_text": self.label_text}
@@ -114,24 +174,19 @@ class ImplicitCurve(GeoObject):
         return cls(params.get("expr", "x^2+y^2=1"),
                    tuple(params["domain"]) if params.get("domain") else None,
                    params.get("color"),
-                   params.get("resolution", 100),
+                   params.get("resolution", 80),
                    params.get("label_text"))
 
 
 @register_renderer(ImplicitCurve)
 def draw_implicit(p, obj, view):
-    if not obj.exists:
+    if not obj.exists or not obj._segments:
         return
     color = theme.SELECTED if obj.selected else obj.color
     p.setPen(theme.pen(color, 2.0))
     p.setBrush(Qt.BrushStyle.NoBrush)
-
-    cached, fresh = obj.get_cached_or_request(view)
-    if not cached:
-        return
-
     path = QPainterPath()
-    for x1, y1, x2, y2 in cached:
+    for x1, y1, x2, y2 in obj._segments:
         sp1 = view.to_screen(x1, y1)
         sp2 = view.to_screen(x2, y2)
         path.moveTo(sp1)

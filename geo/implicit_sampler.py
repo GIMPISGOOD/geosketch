@@ -4,20 +4,18 @@ from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition
 from core.variables import evaluate
 
 
-def _marching_squares(expr, var_snapshot, x0, x1, y0, y1, nx, ny):
-    """Marching Squares 求 F(x,y)=0 的等值线线段。"""
+def _marching_squares(fast, vd, x0, x1, y0, y1, nx, ny):
     dx = (x1 - x0) / nx
     dy = (y1 - y0) / ny
 
-    # 采样网格
-    vd = dict(var_snapshot)
+    # ★ 确保网格采样正确
     grid = [[0.0] * (nx + 1) for _ in range(ny + 1)]
     for i in range(ny + 1):
-        vd["y"] = y0 + i * dy
+        vd["y"] = y0 + i * dy          # ← 必须设置 y
         row = grid[i]
         for j in range(nx + 1):
-            vd["x"] = x0 + j * dx
-            v = evaluate(expr, vd)
+            vd["x"] = x0 + j * dx      # ← 必须设置 x
+            v = fast.eval(vd)
             row[j] = v if v is not None else 1e18
 
     segments = []

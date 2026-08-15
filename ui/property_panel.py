@@ -436,7 +436,6 @@ class PropertyPanel(QWidget):
             "TransformDriver": "变换驱动器",
         }
         return cn.get(name, name)
-        return cn.get(name, name)
 
     # ══════════════════════════════════════════
     # 多选批量操作
@@ -663,9 +662,12 @@ class PropertyPanel(QWidget):
     # ══════════════════════════════════════════
 
     def _set_visible(self, objs: list[Any], visible: bool) -> None:
-        self._doc_action(
-            lambda: [setattr(o, "visible", bool(visible)) for o in objs]
-        )
+        def doit():
+            for o in objs:
+                o.visible = bool(visible)
+            # ★ 修复：visible 变化不触发 _mutation_count，需手动失效渲染缓存
+            self.canvas.doc._mutation_count += 1
+        self._doc_action(doit)
 
     def _reorder(self, objs: list[Any], front: bool) -> None:
         def doit() -> None:
@@ -680,7 +682,8 @@ class PropertyPanel(QWidget):
                     if o in doc_objects:
                         doc_objects.remove(o)
                         doc_objects.insert(0, o)
-
+            # ★ 修复：重排序后需失效渲染缓存
+            self.canvas.doc._mutation_count += 1
         self._doc_action(doit)
 
     def _select_related(self, obj: Any, mode: str) -> None:
