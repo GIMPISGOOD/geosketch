@@ -1,6 +1,6 @@
 """图表对象：饼状图（图例+变量占比）/ 柱状图，数据支持 {表达式}。"""
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QRectF, Qt , QPointF
+from PySide6.QtGui import QColor, QPainterPath
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QFormLayout, QDoubleSpinBox
 
 from core.registry import register_geo, register_renderer
