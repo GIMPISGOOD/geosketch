@@ -335,3 +335,4 @@ def draw_donut(p, obj, view):
     p.drawText(hole_sq, Qt.AlignmentFlag.AlignCenter, f"{total:.0f}")
 
     draw_media_decorations(p, obj, view)
+

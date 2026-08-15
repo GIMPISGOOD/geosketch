@@ -56,6 +56,7 @@ def _render_media_to_base64(obj):
         
     img = QImage(w_px, h_px, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
+    
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     
@@ -64,13 +65,13 @@ def _render_media_to_base64(obj):
         def __init__(self, obj, scale):
             self.scale = scale
             self.obj = obj
-
+            
         def to_screen(self, x, y):
             # 对象左上角映射到 (0, 0)
             # 世界 y 向上，媒体局部屏幕 y 向下，因此用 obj.y - y
             return QPointF((x - self.obj.x) * self.scale,
                            (self.obj.y - y) * self.scale)
-            
+                           
     mock_view = MockView(obj, view_scale)
     
     # 查找并调用对应的渲染器
@@ -93,8 +94,12 @@ def _render_media_to_base64(obj):
     ba = QByteArray()
     buf = QBuffer(ba)
     buf.open(QBuffer.OpenModeFlag.WriteOnly)
-    img.save(buf, "PNG")
-    return ba.toBase64().data().decode('ascii')
+    
+    # ★ 修复 1：QIODevice 的 save 方法要求 format 参数为 bytes 类型 (b"PNG")
+    img.save(buf, b"PNG")
+    buf.close()  # 确保缓冲区数据完全刷入 QByteArray
+    
+    return bytes(ba.toBase64().data()).decode('ascii')
 
 
 # ───────────── 表达式转换（Python → JS）─────────────
@@ -435,27 +440,89 @@ def _jsx_export(doc, include_vars=True):
             lines.append(f"var {n} = board.create('curve', [{xs}, {ys}], "
                          f"{{strokeColor: '{obj.color}', strokeWidth: {obj.width}, "
                          f"opacity: {obj.opacity}}});")
-        # ★ 新增：媒体对象（表格/图表/图像）转图片渲染
+        # ★ 新增：媒体对象处理（图表原生联动，图像/表格转图片）
+             # ★ 新增：媒体对象处理（图表原生联动，图像/表格转图片）
         elif isinstance(obj, MediaObject):
-            b64 = _render_media_to_base64(obj)
+                tn = type(obj).__name__
+                
+                # 辅助函数：将 Python 数据列表转为 JS 数组，并绑定变量
+                def _data_to_js_func(data_list):
+                    js_items = []
+                    for item in data_list:
+                        if isinstance(item, (int, float)):
+                            js_items.append(str(item))
+                        else:
+                            s = str(item).strip()
+                            if s.startswith("{") and s.endswith("}"):
+                                s = s[1:-1].strip()
+                            js_expr = _py_expr_to_js(s, var_names)
+                            js_items.append(js_expr)
+                    return "function() { return [" + ", ".join(js_items) + "]; }"
 
-            if b64:
-                n = nv()
-                names[obj.id] = n
+                # 计算中心点和尺寸（世界坐标）
+                cx = obj.x + obj.width / 2.0
+                cy = obj.y - obj.height / 2.0
+                r = min(obj.width, obj.height) / 2.0 * 0.85
 
-                # ★ 修复：MediaObject 的底边是 y - height
-                x_bl = obj.x
-                y_bl = obj.y - obj.height
-
-                b64_clean = b64.replace("\n", "")
-
-                lines.append(
-                    f"var {n} = board.create('image', "
-                    f"['data:image/png;base64,{b64_clean}', "
-                    f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
-                    f"{{fixed: false, highlight: false}});"
-                )
-
+                if tn in ("PieChartObject", "BarChartObject", "LineChartObject"):
+                    n = nv(); names[obj.id] = n
+                    
+                    # ★ 修复 Pylance 报错：MediaObject 基类没有 data/labels/colors，使用 getattr 安全获取
+                    data_list = getattr(obj, 'data', [])
+                    labels_list = getattr(obj, 'labels', [])
+                    colors_list = getattr(obj, 'colors', [])
+                    
+                    data_func = _data_to_js_func(data_list)
+                    labels_js = str([render_template(str(l)) for l in labels_list]).replace("'", '"')
+                    colors_js = str(colors_list).replace("'", '"')
+                    color = colors_list[0] if colors_list else "#1971c2"
+                    
+                    if tn == "LineChartObject":
+                        # 折线图使用 curve 结合离散点数组实现动态更新
+                        lines.append(
+                            f"var yData_{n} = {data_func};\n"
+                            f"var xLen_{n} = {len(data_list)};\n"
+                            f"var {n} = board.create('curve', [\n"
+                            f"  function(t) {{ return t; }},\n"
+                            f"  function(t) {{ \n"
+                            f"    var arr = yData_{n}(); \n"
+                            f"    var idx = Math.round(t); \n"
+                            f"    if(idx < 0) idx = 0; if(idx >= arr.length) idx = arr.length - 1; \n"
+                            f"    return arr[idx]; \n"
+                            f"  }}\n"
+                            f"], 0, xLen_{n} - 1, {{\n"
+                            f"  strokeColor: '{color}', strokeWidth: 3, highlight: false, fixed: true\n"
+                            f"}});"
+                        )
+                    else:
+                        chart_type = "pie" if tn == "PieChartObject" else "bar"
+                        # JSXGraph 原生 Chart，数据传入函数，实现滑杆拖动时毫秒级重绘！
+                        lines.append(
+                            f"var {n} = board.create('chart', [{data_func}], {{\n"
+                            f"  center: [{cx:.4f}, {cy:.4f}], \n"
+                            f"  radius: {r:.4f}, width: {obj.width:.4f}, height: {obj.height:.4f},\n"
+                            f"  type: '{chart_type}', \n"
+                            f"  colors: {colors_js},\n"
+                            f"  labels: {labels_js},\n"
+                            f"  highlight: false, fixed: true\n"
+                            f"}});"
+                        )
+                    
+                else:
+                    # 表格、图像等其他媒体对象，依然使用 Base64 图片渲染
+                    b64 = _render_media_to_base64(obj)
+                    if b64:
+                        n = nv()
+                        names[obj.id] = n
+                        x_bl = obj.x
+                        y_bl = obj.y - obj.height
+                        b64_clean = b64.replace("\n", "")
+                        lines.append(
+                            f"var {n} = board.create('image', "
+                            f"['data:image/png;base64,{b64_clean}', "
+                            f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
+                            f"{{fixed: false, highlight: false}});"
+                        )
     return "\n".join(lines), bb
 
 
