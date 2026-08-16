@@ -2,7 +2,7 @@
 from __future__ import annotations
 from typing import Any, Optional
 
-from PySide6.QtCore import QTimer, Signal, QObject
+from PySide6.QtCore import QTimer, Signal, QObject, QElapsedTimer
 
 from .clip import AnimationClip
 from .tracks import VariableTrack, GliderTrack, PropertyTrack
@@ -21,17 +21,20 @@ class AnimationController(QObject):
     ticked = Signal(float)   # 当前时间（秒）
     finished = Signal()
 
-    def __init__(self, doc: Any, canvas: Any):
+    def __init__(self, doc, canvas):
         super().__init__()
         self.doc = doc
         self.canvas = canvas
-        self.clip: Optional[AnimationClip] = None
-        self._current_time: float = 0.0
-        self._playing: bool = False
+        self.clip = None
+        self._current_time = 0.0
+        self._playing = False
+        
         self._timer = QTimer(self)
-        self._timer.setInterval(16)  # ~60fps
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        self._last_elapsed: int = 0
+        
+        # ★ 修复：使用高精度计时器计算真实 dt
+        self._elapsed_timer = QElapsedTimer()
 
     # ─────────────── 对外接口 ───────────────
     def set_clip(self, clip: AnimationClip) -> None:
@@ -45,6 +48,7 @@ class AnimationController(QObject):
             return
         self._current_time = 0.0
         self._playing = True
+        self._elapsed_timer.start()
         self._last_elapsed = 0
         self._timer.start()
         self.started.emit()
@@ -83,12 +87,14 @@ class AnimationController(QObject):
             return clips[0]
         return None
 
-    def _tick(self) -> None:
-        if not self._playing or self.clip is None:
-            return
+    def _tick(self):
+        if not self._playing or self.clip is None: return
 
-        dt = 0.016 * self.clip.speed
-        self._current_time += dt
+        # ★ 修复：计算真实经过的时间（秒），而不是固定 0.016
+        real_dt = self._elapsed_timer.elapsed() / 1000.0
+        self._elapsed_timer.restart() # 重置计时器
+        
+        self._current_time += real_dt * self.clip.speed
 
         total = self.clip.total_duration()
         if self._current_time >= total:
@@ -119,7 +125,7 @@ class AnimationController(QObject):
                 pass
 
         # 触发文档重算
-        self.doc.changed.emit()
+        self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
         """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""

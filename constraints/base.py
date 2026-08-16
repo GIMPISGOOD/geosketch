@@ -1,12 +1,9 @@
 """约束基类与注册表。"""
 from typing import List, Any, Dict, Type
 
-
 class GeometricConstraint:
-    """几何约束基类。不继承 GeoObject，独立于依赖图。"""
-
+    """几何约束基类。"""
     _next_id = 1
-
     def __init__(self):
         self.cid = f"c{GeometricConstraint._next_id}"
         GeometricConstraint._next_id += 1
@@ -19,51 +16,47 @@ class GeometricConstraint:
     def residual(self) -> List[float]:
         raise NotImplementedError
 
-    # ── 雅可比：解析优先，数值回退 ──
-
     def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """雅可比矩阵。子类实现 _jacobian_analytic(vars_map) 即可启用解析版本；
-        未实现时自动回退数值中心差分。"""
+        """雅可比矩阵。优先使用解析解，否则使用带异常保护的数值差分。"""
+        # ★ 新增：解析雅可比钩子
         analytic = getattr(self, '_jacobian_analytic', None)
         if analytic is not None:
             try:
                 return analytic(vars_map)
             except Exception:
                 pass
-        return self._jacobian_numeric(vars_map)
 
-    def _jacobian_numeric(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """数值雅可比（中心差分）。"""
+        # 数值差分（中心差分）
         eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
         jac = [[0.0] * n_cols for _ in range(n_res)]
+        
         for p in pts:
             if id(p) not in vars_map:
                 continue
             idx = vars_map[id(p)]
             for axis in range(2):
                 old = p.x if axis == 0 else p.y
-                if axis == 0:
-                    p.x = old + eps
-                else:
-                    p.y = old + eps
-                r_plus = self.residual()
-                if axis == 0:
-                    p.x = old - eps
-                else:
-                    p.y = old - eps
-                r_minus = self.residual()
-                if axis == 0:
-                    p.x = old
-                else:
-                    p.y = old
-                for j in range(n_res):
-                    jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
+                r_plus = r_minus = None
+                try:
+                    if axis == 0: p.x = old + eps
+                    else: p.y = old + eps
+                    r_plus = self.residual()
+                    
+                    if axis == 0: p.x = old - eps
+                    else: p.y = old - eps
+                    r_minus = self.residual()
+                finally:
+                    # ★ 致命修复：无论是否抛出异常，必须恢复坐标，杜绝状态污染
+                    if axis == 0: p.x = old
+                    else: p.y = old
+                
+                if r_plus is not None and r_minus is not None:
+                    for j in range(min(n_res, len(r_plus), len(r_minus))):
+                        jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
         return jac
-
-    # ── 序列化接口 ──
 
     def dump(self) -> dict:
         raise NotImplementedError
@@ -72,11 +65,7 @@ class GeometricConstraint:
     def build(cls, point_map: dict, params: dict) -> 'GeometricConstraint':
         raise NotImplementedError
 
-
-# ── 注册表 ──
-
 CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
-
 
 def register_constraint(name: str):
     def deco(cls):

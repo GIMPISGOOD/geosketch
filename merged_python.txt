@@ -1,3 +1,1142 @@
+"""动画系统顶层包。
+删除本包即可完全卸载动画功能，不影响原有系统。
+"""
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def inject():
+    try:
+        from . import serialization
+        serialization.patch_document()
+
+        patch_main_window()
+
+        from . import tracks  # noqa: F401
+
+        logger.info("✔ 动画系统已加载")
+        return True
+    except Exception as e:
+        logger.warning(f"✘ 动画系统加载失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+
+def patch_main_window():
+    from ui.main_window import MainWindow
+    original_init = MainWindow.__init__
+
+    def new_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+
+        mb = self.menuBar()
+        am = mb.addMenu("动画(&A)")
+
+        from PySide6.QtGui import QAction, QKeySequence
+
+        play_act = QAction("▶ 播放动画", self)
+        play_act.setShortcut(QKeySequence("Ctrl+Shift+A"))
+        play_act.triggered.connect(lambda: self._anim_play())
+        am.addAction(play_act)
+
+        stop_act = QAction("■ 停止动画", self)
+        stop_act.triggered.connect(lambda: self._anim_stop())
+        am.addAction(stop_act)
+
+        am.addSeparator()
+
+        timeline_act = QAction("时间轴面板", self)
+        timeline_act.triggered.connect(lambda: self._anim_toggle_timeline())
+        am.addAction(timeline_act)
+
+        from .controller import AnimationController
+        self._anim_controller = AnimationController(self.doc, self.canvas)
+
+        from .ui.timeline import TimelineDock
+        self._timeline_dock = TimelineDock(self._anim_controller, self.canvas, self)
+        self.addDockWidget(
+            __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.DockWidgetArea.BottomDockWidgetArea,
+            self._timeline_dock
+        )
+        self._timeline_dock.setVisible(False)
+
+        self._anim_play = lambda: self._anim_controller.play()
+        self._anim_stop = lambda: self._anim_controller.stop()
+        self._anim_toggle_timeline = lambda: self._timeline_dock.setVisible(
+            not self._timeline_dock.isVisible()
+        )
+
+    setattr(MainWindow, "__init__", new_init)
+
+
+inject()
+
+"""动画轨道基类与注册表。"""
+from __future__ import annotations
+from typing import Any, Callable, Dict, Type
+
+
+class AnimationTrack:
+    """动画轨道基类。
+
+    子类必须实现：
+        evaluate(time: float) -> None   在给定时间更新目标
+        dump() -> dict                  序列化
+        build(cls, doc, params) -> track  反序列化
+
+    可选实现：
+        duration() -> float             轨道总时长（秒）
+        label() -> str                  显示名称
+    """
+
+    type_name: str = ""
+
+    def __init__(self, target: Any = None):
+        self.target = target
+        self.enabled: bool = True
+        self.muted: bool = False
+
+    def evaluate(self, time: float) -> None:
+        raise NotImplementedError
+
+    def duration(self) -> float:
+        return 1.0
+
+    def label(self) -> str:
+        return f"{self.type_name}"
+
+    def dump(self) -> dict:
+        raise NotImplementedError
+
+    @classmethod
+    def build(cls, doc: Any, params: dict) -> "AnimationTrack":
+        raise NotImplementedError
+
+
+TRACK_REGISTRY: Dict[str, Type[AnimationTrack]] = {}
+
+
+def register_track(type_name: str):
+    """装饰器：注册轨道类型。"""
+    def deco(cls: Type[AnimationTrack]) -> Type[AnimationTrack]:
+        cls.type_name = type_name
+        TRACK_REGISTRY[type_name] = cls
+        return cls
+    return deco
+
+"""动画片段：轨道容器 + 全局设置。"""
+from __future__ import annotations
+from typing import List
+
+from .base import AnimationTrack
+from .tracks import VariableTrack, GliderTrack, PropertyTrack
+
+
+class AnimationClip:
+    """动画片段：包含一组轨道和全局设置。"""
+
+    def __init__(self, name: str = "动画 1"):
+        self.name = name
+        self.tracks: List[AnimationTrack] = []
+        self.loop: bool = True
+        self.speed: float = 1.0       # 播放速度倍率
+        self.duration: float = 5.0    # 总时长（秒）
+
+    def total_duration(self) -> float:
+        """取所有轨道的最大时长。"""
+        if not self.tracks:
+            return self.duration
+        return max(t.duration() for t in self.tracks)
+
+    def add_track(self, track: AnimationTrack) -> None:
+        self.tracks.append(track)
+
+    def remove_track(self, track: AnimationTrack) -> None:
+        if track in self.tracks:
+            self.tracks.remove(track)
+
+    def dump(self) -> dict:
+        return {
+            "name": self.name,
+            "loop": self.loop,
+            "speed": self.speed,
+            "duration": self.duration,
+            "tracks": [t.dump() for t in self.tracks],
+        }
+
+    @classmethod
+    def build(cls, doc, params: dict) -> "AnimationClip":
+        from .base import TRACK_REGISTRY
+        clip = cls(params.get("name", "动画 1"))
+        clip.loop = params.get("loop", True)
+        clip.speed = params.get("speed", 1.0)
+        clip.duration = params.get("duration", 5.0)
+        for td in params.get("tracks", []):
+            ttype = td.get("type", "")
+            cls_track = TRACK_REGISTRY.get(ttype)
+            if cls_track:
+                try:
+                    track = cls_track.build(doc, td)
+                    clip.add_track(track)
+                except Exception:
+                    pass
+        return clip
+
+"""动画控制器：QTimer 驱动，主线程安全。"""
+from __future__ import annotations
+from typing import Any, Optional
+
+from PySide6.QtCore import QTimer, Signal, QObject
+
+from .clip import AnimationClip
+from .tracks import VariableTrack, GliderTrack, PropertyTrack
+
+
+class AnimationController(QObject):
+    """动画播放控制器。
+
+    - 使用 QTimer 以 60fps 触发
+    - 每帧遍历所有轨道，调用 evaluate(time)
+    - 播放结束后 emit finished 信号
+    """
+
+    started = Signal()
+    stopped = Signal()
+    ticked = Signal(float)   # 当前时间（秒）
+    finished = Signal()
+
+    def __init__(self, doc: Any, canvas: Any):
+        super().__init__()
+        self.doc = doc
+        self.canvas = canvas
+        self.clip: Optional[AnimationClip] = None
+        self._current_time: float = 0.0
+        self._playing: bool = False
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)  # ~60fps
+        self._timer.timeout.connect(self._tick)
+        self._last_elapsed: int = 0
+
+    def set_clip(self, clip: AnimationClip) -> None:
+        self.clip = clip
+        self._current_time = 0.0
+
+    def play(self) -> None:
+        if self.clip is None:
+            self.clip = self._get_clip_from_doc()
+        if self.clip is None:
+            return
+        self._current_time = 0.0
+        self._playing = True
+        self._last_elapsed = 0
+        self._timer.start()
+        self.started.emit()
+
+    def pause(self) -> None:
+        if self._playing:
+            self._timer.stop()
+            self._playing = False
+            self.stopped.emit()
+
+    def stop(self) -> None:
+        self._timer.stop()
+        self._playing = False
+        self._current_time = 0.0
+        self.stopped.emit()
+
+    def seek(self, time: float) -> None:
+        """跳转到指定时间并求值。"""
+        self._current_time = max(0.0, time)
+        if self.clip:
+            self._evaluate(self._current_time)
+
+    @property
+    def is_playing(self) -> bool:
+        return self._playing
+
+    @property
+    def current_time(self) -> float:
+        return self._current_time
+
+    def _get_clip_from_doc(self) -> Optional[AnimationClip]:
+        """从文档中获取当前动画片段。"""
+        clips = getattr(self.doc, "animations", [])
+        if clips:
+            return clips[0]
+        return None
+
+    def _tick(self) -> None:
+        if not self._playing or self.clip is None:
+            return
+
+        dt = 0.016 * self.clip.speed
+        self._current_time += dt
+
+        total = self.clip.total_duration()
+        if self._current_time >= total:
+            if self.clip.loop:
+                self._current_time = 0.0
+            else:
+                self.stop()
+                self.finished.emit()
+                return
+
+        self._evaluate(self._current_time)
+        self.ticked.emit(self._current_time)
+
+    def _evaluate(self, time: float) -> None:
+        """求值所有轨道。"""
+        if self.clip is None:
+            return
+
+        self._bind_targets()
+
+        for track in self.clip.tracks:
+            if not track.enabled or track.muted:
+                continue
+            try:
+                track.evaluate(time)
+            except Exception:
+                pass
+
+        self.doc.changed.emit()
+
+    def _bind_targets(self) -> None:
+        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
+        if self.clip is None:
+            return
+        obj_map = {o.id: o for o in self.doc.objects}
+        for track in self.clip.tracks:
+            if isinstance(track, (GliderTrack, PropertyTrack)):
+                if track.target is None:
+                    track.target = obj_map.get(track.obj_id)
+
+"""关键帧与插值器。"""
+from __future__ import annotations
+import math
+from typing import List, Tuple, Optional
+
+
+class Interpolator:
+    """插值器基类。"""
+
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        """t ∈ [0,1]，返回插值结果。"""
+        raise NotImplementedError
+
+
+class LinearInterpolator(Interpolator):
+    """线性插值。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        return v0 + (v1 - v0) * t
+
+
+class EaseInOutInterpolator(Interpolator):
+    """缓入缓出（正弦）。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        s = t * t * (3.0 - 2.0 * t)
+        return v0 + (v1 - v0) * s
+
+
+class BezierInterpolator(Interpolator):
+    """三次贝塞尔插值（简化：固定控制点 (0.42,0,0.58,1)）。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        u = 1.0 - t
+        s = 3 * u * u * t * 0.42 + 3 * u * t * t * 0.58 + t * t * t
+        return v0 + (v1 - v0) * s
+
+
+class StepInterpolator(Interpolator):
+    """阶梯插值（保持前一帧值）。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        return v0
+
+
+INTERPOLATORS = {
+    "linear": LinearInterpolator,
+    "ease_in_out": EaseInOutInterpolator,
+    "bezier": BezierInterpolator,
+    "step": StepInterpolator,
+}
+
+DEFAULT_INTERPOLATOR = "linear"
+
+
+class Keyframe:
+    """单个关键帧：(time, value, interpolator)。"""
+
+    __slots__ = ("time", "value", "interpolator")
+
+    def __init__(self, time: float, value: float,
+                 interpolator: str = DEFAULT_INTERPOLATOR):
+        self.time = float(time)
+        self.value = float(value)
+        self.interpolator = interpolator
+
+    def dump(self) -> dict:
+        return {
+            "time": self.time,
+            "value": self.value,
+            "interpolator": self.interpolator,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Keyframe":
+        return cls(
+            d.get("time", 0.0),
+            d.get("value", 0.0),
+            d.get("interpolator", DEFAULT_INTERPOLATOR),
+        )
+
+
+def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
+    """在给定时间求值关键帧序列。返回 None 表示无关键帧。"""
+    if not frames:
+        return None
+
+    sorted_frames = sorted(frames, key=lambda f: f.time)
+
+    if time <= sorted_frames[0].time:
+        return sorted_frames[0].value
+    if time >= sorted_frames[-1].time:
+        return sorted_frames[-1].value
+
+    for i in range(len(sorted_frames) - 1):
+        f0 = sorted_frames[i]
+        f1 = sorted_frames[i + 1]
+        if f0.time <= time <= f1.time:
+            dt = f1.time - f0.time
+            if dt < 1e-12:
+                return f1.value
+            t = (time - f0.time) / dt
+            t = max(0.0, min(1.0, t))
+            interp_cls = INTERPOLATORS.get(f0.interpolator, LinearInterpolator)
+            return interp_cls.evaluate(t, f0.value, f1.value)
+
+    return sorted_frames[-1].value
+
+"""动画序列化：注入 Document.save / load，支持 animations.json。"""
+from __future__ import annotations
+import json
+import zipfile
+
+from core.document import Document
+from .clip import AnimationClip
+
+_original_save = Document.save
+_original_load = Document.load
+
+
+def _new_save(self, path):
+    _original_save(self, path)
+    animations = getattr(self, "animations", [])
+    if not animations:
+        return
+    data = [clip.dump() for clip in animations]
+    with zipfile.ZipFile(path, "a") as zf:
+        zf.writestr(
+            "animations.json",
+            json.dumps(data, ensure_ascii=False, indent=1)
+        )
+
+
+def _new_load(self, path):
+    _original_load(self, path)
+    with zipfile.ZipFile(path, "r") as zf:
+        if "animations.json" in zf.namelist():
+            data = json.loads(zf.read("animations.json"))
+            self.animations = []
+            for item in data:
+                try:
+                    clip = AnimationClip.build(self, item)
+                    self.animations.append(clip)
+                except Exception:
+                    pass
+
+
+def patch_document():
+    _original_init = Document.__init__
+
+    def _new_init(self, *args, **kwargs):
+        _original_init(self, *args, **kwargs)
+        self.animations = []
+
+    setattr(Document, "__init__", _new_init)
+    setattr(Document, "save", _new_save)
+    setattr(Document, "load", _new_load)
+
+"""具体轨道类型：变量轨道、路径轨道、属性轨道。"""
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+
+from .base import AnimationTrack, register_track
+from .keyframe import Keyframe, evaluate_keyframes
+
+
+@register_track("variable")
+class VariableTrack(AnimationTrack):
+    """变量轨道：驱动 VariableStore 中的变量。
+
+    绑定变量名，随时间改变变量值。
+    """
+
+    def __init__(self, var_name: str, keyframes: List[Keyframe] | None = None):
+        super().__init__(target=None)
+        self.var_name = var_name
+        self.keyframes = keyframes or []
+
+    def evaluate(self, time: float) -> None:
+        if self.muted or not self.enabled:
+            return
+        val = evaluate_keyframes(self.keyframes, time)
+        if val is None:
+            return
+        from core.variables import get_store
+        store = get_store()
+        var = store.get_var(self.var_name)
+        if var is not None and not var.expr:  # 从动变量不可手动改值
+            store.set(self.var_name, val)
+
+    def duration(self) -> float:
+        if not self.keyframes:
+            return 0.0
+        return max(f.time for f in self.keyframes)
+
+    def label(self) -> str:
+        return f"变量: {self.var_name}"
+
+    def dump(self) -> dict:
+        return {
+            "type": self.type_name,
+            "var_name": self.var_name,
+            "keyframes": [kf.dump() for kf in self.keyframes],
+            "enabled": self.enabled,
+            "muted": self.muted,
+        }
+
+    @classmethod
+    def build(cls, doc: Any, params: dict) -> "VariableTrack":
+        frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        track = cls(params.get("var_name", ""), frames)
+        track.enabled = params.get("enabled", True)
+        track.muted = params.get("muted", False)
+        return track
+
+
+@register_track("glider")
+class GliderTrack(AnimationTrack):
+    """路径轨道：驱动 PointOnObject 的参数 t。
+
+    绑定 PointOnObject 对象，随时间改变 t ∈ [0,1]。
+    """
+
+    def __init__(self, obj_id: int, keyframes: List[Keyframe] | None = None):
+        super().__init__(target=None)
+        self.obj_id = obj_id
+        self.keyframes = keyframes or []
+
+    def _find_target(self) -> Any:
+        """从文档中查找目标对象。"""
+        from geo.points import PointOnObject
+        from core.document import Document
+        return None  # 由 controller 注入 target
+
+    def evaluate(self, time: float) -> None:
+        if self.muted or not self.enabled:
+            return
+        if self.target is None:
+            return
+        val = evaluate_keyframes(self.keyframes, time)
+        if val is None:
+            return
+        t = max(0.0, min(1.0, val))
+        if hasattr(self.target, "t"):
+            self.target.t = t
+
+    def duration(self) -> float:
+        if not self.keyframes:
+            return 0.0
+        return max(f.time for f in self.keyframes)
+
+    def label(self) -> str:
+        return f"路径: obj#{self.obj_id}"
+
+    def dump(self) -> dict:
+        return {
+            "type": self.type_name,
+            "obj_id": self.obj_id,
+            "keyframes": [kf.dump() for kf in self.keyframes],
+            "enabled": self.enabled,
+            "muted": self.muted,
+        }
+
+    @classmethod
+    def build(cls, doc: Any, params: dict) -> "GliderTrack":
+        frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        track = cls(params.get("obj_id", 0), frames)
+        track.enabled = params.get("enabled", True)
+        track.muted = params.get("muted", False)
+        return track
+
+
+@register_track("property")
+class PropertyTrack(AnimationTrack):
+    """属性轨道：驱动对象的数值属性（如 TextObject.size、MediaObject.rotation）。
+
+    绑定对象 + 属性名，随时间改变属性值。
+    """
+
+    def __init__(self, obj_id: int, attr_name: str,
+                 keyframes: List[Keyframe] | None = None):
+        super().__init__(target=None)
+        self.obj_id = obj_id
+        self.attr_name = attr_name
+        self.keyframes = keyframes or []
+
+    def evaluate(self, time: float) -> None:
+        if self.muted or not self.enabled:
+            return
+        if self.target is None:
+            return
+        val = evaluate_keyframes(self.keyframes, time)
+        if val is None:
+            return
+        if hasattr(self.target, self.attr_name):
+            setattr(self.target, self.attr_name, val)
+
+    def duration(self) -> float:
+        if not self.keyframes:
+            return 0.0
+        return max(f.time for f in self.keyframes)
+
+    def label(self) -> str:
+        return f"属性: {self.attr_name} (obj#{self.obj_id})"
+
+    def dump(self) -> dict:
+        return {
+            "type": self.type_name,
+            "obj_id": self.obj_id,
+            "attr_name": self.attr_name,
+            "keyframes": [kf.dump() for kf in self.keyframes],
+            "enabled": self.enabled,
+            "muted": self.muted,
+        }
+
+    @classmethod
+    def build(cls, doc: Any, params: dict) -> "PropertyTrack":
+        frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        track = cls(
+            params.get("obj_id", 0),
+            params.get("attr_name", ""),
+            frames,
+        )
+        track.enabled = params.get("enabled", True)
+        track.muted = params.get("muted", False)
+        return track
+
+"""动画系统 UI。"""
+
+"""时间轴面板：QDockWidget，包含播放控制、时间滑杆、轨道列表。"""
+from __future__ import annotations
+from typing import Any
+
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import (
+    QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QLabel, QSlider, QListWidget, QListWidgetItem,
+    QCheckBox, QComboBox, QDoubleSpinBox, QMenu,
+)
+from PySide6.QtGui import QAction
+
+from ui import theme
+
+
+class TimelineDock(QDockWidget):
+    """动画时间轴面板。"""
+
+    def __init__(self, controller: Any, canvas: Any, parent=None):
+        super().__init__("动画时间轴", parent)
+        self.setObjectName("timelineDock")
+        self.controller = controller
+        self.canvas = canvas
+        self._build_ui()
+        self._connect_signals()
+
+    def _build_ui(self):
+        widget = QWidget()
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(10, 8, 10, 8)
+        layout.setSpacing(8)
+
+        ctrl_row = QHBoxLayout()
+        ctrl_row.setSpacing(6)
+
+        self._play_btn = QPushButton("▶ 播放")
+        self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ctrl_row.addWidget(self._play_btn)
+
+        self._stop_btn = QPushButton("■ 停止")
+        self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ctrl_row.addWidget(self._stop_btn)
+
+        ctrl_row.addSpacing(20)
+
+        ctrl_row.addWidget(QLabel("速度:"))
+        self._speed_spin = QDoubleSpinBox()
+        self._speed_spin.setRange(0.1, 10.0)
+        self._speed_spin.setValue(1.0)
+        self._speed_spin.setSingleStep(0.1)
+        ctrl_row.addWidget(self._speed_spin)
+
+        self._loop_chk = QCheckBox("循环")
+        self._loop_chk.setChecked(True)
+        ctrl_row.addWidget(self._loop_chk)
+
+        ctrl_row.addStretch(1)
+
+        self._time_lbl = QLabel("0.00s")
+        self._time_lbl.setFont(theme.LABEL_FONT)
+        ctrl_row.addWidget(self._time_lbl)
+
+        layout.addLayout(ctrl_row)
+
+        self._time_slider = QSlider(Qt.Orientation.Horizontal)
+        self._time_slider.setRange(0, 1000)
+        self._time_slider.setValue(0)
+        layout.addWidget(self._time_slider)
+
+        track_row = QHBoxLayout()
+        track_row.addWidget(QLabel("轨道列表:"))
+        add_btn = QPushButton("＋ 添加轨道")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        track_row.addWidget(add_btn)
+        track_row.addStretch(1)
+        layout.addLayout(track_row)
+
+        self._track_list = QListWidget()
+        self._track_list.setMaximumHeight(180)
+        layout.addWidget(self._track_list)
+
+        self.setWidget(widget)
+        self.setMinimumHeight(220)
+
+        self._add_btn = add_btn
+
+    def _connect_signals(self):
+        self._play_btn.clicked.connect(self._on_play)
+        self._stop_btn.clicked.connect(self._on_stop)
+        self._time_slider.sliderMoved.connect(self._on_seek)
+        self._speed_spin.valueChanged.connect(self._on_speed)
+        self._loop_chk.toggled.connect(self._on_loop)
+        self._add_btn.clicked.connect(self._on_add_track)
+        self._track_list.itemDoubleClicked.connect(self._on_edit_track)
+        self._track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._track_list.customContextMenuRequested.connect(self._on_track_menu)
+
+        self.controller.ticked.connect(self._on_ticked)
+        self.controller.started.connect(self._on_started)
+        self.controller.stopped.connect(self._on_stopped)
+
+    def _on_play(self):
+        if self.controller.is_playing:
+            self.controller.pause()
+            self._play_btn.setText("▶ 播放")
+        else:
+            self.controller.play()
+            self._play_btn.setText("⏸ 暂停")
+
+    def _on_stop(self):
+        self.controller.stop()
+        self._play_btn.setText("▶ 播放")
+        self._time_slider.setValue(0)
+        self._time_lbl.setText("0.00s")
+
+    def _on_seek(self, value: int):
+        clip = self.controller.clip
+        if clip is None:
+            return
+        total = clip.total_duration()
+        t = value / 1000.0 * total
+        self.controller.seek(t)
+        self._time_lbl.setText(f"{t:.2f}s")
+
+    def _on_speed(self, value: float):
+        clip = self.controller.clip
+        if clip:
+            clip.speed = value
+
+    def _on_loop(self, checked: bool):
+        clip = self.controller.clip
+        if clip:
+            clip.loop = checked
+
+    def _on_ticked(self, time: float):
+        clip = self.controller.clip
+        if clip is None:
+            return
+        total = clip.total_duration()
+        if total > 0:
+            self._time_slider.setValue(int(time / total * 1000))
+        self._time_lbl.setText(f"{time:.2f}s")
+
+    def _on_started(self):
+        self._play_btn.setText("⏸ 暂停")
+
+    def _on_stopped(self):
+        self._play_btn.setText("▶ 播放")
+
+    def _on_add_track(self):
+        from .track_editor import AddTrackDialog
+        dlg = AddTrackDialog(self.canvas.doc, self)
+        if dlg.exec():
+            track = dlg.get_track()
+            if track:
+                clip = self.controller.clip
+                if clip is None:
+                    from ..clip import AnimationClip
+                    clip = AnimationClip("动画 1")
+                    self.controller.set_clip(clip)
+                    if not hasattr(self.canvas.doc, "animations"):
+                        self.canvas.doc.animations = []
+                    self.canvas.doc.animations.append(clip)
+                clip.add_track(track)
+                self._refresh_track_list()
+
+    def _on_edit_track(self, item: QListWidgetItem):
+        idx = self._track_list.row(item)
+        clip = self.controller.clip
+        if clip is None or idx >= len(clip.tracks):
+            return
+        from .track_editor import EditTrackDialog
+        track = clip.tracks[idx]
+        dlg = EditTrackDialog(track, self)
+        if dlg.exec():
+            self._refresh_track_list()
+
+    def _on_track_menu(self, pos):
+        item = self._track_list.itemAt(pos)
+        if item is None:
+            return
+        idx = self._track_list.row(item)
+        clip = self.controller.clip
+        if clip is None or idx >= len(clip.tracks):
+            return
+        track = clip.tracks[idx]
+
+        menu = QMenu(self)
+        mute_act = QAction("静音" if not track.muted else "取消静音", self)
+        mute_act.triggered.connect(lambda: self._toggle_mute(track))
+        menu.addAction(mute_act)
+
+        delete_act = QAction("删除轨道", self)
+        delete_act.triggered.connect(lambda: self._delete_track(track))
+        menu.addAction(delete_act)
+
+        menu.exec(self._track_list.mapToGlobal(pos))
+
+    def _toggle_mute(self, track):
+        track.muted = not track.muted
+        self._refresh_track_list()
+
+    def _delete_track(self, track):
+        clip = self.controller.clip
+        if clip:
+            clip.remove_track(track)
+            self._refresh_track_list()
+
+    def _refresh_track_list(self):
+        self._track_list.clear()
+        clip = self.controller.clip
+        if clip is None:
+            return
+        for track in clip.tracks:
+            label = track.label()
+            if track.muted:
+                label = f"[静音] {label}"
+            item = QListWidgetItem(label)
+            self._track_list.addItem(item)
+
+"""轨道编辑对话框：添加 / 编辑轨道的关键帧。"""
+from __future__ import annotations
+from typing import Any, Optional
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
+    QLabel, QLineEdit, QDoubleSpinBox, QComboBox,
+    QPushButton, QDialogButtonBox, QListWidget, QListWidgetItem,
+    QMessageBox,
+)
+
+from ..base import AnimationTrack, TRACK_REGISTRY
+from ..tracks import VariableTrack, GliderTrack, PropertyTrack
+from ..keyframe import Keyframe, INTERPOLATORS
+
+
+class KeyframeEditor(QDialog):
+    """关键帧编辑对话框。"""
+
+    def __init__(self, keyframes: list, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("编辑关键帧")
+        self.setMinimumWidth(400)
+        self._keyframes = keyframes
+        self._build_ui()
+        self._refresh()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        self._list = QListWidget()
+        layout.addWidget(self._list, 1)
+
+        btn_row = QHBoxLayout()
+        add_btn = QPushButton("＋ 添加")
+        edit_btn = QPushButton("✎ 编辑")
+        del_btn = QPushButton("× 删除")
+        add_btn.clicked.connect(self._add)
+        edit_btn.clicked.connect(self._edit)
+        del_btn.clicked.connect(self._delete)
+        btn_row.addWidget(add_btn)
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch(1)
+        layout.addLayout(btn_row)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _refresh(self):
+        self._list.clear()
+        for kf in self._keyframes:
+            self._list.addItem(
+                f"t={kf.time:.2f}s  v={kf.value:.3f}  [{kf.interpolator}]"
+            )
+
+    def _add(self):
+        dlg = _KeyframeDialog(self)
+        if dlg.exec():
+            kf = dlg.get_keyframe()
+            self._keyframes.append(kf)
+            self._keyframes.sort(key=lambda f: f.time)
+            self._refresh()
+
+    def _edit(self):
+        item = self._list.currentItem()
+        if item is None:
+            return
+        idx = self._list.row(item)
+        kf = self._keyframes[idx]
+        dlg = _KeyframeDialog(self, kf)
+        if dlg.exec():
+            new_kf = dlg.get_keyframe()
+            self._keyframes[idx] = new_kf
+            self._keyframes.sort(key=lambda f: f.time)
+            self._refresh()
+
+    def _delete(self):
+        item = self._list.currentItem()
+        if item is None:
+            return
+        idx = self._list.row(item)
+        self._keyframes.pop(idx)
+        self._refresh()
+
+
+class _KeyframeDialog(QDialog):
+    """单个关键帧编辑。"""
+
+    def __init__(self, parent=None, keyframe: Optional[Keyframe] = None):
+        super().__init__(parent)
+        self.setWindowTitle("关键帧")
+        self.setMinimumWidth(300)
+        layout = QFormLayout(self)
+
+        self._time = QDoubleSpinBox()
+        self._time.setRange(0.0, 100.0)
+        self._time.setDecimals(3)
+        self._time.setSingleStep(0.1)
+        layout.addRow("时间 (秒):", self._time)
+
+        self._value = QDoubleSpinBox()
+        self._value.setRange(-1e6, 1e6)
+        self._value.setDecimals(4)
+        layout.addRow("值:", self._value)
+
+        self._interp = QComboBox()
+        self._interp.addItems(list(INTERPOLATORS.keys()))
+        layout.addRow("插值:", self._interp)
+
+        if keyframe:
+            self._time.setValue(keyframe.time)
+            self._value.setValue(keyframe.value)
+            self._interp.setCurrentText(keyframe.interpolator)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def get_keyframe(self) -> Keyframe:
+        return Keyframe(
+            self._time.value(),
+            self._value.value(),
+            self._interp.currentText(),
+        )
+
+
+class AddTrackDialog(QDialog):
+    """添加轨道对话框。"""
+
+    def __init__(self, doc: Any, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("添加轨道")
+        self.setMinimumWidth(400)
+        self._doc = doc
+        self._track: Optional[AnimationTrack] = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+
+        self._type_combo = QComboBox()
+        self._type_combo.addItems([
+            "变量轨道 (variable)",
+            "路径轨道 (glider)",
+            "属性轨道 (property)",
+        ])
+        self._type_combo.currentIndexChanged.connect(self._on_type_changed)
+        form.addRow("轨道类型:", self._type_combo)
+
+        self._target_combo = QComboBox()
+        form.addRow("目标:", self._target_combo)
+
+        self._attr_edit = QLineEdit()
+        self._attr_edit.setPlaceholderText("属性名（仅属性轨道）")
+        self._attr_edit.setVisible(False)
+        form.addRow("属性名:", self._attr_edit)
+
+        layout.addLayout(form)
+
+        self._kf_btn = QPushButton("编辑关键帧…")
+        self._kf_btn.clicked.connect(self._edit_keyframes)
+        layout.addWidget(self._kf_btn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        self._keyframes: list = []
+        self._refresh_targets()
+
+    def _on_type_changed(self, index: int):
+        self._attr_edit.setVisible(index == 2)
+        self._refresh_targets()
+
+    def _refresh_targets(self):
+        self._target_combo.clear()
+        idx = self._type_combo.currentIndex()
+
+        if idx == 0:  # 变量轨道
+            from core.variables import get_store
+            store = get_store()
+            for name in store.names():
+                self._target_combo.addItem(name, name)
+        elif idx == 1:  # 路径轨道
+            from geo.points import PointOnObject
+            for obj in self._doc.objects:
+                if isinstance(obj, PointOnObject):
+                    self._target_combo.addItem(
+                        f"PointOnObject #{obj.id}", obj.id
+                    )
+        elif idx == 2:  # 属性轨道
+            for obj in self._doc.objects:
+                tn = type(obj).__name__
+                self._target_combo.addItem(f"{tn} #{obj.id}", obj.id)
+
+    def _edit_keyframes(self):
+        dlg = KeyframeEditor(self._keyframes, self)
+        dlg.exec()
+
+    def _accept(self):
+        idx = self._type_combo.currentIndex()
+        target = self._target_combo.currentData()
+
+        if idx == 0:  # 变量轨道
+            if target is None:
+                QMessageBox.warning(self, "提示", "请选择变量。")
+                return
+            self._track = VariableTrack(str(target), self._keyframes)
+        elif idx == 1:  # 路径轨道
+            if target is None:
+                QMessageBox.warning(self, "提示", "请选择路径对象。")
+                return
+            self._track = GliderTrack(int(target), self._keyframes)
+        elif idx == 2:  # 属性轨道
+            if target is None:
+                QMessageBox.warning(self, "提示", "请选择对象。")
+                return
+            attr = self._attr_edit.text().strip()
+            if not attr:
+                QMessageBox.warning(self, "提示", "请输入属性名。")
+                return
+            self._track = PropertyTrack(int(target), attr, self._keyframes)
+
+        self.accept()
+
+    def get_track(self) -> Optional[AnimationTrack]:
+        return self._track
+
+
+class EditTrackDialog(QDialog):
+    """编辑已有轨道。"""
+
+    def __init__(self, track: AnimationTrack, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"编辑轨道: {track.label()}")
+        self.setMinimumWidth(400)
+        self._track = track
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel(f"轨道: {self._track.label()}"))
+
+        self._kf_btn = QPushButton("编辑关键帧…")
+        self._kf_btn.clicked.connect(self._edit_keyframes)
+        layout.addWidget(self._kf_btn)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _edit_keyframes(self):
+        if hasattr(self._track, "keyframes"):
+            dlg = KeyframeEditor(self._track.keyframes, self)
+            dlg.exec()
+
 """几何约束求解器扩展包。
 删除本包即可完全卸载约束功能，不影响原有系统。
 """
@@ -164,15 +1303,56 @@ def register_constraint(name: str):
         return cls
     return deco
 
-"""Document 补丁：添加 constraints 列表、solve_constraints、recompute_silent。"""
+"""Document 补丁：添加 constraints 列表、solve_constraints、recompute_silent。
+新增：过约束检测 —— add_constraint 时若约束冲突，弹窗提示并自动回滚。
+"""
+import math
 from core.document import Document
 from geo.points import FreePoint
 from .solver import ConstraintSolver
 from .graph import get_affected_constraints
 
+OVERCONSTRAINT_TOL = 1e-3
+
 _original_init = Document.__init__
 _original_recompute = Document.recompute_from
 _original_remove = Document._remove
+
+
+
+def _residual_norm(constraints):
+    """计算约束列表的总残差范数（欧氏）。"""
+    total = 0.0
+    for c in constraints:
+        if not getattr(c, "enabled", True):
+            continue
+        try:
+            for f in c.residual():
+                total += f * f
+        except Exception:
+            pass
+    return math.sqrt(total)
+
+
+def _notify_overconstrained():
+    """弹窗提示过约束（无 GUI 环境静默失败）。"""
+    try:
+        import logging
+        logging.getLogger(__name__).warning("过约束：约束冲突，已自动撤销")
+    except Exception:
+        pass
+    try:
+        from PySide6.QtWidgets import QMessageBox, QApplication
+        parent = QApplication.activeWindow()
+        QMessageBox.warning(
+            parent,
+            "过约束",
+            "添加的约束与现有约束冲突（过约束）。\n"
+            "系统已自动撤销本次操作，几何图形已恢复。",
+        )
+    except Exception:
+        pass
+
 
 
 def _recompute_silent(self, roots):
@@ -209,7 +1389,8 @@ def _new_remove(self, obj):
     if hasattr(self, 'constraints') and self.constraints:
         to_remove = [
             c for c in self.constraints
-            if any(getattr(p, 'id', None) in doomed_ids for p in c.involved_points())
+            if any(getattr(p, 'id', None) in doomed_ids
+                   for p in c.involved_points())
         ]
         for c in to_remove:
             self.constraints.remove(c)
@@ -217,9 +1398,24 @@ def _new_remove(self, obj):
 
 
 def add_constraint(self, constraint):
-    """添加约束并立即求解。"""
+    """添加约束并立即求解。过约束时弹窗提示并自动回滚。"""
+    backup = [
+        (p, p.x, p.y)
+        for p in self.objects
+        if isinstance(p, FreePoint)
+    ]
     self.constraints.append(constraint)
     self.solve_constraints()
+    if _residual_norm(self.constraints) > OVERCONSTRAINT_TOL:
+        if constraint in self.constraints:
+            self.constraints.remove(constraint)
+        for p, x, y in backup:
+            p.x, p.y = x, y
+        if backup:
+            self._recompute_silent([p for p, _, _ in backup])
+        self.changed.emit()
+        _notify_overconstrained()
+        return
     self.changed.emit()
 
 
@@ -231,42 +1427,31 @@ def remove_constraint(self, constraint):
 
 
 def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
-    """求解约束系统。
-
-    参数:
-        trigger_points: 触发求解的点（缩小范围），None 则求解全部
-        pinned_points: 固定不动的点（如正在拖动的点）
-    """
+    """求解约束系统。返回是否收敛成功。"""
     MAX_DEPTH = 5
     if not self.constraints or _depth >= MAX_DEPTH:
-        return
-
+        return True
     if trigger_points:
         affected = get_affected_constraints(trigger_points, self.constraints)
     else:
         affected = [c for c in self.constraints if c.enabled]
-
     if not affected:
-        return
-
+        return True
     pinned_set = set(pinned_points or [])
     free_set = set()
     for c in affected:
         for p in c.involved_points():
             if isinstance(p, FreePoint) and p not in pinned_set:
                 free_set.add(p)
-
     if not free_set:
-        return
-
+        return True
     solver = ConstraintSolver(max_iter=50, tol=1e-9)
-    solver.solve(affected, list(free_set), list(pinned_set))
-
-    _recompute_silent(self, list(free_set))
-
+    success = solver.solve(affected, list(free_set), list(pinned_set))
+    self._recompute_silent(list(free_set))
     moved = list(free_set)
     if moved:
         self.solve_constraints(moved, pinned_points, _depth + 1)
+    return success
 
 
 def patch_document():
@@ -660,6 +1845,124 @@ class AngleConstraint(GeometricConstraint):
     @classmethod
     def build(cls, point_map, params):
         return cls(point_map[params["p1"]], point_map[params["vertex"]], point_map[params["p2"]], params["expr"])
+
+"""圆相关约束：同心、等半径、相切（圆-圆、线-圆）。"""
+import math
+from ..base import GeometricConstraint, register_constraint
+
+def _dist(p1, p2):
+    return math.hypot(p1.x - p2.x, p1.y - p2.y)
+
+@register_constraint("concentric")
+class ConcentricConstraint(GeometricConstraint):
+    """同心：两个圆共享同一个圆心。"""
+    def __init__(self, c1, c2):
+        super().__init__()
+        self.c1, self.c2 = c1, c2
+        
+    def involved_points(self):
+        return [self.c1.center, self.c2.center]
+
+    def residual(self):
+        return [
+            self.c1.center.x - self.c2.center.x,
+            self.c1.center.y - self.c2.center.y
+        ]
+
+    def dump(self):
+        return {"c1": self.c1.id, "c2": self.c2.id}
+
+    @classmethod
+    def build(cls, obj_map, params):
+        return cls(obj_map[params["c1"]], obj_map[params["c2"]])
+
+
+@register_constraint("equal_radius")
+class EqualRadiusConstraint(GeometricConstraint):
+    """等半径：两个圆的半径相等。"""
+    def __init__(self, c1, c2):
+        super().__init__()
+        self.c1, self.c2 = c1, c2
+        
+    def involved_points(self):
+        return [self.c1.center, self.c1.through, self.c2.center, self.c2.through]
+
+    def residual(self):
+        r1 = _dist(self.c1.center, self.c1.through)
+        r2 = _dist(self.c2.center, self.c2.through)
+        return [r1 - r2]
+
+    def dump(self):
+        return {"c1": self.c1.id, "c2": self.c2.id}
+
+    @classmethod
+    def build(cls, obj_map, params):
+        return cls(obj_map[params["c1"]], obj_map[params["c2"]])
+
+
+@register_constraint("tangent_circles")
+class TangentCirclesConstraint(GeometricConstraint):
+    """两圆相切。
+    mode="outer": 外切 (d = r1 + r2)
+    mode="inner": 内切 (d + r2 = r1，假设 c1 包含 c2)
+    """
+    def __init__(self, c1, c2, mode="outer"):
+        super().__init__()
+        self.c1, self.c2 = c1, c2
+        self.mode = mode
+        
+    def involved_points(self):
+        return [self.c1.center, self.c1.through, self.c2.center, self.c2.through]
+
+    def residual(self):
+        d = _dist(self.c1.center, self.c2.center)
+        r1 = _dist(self.c1.center, self.c1.through)
+        r2 = _dist(self.c2.center, self.c2.through)
+        
+        if self.mode == "inner":
+            return [d + r2 - r1]
+        else:
+            return [d - (r1 + r2)]
+
+    def dump(self):
+        return {"c1": self.c1.id, "c2": self.c2.id, "mode": self.mode}
+
+    @classmethod
+    def build(cls, obj_map, params):
+        return cls(obj_map[params["c1"]], obj_map[params["c2"]], params.get("mode", "outer"))
+
+
+@register_constraint("tangent_line_circle")
+class TangentLineCircleConstraint(GeometricConstraint):
+    """直线/线段与圆相切：圆心到直线的距离等于半径。"""
+    def __init__(self, line, circle):
+        super().__init__()
+        self.line, self.circle = line, circle
+        
+    def involved_points(self):
+        return [self.line.a, self.line.b, self.circle.center, self.circle.through]
+
+    def residual(self):
+        ax, ay = self.line.a.x, self.line.a.y
+        bx, by = self.line.b.x, self.line.b.y
+        cx, cy = self.circle.center.x, self.circle.center.y
+        
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return [0.0]
+            
+        dist = abs(dx * (ay - cy) - dy * (ax - cx)) / L
+        r = _dist(self.circle.center, self.circle.through)
+        
+        return [dist - r]
+
+    def dump(self):
+        return {"line": self.line.id, "circle": self.circle.id}
+
+    @classmethod
+    def build(cls, obj_map, params):
+        return cls(obj_map[params["line"]], obj_map[params["circle"]])
 
 import math
 from ..base import GeometricConstraint, register_constraint
@@ -1101,10 +2404,15 @@ def patch_canvas():
     setattr(Canvas, "paintEvent", _new_paint)
 
 """约束创建工具集（智能拾取版）。"""
+from typing import Any, Optional
 from PySide6.QtWidgets import QInputDialog
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor
+
 from core.registry import register_tool
 from tools.base import Tool, point_or_snap
 from geo.points import AbstractPoint
+
 from ..types.distance import DistanceConstraint
 from ..types.fixed import FixedConstraint
 from ..types.horizontal import HorizontalConstraint
@@ -1113,15 +2421,11 @@ from ..types.angle import AngleConstraint
 from ..types.parallel import ParallelConstraint
 from ..types.perpendicular import PerpendicularConstraint
 from ..types.collinear import CollinearConstraint
-from ..types.tangent import TangentCC, TangentCL
+
 
 def _extract_points(hit):
-    """★ 智能拾取引擎：自动从几何对象中提取定义点。
-    - 点 -> [点]
-    - 线段/直线/射线 -> [端点a, 端点b]
-    - 圆 -> [圆心, 圆周点]
-    """
-    if hit is None: 
+    """★ 智能拾取引擎：自动从几何对象中提取定义点。"""
+    if hit is None:
         return []
     if isinstance(hit, AbstractPoint):
         return [hit]
@@ -1131,42 +2435,55 @@ def _extract_points(hit):
         return [hit.center, hit.through]
     if hasattr(hit, "verts") and hasattr(hit, "n"):
         verts = [c for c in getattr(hit, 'children', []) if type(c).__name__ == 'PolygonVertex']
-        if verts: return verts
+        if verts:
+            return verts
     return []
 
+
 class BaseConstraintTool(Tool):
-    """约束工具基类：统一处理智能拾取与状态机。"""
-    constraint_cls = None
-    n_points = 2
-    needs_expr = False
-    expr_title = ""
-    expr_label = ""
-    expr_default = ""
+    """约束工具基类：统一处理智能拾取、状态机与实时预览高亮。"""
+    
+    constraint_cls: Optional[Any] = None
+    n_points: int = 2
+    needs_expr: bool = False
+    expr_title: str = ""
+    expr_label: str = ""
+    expr_default: str = ""
 
     def __init__(self):
         self.pts = []
+        self._hover = None
 
     def activated(self, canvas):
         self.pts = []
+        self._hover = None
 
     def deactivated(self, canvas):
         self.pts = []
+        self._hover = None
 
     def press(self, canvas, wpt, hit):
         extracted = _extract_points(hit)
         if extracted:
             for p in extracted:
-                if p not in self.pts: # 去重
+                if p not in self.pts:  # 去重
                     self.pts.append(p)
         else:
             pt = point_or_snap(canvas, wpt, hit)
             if pt and pt not in self.pts:
                 self.pts.append(pt)
-                
+
         if len(self.pts) >= self.n_points:
             self._finalize(canvas)
 
+    def move(self, canvas, wpt, hit):
+        """★ 实时预览：记录悬停对象"""
+        self._hover = hit
+
     def _finalize(self, canvas):
+        if self.constraint_cls is None:
+            return
+
         pts = self.pts[:self.n_points]
         if self.needs_expr:
             expr, ok = QInputDialog.getText(
@@ -1175,10 +2492,8 @@ class BaseConstraintTool(Tool):
             if not (ok and expr.strip()):
                 self.pts = []
                 return
-            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts, expr.strip())
         else:
-            assert self.constraint_cls is not None
             c = self.constraint_cls(*pts)
             
         canvas.doc.add_constraint(c)
@@ -1187,9 +2502,57 @@ class BaseConstraintTool(Tool):
 
     def cancel(self, canvas):
         self.pts = []
+        self._hover = None
         canvas.update()
 
-@register_tool(name="距离约束", order=501, panel="constraint", icon="distance", 
+    def draw_overlay(self, p, view):
+        try:
+            from ui import theme
+        except Exception:
+            return
+
+        if self.pts:
+            p.setPen(theme.pen(theme.ACCENT, 2.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for pt in self.pts:
+                if hasattr(pt, 'x') and hasattr(pt, 'y'):
+                    sp = view.to_screen(pt.x, pt.y)
+                    p.drawEllipse(sp, 8, 8)
+
+        if self._hover is not None:
+            color = QColor(theme.PREVIEW)
+            color.setAlphaF(0.25)
+
+            if hasattr(self._hover, 'center') and hasattr(self._hover, 'r'):
+                c = view.to_screen(self._hover.center.x, self._hover.center.y)
+                p.setPen(theme.dashed_pen(theme.PREVIEW, 2.0))
+                p.setBrush(theme.brush(color))
+                p.drawEllipse(c, self._hover.r * view.scale,
+                              self._hover.r * view.scale)
+            elif hasattr(self._hover, 'a') and hasattr(self._hover, 'b') \
+                    and hasattr(self._hover.a, 'x'):
+                p.setPen(theme.pen(theme.PREVIEW, 3.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                sa = view.to_screen(self._hover.a.x, self._hover.a.y)
+                sb = view.to_screen(self._hover.b.x, self._hover.b.y)
+                p.drawLine(sa, sb)
+            elif hasattr(self._hover, 'x') and hasattr(self._hover, 'y'):
+                sp = view.to_screen(self._hover.x, self._hover.y)
+                p.setPen(theme.pen(theme.PREVIEW, 2.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(sp, 10, 10)
+
+        if len(self.pts) >= 2:
+            p.setPen(theme.dashed_pen(theme.ACCENT, 1.5))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for i in range(len(self.pts) - 1):
+                a, b = self.pts[i], self.pts[i + 1]
+                if hasattr(a, 'x') and hasattr(b, 'x'):
+                    p.drawLine(view.to_screen(a.x, a.y),
+                               view.to_screen(b.x, b.y))
+
+
+@register_tool(name="距离约束", order=501, panel="constraint", icon="distance",
                hint="★ 点击线段或两点，约束距离")
 class DistanceConstraintTool(BaseConstraintTool):
     constraint_cls = DistanceConstraint
@@ -1199,31 +2562,32 @@ class DistanceConstraintTool(BaseConstraintTool):
     expr_label = "距离表达式（如 5, a*2）："
     expr_default = "5"
 
-@register_tool(name="固定约束", order=502, panel="constraint", icon="point", 
+@register_tool(name="固定约束", order=502, panel="constraint", icon="point",
                hint="点击一个点或图形，将其固定")
 class FixedConstraintTool(BaseConstraintTool):
     constraint_cls = FixedConstraint
     n_points = 1
     def _finalize(self, canvas):
+        if not self.pts: return
         p = self.pts[0]
         c = FixedConstraint(p, p.x, p.y)
         canvas.doc.add_constraint(c)
         self.pts = []
         canvas.update()
 
-@register_tool(name="水平约束", order=503, panel="constraint", icon="constraint_horizontal", 
+@register_tool(name="水平约束", order=503, panel="constraint", icon="constraint_horizontal",
                hint="★ 点击线段或两点，使 Y 坐标相同")
 class HorizontalConstraintTool(BaseConstraintTool):
     constraint_cls = HorizontalConstraint
     n_points = 2
 
-@register_tool(name="竖直约束", order=504, panel="constraint", icon="constraint_vertical", 
+@register_tool(name="竖直约束", order=504, panel="constraint", icon="constraint_vertical",
                hint="★ 点击线段或两点，使 X 坐标相同")
 class VerticalConstraintTool(BaseConstraintTool):
     constraint_cls = VerticalConstraint
     n_points = 2
 
-@register_tool(name="角度约束", order=505, panel="constraint", icon="constraint_angle", 
+@register_tool(name="角度约束", order=505, panel="constraint", icon="constraint_angle",
                hint="依次点击：边1、顶点、边2")
 class AngleConstraintTool(BaseConstraintTool):
     constraint_cls = AngleConstraint
@@ -1236,61 +2600,144 @@ class AngleConstraintTool(BaseConstraintTool):
 class LineConstraintTool(BaseConstraintTool):
     n_points = 4
 
-@register_tool(name="平行约束", order=506, panel="constraint", icon="constraint_parallel", 
+@register_tool(name="平行约束", order=506, panel="constraint", icon="constraint_parallel",
                hint="★ 依次点击两条线段，使它们平行")
 class ParallelTool(LineConstraintTool):
     constraint_cls = ParallelConstraint
 
-@register_tool(name="垂直约束", order=507, panel="constraint", icon="constraint_perpendicular", 
+@register_tool(name="垂直约束", order=507, panel="constraint", icon="constraint_perpendicular",
                hint="★ 依次点击两条线段，使它们垂直")
 class PerpendicularTool(LineConstraintTool):
     constraint_cls = PerpendicularConstraint
 
-@register_tool(name="共线约束", order=508, panel="constraint", icon="constraint_collinear", 
+@register_tool(name="共线约束", order=508, panel="constraint", icon="constraint_collinear",
                hint="点击三个点或线段，使它们共线")
 class CollinearTool(BaseConstraintTool):
     constraint_cls = CollinearConstraint
     n_points = 3
     
-@register_tool(name="圆-圆外切", order=509, panel="constraint",
-               icon="constraint_tangent",
-               hint="依次点击两个圆，使它们外切")
-class TangentCCExtTool(BaseConstraintTool):
-    n_points = 4
+from ..types.circle_constraints import (
+    ConcentricConstraint, EqualRadiusConstraint,
+    TangentCirclesConstraint, TangentLineCircleConstraint
+)
 
+class BaseObjectConstraintTool(Tool):
+    """对象级约束工具基类：用于拾取圆、直线等完整对象。"""
+    constraint_cls = None
+    n_objects = 2
+    valid_types = () 
+    
+    def __init__(self):
+        self.objs = []
+        self._hover = None
+        
+    def activated(self, canvas):
+        self.objs = []
+        self._hover = None
+        
+    def deactivated(self, canvas):
+        self.objs = []
+        self._hover = None
+        
+    def move(self, canvas, wpt, hit):
+        self._hover = hit
+        
+    def press(self, canvas, wpt, hit):
+        if hit is not None and type(hit).__name__ in self.valid_types:
+            if hit not in self.objs:
+                self.objs.append(hit)
+        if len(self.objs) >= self.n_objects:
+            self._finalize(canvas)
+            
     def _finalize(self, canvas):
-        pts = self.pts[:4]
-        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "external")
+        if self.constraint_cls is None: return
+        c = self.constraint_cls(*self.objs[:self.n_objects])
         canvas.doc.add_constraint(c)
-        self.pts = []
+        self.objs = []
         canvas.update()
-
-
-@register_tool(name="圆-圆内切", order=510, panel="constraint",
-               icon="constraint_tangent",
-               hint="依次点击两个圆，使它们内切")
-class TangentCCIntTool(BaseConstraintTool):
-    n_points = 4
-
-    def _finalize(self, canvas):
-        pts = self.pts[:4]
-        c = TangentCC(pts[0], pts[1], pts[2], pts[3], "internal")
-        canvas.doc.add_constraint(c)
-        self.pts = []
+        
+    def cancel(self, canvas):
+        self.objs = []
+        self._hover = None
         canvas.update()
+        
+    def draw_overlay(self, p, view):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QColor
+        from ui import theme
+        
+        if self._hover is not None and type(self._hover).__name__ in self.valid_types:
+            color = QColor(theme.PREVIEW)
+            color.setAlphaF(0.25)
+            if hasattr(self._hover, 'center') and hasattr(self._hover, 'r'):
+                c = view.to_screen(self._hover.center.x, self._hover.center.y)
+                p.setPen(theme.dashed_pen(theme.PREVIEW, 2.0))
+                p.setBrush(theme.brush(color))
+                p.drawEllipse(c, self._hover.r * view.scale, self._hover.r * view.scale)
+            elif hasattr(self._hover, 'a') and hasattr(self._hover, 'b'):
+                p.setPen(theme.pen(theme.PREVIEW, 3.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                sa = view.to_screen(self._hover.a.x, self._hover.a.y)
+                sb = view.to_screen(self._hover.b.x, self._hover.b.y)
+                p.drawLine(sa, sb)
+                
+        for obj in self.objs:
+            if hasattr(obj, 'center') and hasattr(obj, 'r'):
+                c = view.to_screen(obj.center.x, obj.center.y)
+                p.setPen(theme.pen(theme.ACCENT, 2.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(c, obj.r * view.scale, obj.r * view.scale)
+            elif hasattr(obj, 'a') and hasattr(obj, 'b'):
+                p.setPen(theme.pen(theme.ACCENT, 3.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                sa = view.to_screen(obj.a.x, obj.a.y)
+                sb = view.to_screen(obj.b.x, obj.b.y)
+                p.drawLine(sa, sb)
 
 
-@register_tool(name="圆-线相切", order=511, panel="constraint",
-               icon="constraint_tangent",
-               hint="先点击一个圆，再点击一条线段/直线，使它们相切")
-class TangentCLTool(BaseConstraintTool):
-    n_points = 4
+@register_tool(name="同心约束", order=510, panel="constraint", icon="circle",
+               hint="★ 依次点击两个圆，使它们同心")
+class ConcentricTool(BaseObjectConstraintTool):
+    constraint_cls = ConcentricConstraint
+    n_objects = 2
+    valid_types = ("Circle", "ExprCircle", "ThreePointCircle")
 
+@register_tool(name="等半径约束", order=511, panel="constraint", icon="circle",
+               hint="★ 依次点击两个圆，使它们半径相等")
+class EqualRadiusTool(BaseObjectConstraintTool):
+    constraint_cls = EqualRadiusConstraint
+    n_objects = 2
+    valid_types = ("Circle", "ExprCircle", "ThreePointCircle")
+
+@register_tool(name="圆相切约束", order=512, panel="constraint", icon="circle",
+               hint="★ 依次点击两个圆，使它们外切")
+class TangentCirclesTool(BaseObjectConstraintTool):
+    constraint_cls = TangentCirclesConstraint
+    n_objects = 2
+    valid_types = ("Circle", "ExprCircle", "ThreePointCircle")
+
+@register_tool(name="线圆相切约束", order=513, panel="constraint", icon="circle",
+               hint="★ 点击一条线段/直线和一个圆，使它们相切")
+class TangentLineCircleTool(BaseObjectConstraintTool):
+    constraint_cls = TangentLineCircleConstraint
+    n_objects = 2
+    valid_types = ("Circle", "ExprCircle", "ThreePointCircle", "Line", "Segment")
+    
     def _finalize(self, canvas):
-        pts = self.pts[:4]
-        c = TangentCL(pts[0], pts[1], pts[2], pts[3])
+        o1, o2 = self.objs[0], self.objs[1]
+        is_o1_circle = type(o1).__name__ in ("Circle", "ExprCircle", "ThreePointCircle")
+        is_o2_circle = type(o2).__name__ in ("Circle", "ExprCircle", "ThreePointCircle")
+        
+        if is_o1_circle and not is_o2_circle:
+            c = TangentLineCircleConstraint(o2, o1)
+        elif is_o2_circle and not is_o1_circle:
+            c = TangentLineCircleConstraint(o1, o2)
+        else:
+            self.objs = []
+            return
+            
         canvas.doc.add_constraint(c)
-        self.pts = []
+        self.objs = []
         canvas.update()
 
 
@@ -1637,21 +3084,18 @@ class Document(QObject):
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
         from geo.function_curve import FunctionCurve
-
         for obj in self.get_typed("FunctionCurve"):
             obj.invalidate_cache()
-
+        for obj in self.get_typed("ImplicitCurve"):
+            obj.invalidate_cache()
         moved = []
         for eo in sorted(self.expr_objects, key=lambda o: o.id):
             if eo.exists:
                 eo.recompute()
-                moved.extend(eo.moved_points())
-
+            moved.extend(eo.moved_points())
         if moved:
-            self.recompute_silent(moved)    # ★ 静默重算，不单独 emit
-
-
-        self.changed.emit()                 # ★ 统一 emit 一次
+            self.recompute_silent(moved)
+        self.changed.emit()
 
     @contextmanager
     def action(self):
@@ -1718,14 +3162,12 @@ class Document(QObject):
     def save(self, path):
         import zipfile
         import datetime
+        import os
         from ui import theme as _theme
-
         self.meta["theme"] = _theme.active_name()
         self.meta["modified"] = datetime.datetime.now().isoformat(timespec="seconds")
-
         if not self.meta.get("created"):
             self.meta["created"] = self.meta["modified"]
-
         with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(
                 "sketch.json",
@@ -1748,20 +3190,54 @@ class Document(QObject):
                     "script_libs.json",
                     json.dumps(self.script_libs, ensure_ascii=False, indent=1)
                 )
+            for obj in self.objects:
+                if type(obj).__name__ == "ImageObject":
+                    img_path = getattr(obj, "path", None)
+                    if img_path and os.path.exists(img_path):
+                        ext = os.path.splitext(img_path)[1] or ".png"
+                        arcname = f"media/images/{obj.id}{ext}"
+                        try:
+                            zf.write(img_path, arcname)
+                        except Exception:
+                            pass
 
     def load(self, path):
         import zipfile
+        import tempfile
+        import os
         from ui import theme as _theme
-
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
+
+            self._temp_image_dir = tempfile.mkdtemp(prefix="geosketch_img_")
+            for name in names:
+                if name.startswith("media/images/"):
+                    try:
+                        data = zf.read(name)
+                        fname = os.path.basename(name)
+                        tmp_path = os.path.join(self._temp_image_dir, fname)
+                        with open(tmp_path, "wb") as f:
+                            f.write(data)
+                    except Exception:
+                        pass
 
             if "variables.json" in names:
                 self.vars.load_dict(json.loads(zf.read("variables.json")))
             else:
                 self.vars.load_dict({})
-                
-            self._load_state(json.loads(zf.read("sketch.json")))
+
+            sketch_data = json.loads(zf.read("sketch.json"))
+            for item in sketch_data:
+                if item.get("type") == "ImageObject":
+                    params = item.get("params", {})
+                    img_name = params.get("image_name")
+                    if img_name:
+                        params["path"] = os.path.join(
+                            self._temp_image_dir, img_name)
+                        params.pop("image_name", None)
+
+            self._load_state(sketch_data)
+
             if "script_libs.json" in names:
                 try:
                     self.script_libs = json.loads(zf.read("script_libs.json"))
@@ -1769,13 +3245,10 @@ class Document(QObject):
                     self.script_libs = {}
             else:
                 self.script_libs = {}
-                
             if "meta.data" in names:
                 self.meta = json.loads(zf.read("meta.data"))
-
-            if self.meta.get("theme") in _theme.theme_names():
-                _theme.set_theme(self.meta["theme"])
-                
+                if self.meta.get("theme") in _theme.theme_names():
+                    _theme.set_theme(self.meta["theme"])
             if "macros.json" in names:
                 try:
                     self.macros = json.loads(zf.read("macros.json"))
@@ -1783,7 +3256,7 @@ class Document(QObject):
                     self.macros = []
             else:
                 self.macros = []
-        self.refresh_variables()
+            self.refresh_variables()
 
 """宏录制与回放系统。
 
@@ -2605,7 +4078,15 @@ def build_global_env(interp):
         "floor": math.floor, "ceil": math.ceil, 
         "round": lambda x: float(round(x)),
         "min": min, "max": max,
-
+        "floor": math.floor,
+        "ceil": math.ceil,
+        "round": lambda x: float(round(x)),
+        "sign": lambda x: (x > 0) - (x < 0),
+        "min": min,
+        "max": max,
+        "sec": lambda x: 1.0 / math.cos(x),
+        "csc": lambda x: 1.0 / math.sin(x),
+        "cot": lambda x: 1.0 / math.tan(x),
         "print": _print,
         "打印": _print,
 
@@ -2651,6 +4132,10 @@ def build_global_env(interp):
         "function": factory.function,
         "parametric": factory.parametric,
         "polar": factory.polar,
+        
+        "implicit_curve": factory.implicit_curve,
+        "隐函数": factory.implicit_curve,
+        "implicit": factory.implicit_curve,
     }
 
     return env
@@ -3545,7 +5030,564 @@ def build_math_lib(interp=None):
         "round": lambda x: float(round(x)),
 
         "random": random.random,
+        
+"floor": math.floor,
+"ceil": math.ceil,
+"round": lambda x: float(round(x)),
+"sign": lambda x: (x > 0) - (x < 0),
+"min": min,
+"max": max,
+"sec": lambda x: 1.0 / math.cos(x),
+"csc": lambda x: 1.0 / math.sin(x),
+"cot": lambda x: 1.0 / math.tan(x),
     }
+
+"""宏 → 脚本转换引擎。
+架构：注册表模式，每种对象类型注册独立的转换函数。
+扩展：新增对象类型只需 @register_converter("TypeName") 即可。
+"""
+from __future__ import annotations
+
+from typing import Any, Callable, Dict, List, Optional
+
+TYPE_PREFIX: Dict[str, str] = {
+    "FreePoint": "P",
+    "PointOnObject": "P",
+    "IntersectPoint": "X",
+    "DivisionPoint": "D",
+    "PolygonVertex": "V",
+    "TransformPoint": "TP",
+    "IterPoint": "IP",
+    "CircleAxisPoint": "AP",
+    "ExprPoint": "P",
+    "Incenter": "I",
+    "Centroid": "G",
+    "Segment": "S",
+    "Line": "L",
+    "Ray": "R",
+    "DirectedLine": "DL",
+    "PerpLine": "PL",
+    "ParallelLine": "ParL",
+    "AngleBisector": "AB",
+    "AngleDivLine": "ADL",
+    "PerpBisector": "PB",
+    "ExprSegment": "S",
+    "Circle": "C",
+    "ExprCircle": "C",
+    "ThreePointCircle": "C",
+    "InvertedCircle": "IC",
+    "Ellipse": "E",
+    "CubicBezier": "Bez",
+    "FunctionCurve": "f",
+    "RegularPolygon": "Poly",
+    "ChainFill": "Fill",
+    "AngleMeasure": "Ang",
+    "RatioMeasure": "Rat",
+    "Measure": "M",
+    "RegionMeasure": "RM",
+    "ExprAngle": "Ang",
+    "TransformDriver": "Drv",
+    "TextObject": "T",
+    "ScriptButtonObject": "Btn",
+    "TableObject": "Tbl",
+    "PieChartObject": "Pie",
+    "BarChartObject": "Bar",
+    "ImageObject": "Img",
+    "InkStroke": "Ink",
+    "InkEraser": "Eraser",
+}
+
+ConvertFn = Callable[[Dict[str, str], dict, "MacroToScriptConverter"], str]
+CONVERTERS: Dict[str, ConvertFn] = {}
+
+
+def register_converter(type_name: str):
+    """装饰器：为指定对象类型注册转换函数。"""
+    def deco(fn: ConvertFn):
+        CONVERTERS[type_name] = fn
+        return fn
+    return deco
+
+
+class MacroToScriptConverter:
+    """将宏命令序列转换为可执行的脚本代码。
+
+    用法：
+        converter = MacroToScriptConverter()
+        script = converter.convert(macro_dict)
+    """
+
+    def __init__(self, *, keep: bool = True, comment_header: bool = True):
+        """
+        参数：
+            keep: 是否在脚本头部添加 __keep = true（默认 True）
+            comment_header: 是否添加注释头
+        """
+        self.keep = keep
+        self.comment_header = comment_header
+        self.alias_to_var: Dict[str, str] = {}
+        self._counters: Dict[str, int] = {}
+
+    def convert(self, macro: dict) -> str:
+        """将宏字典转换为脚本字符串。
+
+        参数：
+            macro: {"name": "...", "commands": [...]}
+        返回：
+            脚本代码字符串
+        """
+        self.alias_to_var.clear()
+        self._counters.clear()
+
+        lines: List[str] = []
+
+        if self.comment_header:
+            name = macro.get("name", "未命名宏")
+            cmd_count = len(macro.get("commands", []))
+            lines.append(f"# ===== 由宏「{name}」自动生成 =====")
+            lines.append(f"# 原始命令数：{cmd_count}")
+            lines.append("")
+
+        if self.keep:
+            lines.append("__keep = true")
+            lines.append("")
+
+        commands = macro.get("commands", [])
+        for cmd in commands:
+            converted = self._convert_command(cmd)
+            if converted:
+                lines.append(converted)
+
+        return "\n".join(lines)
+
+    def _convert_command(self, cmd: dict) -> str:
+        cmd_type = cmd.get("type", "")
+        if cmd_type == "add":
+            return self._convert_add(cmd)
+        elif cmd_type == "move":
+            return self._convert_move(cmd)
+        elif cmd_type == "delete":
+            return self._convert_delete(cmd)
+        elif cmd_type == "set_var":
+            return self._convert_set_var(cmd)
+        elif cmd_type == "clear":
+            return "delete all"
+        return f"# 未知命令类型：{cmd_type}"
+
+    def _convert_add(self, cmd: dict) -> str:
+        type_name = cmd.get("class", "")
+        alias = cmd.get("alias", "")
+
+        var = self._make_var(alias, type_name)
+        self.alias_to_var[alias] = var
+
+        converter_fn = CONVERTERS.get(type_name)
+        if converter_fn is None:
+            return f"# ⚠ 暂不支持的对象类型：{type_name}（变量 {var}）"
+
+        try:
+            return converter_fn(self.alias_to_var, cmd, self)
+        except Exception as e:
+            return f"# ⚠ 转换 {type_name} 时出错：{e}"
+
+    def _convert_move(self, cmd: dict) -> str:
+        alias = cmd.get("alias", "")
+        var = self.alias_to_var.get(alias, alias)
+        params = cmd.get("params", {})
+
+        if "x" in params and "y" in params:
+            x = self._fmt_num(params["x"])
+            y = self._fmt_num(params["y"])
+            return f"# 移动 {var} 到 ({x}, {y})（脚本暂不支持属性赋值，需手动调整）"
+
+        param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+        return f"# 修改 {var}：{param_str}（需手动调整）"
+
+    def _convert_delete(self, cmd: dict) -> str:
+        alias = cmd.get("alias", "")
+        var = self.alias_to_var.get(alias, alias)
+        return f"delete {var}"
+
+    def _convert_set_var(self, cmd: dict) -> str:
+        name = cmd.get("name", "x")
+        value = cmd.get("value", 0)
+        return f"global {name} = {self._fmt_num(value)}"
+
+    def _make_var(self, alias: str, type_name: str) -> str:
+        """根据对象类型生成有意义的变量名。"""
+        prefix = TYPE_PREFIX.get(type_name, "Obj")
+        count = self._counters.get(prefix, 0) + 1
+        self._counters[prefix] = count
+        return f"{prefix}{count}"
+
+    @staticmethod
+    def _fmt_num(v: Any) -> str:
+        """格式化数字：整数不带小数点，浮点数保留合理精度。"""
+        if isinstance(v, float):
+            if abs(v - round(v)) < 1e-9:
+                return str(int(round(v)))
+            return f"{v:.6g}"
+        return str(v)
+
+    def resolve_parent(self, parent_alias: str) -> str:
+        """将父对象别名解析为脚本变量名。"""
+        return self.alias_to_var.get(parent_alias, f"/* {parent_alias} */")
+
+
+
+@register_converter("FreePoint")
+def _conv_free_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    x = conv._fmt_num(params.get("x", 0))
+    y = conv._fmt_num(params.get("y", 0))
+    var = am[cmd["alias"]]
+    return f"{var} = point({x}, {y})"
+
+
+@register_converter("DivisionPoint")
+def _conv_division_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    t = params.get("t", 0.5)
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ DivisionPoint 缺少父对象"
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    if abs(t - 0.5) < 1e-9:
+        return f"{var} = midpoint({a}, {b})"
+    return f"{var} = division_point({a}, {b}, {conv._fmt_num(t)})"
+
+
+@register_converter("IntersectPoint")
+def _conv_intersect_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    branch = params.get("branch", 0)
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ IntersectPoint 缺少父对象"
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    return f"{var} = intersect({a}, {b}, {branch})"
+
+
+@register_converter("PointOnObject")
+def _conv_point_on_object(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    t = params.get("t", 0.5)
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return f"# ⚠ PointOnObject 缺少宿主对象"
+    host = conv.resolve_parent(parents[0])
+    return f"# ⚠ PointOnObject（吸附点）暂不支持直接转换，宿主：{host}，t={conv._fmt_num(t)}"
+
+
+@register_converter("PolygonVertex")
+def _conv_polygon_vertex(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    k = params.get("k", 0)
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return f"# ⚠ PolygonVertex 缺少父对象"
+    poly = conv.resolve_parent(parents[0])
+    return f"# ⚠ PolygonVertex（多边形顶点）暂不支持，所属：{poly}，索引：{k}"
+
+
+@register_converter("Segment")
+def _conv_segment(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ Segment 缺少父对象"
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    return f"{var} = segment({a}, {b})"
+
+
+@register_converter("Line")
+def _conv_line(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ Line 缺少父对象"
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    return f"{var} = line({a}, {b})"
+
+
+@register_converter("Ray")
+def _conv_ray(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ Ray 缺少父对象"
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    return f"{var} = ray({a}, {b})"
+
+
+@register_converter("DirectedLine")
+def _conv_directed_line(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ DirectedLine（方向直线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("PerpLine")
+def _conv_perp_line(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ PerpLine（垂线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("ParallelLine")
+def _conv_parallel_line(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ ParallelLine（平行线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("AngleBisector")
+def _conv_angle_bisector(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ AngleBisector（角平分线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("AngleDivLine")
+def _conv_angle_div_line(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ AngleDivLine（等分角线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("PerpBisector")
+def _conv_perp_bisector(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ PerpBisector（中垂线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("Circle")
+def _conv_circle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ Circle 缺少父对象"
+    center = conv.resolve_parent(parents[0])
+    through = conv.resolve_parent(parents[1])
+    return f"{var} = circle({center}, {through})"
+
+
+@register_converter("ExprCircle")
+def _conv_expr_circle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    expr = params.get("expr", "1")
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return f"# ⚠ ExprCircle 缺少圆心"
+    center = conv.resolve_parent(parents[0])
+    return f'{var} = circle({center}, "{expr}")'
+
+
+@register_converter("ThreePointCircle")
+def _conv_three_point_circle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ ThreePointCircle（过三点圆）暂不支持转换（变量 {var}）"
+
+
+@register_converter("Ellipse")
+def _conv_ellipse(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 3:
+        return f"# ⚠ Ellipse 缺少父对象"
+    center = conv.resolve_parent(parents[0])
+    axis_a = conv.resolve_parent(parents[1])
+    axis_b = conv.resolve_parent(parents[2])
+    return f"{var} = ellipse({center}, {axis_a}, {axis_b})"
+
+
+@register_converter("CubicBezier")
+def _conv_cubic_bezier(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ CubicBezier（贝塞尔曲线）暂不支持转换（变量 {var}）"
+
+
+@register_converter("FunctionCurve")
+def _conv_function_curve(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    kind = params.get("kind", "explicit")
+    expr = params.get("expr", "x")
+    expr2 = params.get("expr2", "")
+    var = am[cmd["alias"]]
+    if kind == "explicit":
+        return f'{var} = function("{expr}")'
+    elif kind == "parametric":
+        return f'{var} = parametric("{expr}", "{expr2}")'
+    elif kind == "polar":
+        return f'{var} = polar("{expr}")'
+    return f'# ⚠ FunctionCurve 未知类型：{kind}'
+
+
+@register_converter("RegularPolygon")
+def _conv_regular_polygon(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    n = params.get("n", 3)
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return f"# ⚠ RegularPolygon 缺少父对象"
+    center = conv.resolve_parent(parents[0])
+    vertex = conv.resolve_parent(parents[1])
+    return f"{var} = regular_polygon({center}, {vertex}, {n})"
+
+
+@register_converter("ChainFill")
+def _conv_chain_fill(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ ChainFill（链式填充）暂不支持转换（变量 {var}）"
+
+
+@register_converter("AngleMeasure")
+def _conv_angle_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ AngleMeasure（角度度量）暂不支持转换（变量 {var}）"
+
+
+@register_converter("RatioMeasure")
+def _conv_ratio_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ RatioMeasure（比例度量）暂不支持转换（变量 {var}）"
+
+
+@register_converter("Measure")
+def _conv_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    kind = params.get("kind", "unknown")
+    var = am[cmd["alias"]]
+    return f"# ⚠ Measure（{kind} 度量）暂不支持转换（变量 {var}）"
+
+
+@register_converter("ExprSegment")
+def _conv_expr_segment(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    expr = params.get("expr", "")
+    var = am[cmd["alias"]]
+    return f"# ⚠ ExprSegment（表达式线段，表达式：{expr}）暂不支持转换（变量 {var}）"
+
+
+@register_converter("ExprAngle")
+def _conv_expr_angle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    expr = params.get("expr", "")
+    var = am[cmd["alias"]]
+    return f"# ⚠ ExprAngle（表达式角度，表达式：{expr}）暂不支持转换（变量 {var}）"
+
+
+@register_converter("ExprPoint")
+def _conv_expr_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    ex = params.get("expr_x", "0")
+    ey = params.get("expr_y", "0")
+    var = am[cmd["alias"]]
+    return f"# ⚠ ExprPoint（表达式点，x={ex}, y={ey}）暂不支持转换（变量 {var}）"
+
+
+@register_converter("TextObject")
+def _conv_text_object(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    text = params.get("text", "")
+    color = params.get("color", "#1f2937")
+    size = params.get("size", 16)
+    pos = params.get("pos", [0, 0])
+    var = am[cmd["alias"]]
+    text_escaped = str(text).replace('"', '\\"').replace("\n", "\\n")
+    px = conv._fmt_num(pos[0]) if len(pos) > 0 else "0"
+    py = conv._fmt_num(pos[1]) if len(pos) > 1 else "0"
+    return f'{var} = text({px}, {py}, "{text_escaped}", {size}, "{color}")'
+
+
+@register_converter("ScriptButtonObject")
+def _conv_script_button(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ ScriptButtonObject（脚本按钮）暂不支持转换（变量 {var}）"
+
+
+@register_converter("TableObject")
+def _conv_table(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ TableObject（表格）暂不支持转换（变量 {var}）"
+
+
+@register_converter("PieChartObject")
+def _conv_pie_chart(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ PieChartObject（饼图）暂不支持转换（变量 {var}）"
+
+
+@register_converter("BarChartObject")
+def _conv_bar_chart(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ BarChartObject（柱状图）暂不支持转换（变量 {var}）"
+
+
+@register_converter("ImageObject")
+def _conv_image(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ ImageObject（图片）暂不支持转换（变量 {var}）"
+
+
+@register_converter("InkStroke")
+def _conv_ink_stroke(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ InkStroke（墨迹）暂不支持转换（变量 {var}）"
+
+
+@register_converter("InkEraser")
+def _conv_ink_eraser(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ InkEraser（橡皮擦）暂不支持转换（变量 {var}）"
+
+
+@register_converter("TransformDriver")
+def _conv_transform_driver(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ TransformDriver（变换驱动器）暂不支持转换（变量 {var}）"
+
+
+@register_converter("TransformPoint")
+def _conv_transform_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ TransformPoint（变换点）暂不支持转换（变量 {var}）"
+
+
+@register_converter("IterPoint")
+def _conv_iter_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ IterPoint（迭代点）暂不支持转换（变量 {var}）"
+
+
+@register_converter("InvertedCircle")
+def _conv_inverted_circle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ InvertedCircle（反演圆）暂不支持转换（变量 {var}）"
+
+
+@register_converter("CircleAxisPoint")
+def _conv_circle_axis_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ CircleAxisPoint（圆轴点）暂不支持转换（变量 {var}）"
+
+
+@register_converter("RegionMeasure")
+def _conv_region_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    var = am[cmd["alias"]]
+    return f"# ⚠ RegionMeasure（区域度量）暂不支持转换（变量 {var}）"
+
+
+def macro_to_script(macro: dict, *, keep: bool = True) -> str:
+    """一键转换：宏字典 → 脚本字符串。"""
+    converter = MacroToScriptConverter(keep=keep)
+    return converter.convert(macro)
 
 """脚本对象销毁器。"""
 
@@ -3932,6 +5974,23 @@ class ObjectFactory:
             end = self._num(end)
 
         obj = FunctionCurve("polar", expr, "", (start, end))
+        return self.interp.add_created_object(obj)
+    
+    def implicit_curve(self, expr, domain=None, color=None):
+        """创建隐函数曲线 F(x,y)=0。
+        expr: 方程字符串，如 "x^2+y^2=1" 或 "sin(x)*cos(y)=0.5"
+        domain: 可选 (x0, x1, y0, y1)，默认 (-5, 5, -5, 5)
+        color: 可选颜色字符串
+        """
+        from geo.implicit_curve import ImplicitCurve
+        expr = self._text(expr)
+        if domain is not None:
+            if isinstance(domain, (list, tuple)) and len(domain) == 4:
+                domain = tuple(self._num(v) for v in domain)
+            else:
+                domain = None
+        color_str = self._text(color) if color is not None else None
+        obj = ImplicitCurve(expr, domain=domain, color=color_str)
         return self.interp.add_created_object(obj)
 
 """脚本语法分析器：新语法。"""
@@ -4665,17 +6724,18 @@ def is_valid_name(name):
     name = name.strip()
     return (bool(name) and name.isidentifier()
             and not keyword.iskeyword(name) and name not in RESERVED)
-
 _FUNCS = {
     "sin": math.sin, "cos": math.cos, "tan": math.tan,
-    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
-    "asin": math.asin, "acos": math.acos, "atan": math.atan,
-    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
-    "sqrt": math.sqrt, "abs": abs, "ln": math.log, "log": math.log10,
-    "exp": math.exp,
     "cot": lambda x: 1.0 / math.tan(x),
     "sec": lambda x: 1.0 / math.cos(x),
     "csc": lambda x: 1.0 / math.sin(x),
+    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    "sqrt": math.sqrt, "abs": abs, "ln": math.log, "log": math.log10, "exp": math.exp,
+    "floor": math.floor, "ceil": math.ceil, "round": round,
+    "sign": lambda x: (x > 0) - (x < 0),  # 符号函数：返回 -1, 0, 1
+    "min": min, "max": max,
 }
 _FUNC_NAMES = set(_FUNCS)
 
@@ -6353,6 +8413,363 @@ def shutdown_sampler() -> None:
         _sampler.stop()
         _sampler = None
 
+"""隐函数曲线：F(x,y) = 0 的等值线绘制（Marching Squares）。
+支持变量联动，表达式可含滑杆变量。
+"""
+import math
+from typing import List, Tuple, Optional
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QPainterPath
+from core.registry import register_geo, register_renderer
+from core.variables import evaluate, get_store
+from geo.base import GeoObject
+from ui import theme
+
+PALETTE = ["#e8590c", "#1971c2", "#2f9e44", "#9c36b5",
+           "#0c8599", "#e64980", "#f08c00", "#5f3dc4"]
+_color_index = [0]
+
+
+def next_color():
+    c = PALETTE[_color_index[0] % len(PALETTE)]
+    _color_index[0] += 1
+    return c
+
+
+def parse_equation(expr: str) -> str:
+    """把 'x^2+y^2=1' 转为 '(x^2+y^2)-(1)'；无等号则原样返回。"""
+    expr = expr.strip()
+    if "=" in expr:
+        parts = expr.split("=", 1)
+        return f"({parts[0].strip()})-({parts[1].strip()})"
+    return expr
+
+
+@register_geo("ImplicitCurve")
+class ImplicitCurve(GeoObject):
+    """隐函数曲线 F(x,y)=0。"""
+
+    def __init__(self, expr="x^2+y^2=1", domain=None,
+                 color=None, resolution=80, label_text=None):
+        super().__init__(parents=())
+        self.expr = expr
+        self._resolved_expr = parse_equation(expr)
+        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)  # x0, x1, y0, y1
+        self.color = color or next_color()
+        self.resolution = max(30, min(200, resolution))
+        self.label_text = label_text
+        self._segments: List[Tuple[float, float, float, float]] = []
+        self._cache_version: int = -1
+        self._cache_dirty: bool = True
+        self.recompute()
+
+    def invalidate_cache(self):
+        self._cache_dirty = True
+
+    def recompute(self):
+        store = get_store()
+        if not self._cache_dirty and store.version == self._cache_version:
+            return
+        self._segments = self._marching_squares()
+        self._cache_version = store.version
+        self._cache_dirty = False
+        self.exists = len(self._segments) > 0
+
+    def _eval(self, x, y):
+        vd = get_store().as_dict()
+        vd["x"] = x
+        vd["y"] = y
+        v = evaluate(self._resolved_expr, vd)
+        if isinstance(v, complex):
+            return None
+        return v
+
+    def _marching_squares(self):
+        x0, x1, y0, y1 = self.domain
+        n = self.resolution
+        dx = (x1 - x0) / n
+        dy = (y1 - y0) / n
+
+        grid = [[0.0] * (n + 1) for _ in range(n + 1)]
+        for i in range(n + 1):
+            yy = y0 + i * dy
+            for j in range(n + 1):
+                xx = x0 + j * dx
+                v = self._eval(xx, yy)
+                if v is None or isinstance(v, complex) or not math.isfinite(v):
+                    grid[i][j] = 1e18
+                else:
+                    grid[i][j] = v
+
+        segments = []
+        for i in range(n):
+            y_b = y0 + i * dy
+            y_t = y_b + dy
+            row0 = grid[i]
+            row1 = grid[i + 1]
+            for j in range(n):
+                v00 = row0[j]
+                v10 = row0[j + 1]
+                v11 = row1[j + 1]
+                v01 = row1[j]
+
+                if v00 > 1e17 or v10 > 1e17 or v11 > 1e17 or v01 > 1e17:
+                    continue
+
+                case = 0
+                if v00 > 0: case |= 1
+                if v10 > 0: case |= 2
+                if v11 > 0: case |= 4
+                if v01 > 0: case |= 8
+
+                if case == 0 or case == 15:
+                    continue
+
+                x_l = x0 + j * dx
+                x_r = x_l + dx
+
+                pts = []
+                if (v00 > 0) != (v10 > 0):
+                    d = v00 - v10
+                    t = v00 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l + t * dx, y_b))
+                if (v10 > 0) != (v11 > 0):
+                    d = v10 - v11
+                    t = v10 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_r, y_b + t * dy))
+                if (v01 > 0) != (v11 > 0):
+                    d = v01 - v11
+                    t = v01 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l + t * dx, y_t))
+                if (v00 > 0) != (v01 > 0):
+                    d = v00 - v01
+                    t = v00 / d if abs(d) > 1e-15 else 0.5
+                    pts.append((x_l, y_b + t * dy))
+
+                if len(pts) == 2:
+                    segments.append((pts[0][0], pts[0][1],
+                                     pts[1][0], pts[1][1]))
+                elif len(pts) == 4:
+                    center = (v00 + v10 + v11 + v01) * 0.25
+                    if center > 0:
+                        segments.append((pts[0][0], pts[0][1],
+                                         pts[1][0], pts[1][1]))
+                        segments.append((pts[2][0], pts[2][1],
+                                         pts[3][0], pts[3][1]))
+                    else:
+                        segments.append((pts[0][0], pts[0][1],
+                                         pts[3][0], pts[3][1]))
+                        segments.append((pts[1][0], pts[1][1],
+                                         pts[2][0], pts[2][1]))
+        return segments
+
+    def distance_to(self, x, y):
+        if not self._segments:
+            return None
+        best = float("inf")
+        for x1, y1, x2, y2 in self._segments:
+            ddx, ddy = x2 - x1, y2 - y1
+            denom = ddx * ddx + ddy * ddy
+            if denom < 1e-12:
+                d = math.hypot(x - x1, y - y1)
+            else:
+                t = max(0.0, min(1.0,
+                                 ((x - x1) * ddx + (y - y1) * ddy) / denom))
+                d = math.hypot(x - (x1 + t * ddx), y - (y1 + t * ddy))
+            best = min(best, d)
+        return best
+
+    def default_label(self):
+        return self.expr
+
+    def dump(self):
+        return {"expr": self.expr,
+                "domain": list(self.domain),
+                "color": self.color,
+                "resolution": self.resolution,
+                "label_text": self.label_text}
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params.get("expr", "x^2+y^2=1"),
+                   tuple(params["domain"]) if params.get("domain") else None,
+                   params.get("color"),
+                   params.get("resolution", 80),
+                   params.get("label_text"))
+
+
+@register_renderer(ImplicitCurve)
+def draw_implicit(p, obj, view):
+    if not obj.exists or not obj._segments:
+        return
+    color = theme.SELECTED if obj.selected else obj.color
+    p.setPen(theme.pen(color, 2.0))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    for x1, y1, x2, y2 in obj._segments:
+        sp1 = view.to_screen(x1, y1)
+        sp2 = view.to_screen(x2, y2)
+        path.moveTo(sp1)
+        path.lineTo(sp2)
+    if path.elementCount() > 0:
+        p.drawPath(path)
+
+"""隐函数后台采样引擎：Marching Squares 等值线提取。"""
+import math
+from PySide6.QtCore import QThread, Signal, QMutex, QWaitCondition
+from core.variables import evaluate
+
+
+def _marching_squares(fast, vd, x0, x1, y0, y1, nx, ny):
+    dx = (x1 - x0) / nx
+    dy = (y1 - y0) / ny
+
+    grid = [[0.0] * (nx + 1) for _ in range(ny + 1)]
+    for i in range(ny + 1):
+        vd["y"] = y0 + i * dy          # ← 必须设置 y
+        row = grid[i]
+        for j in range(nx + 1):
+            vd["x"] = x0 + j * dx      # ← 必须设置 x
+            v = fast.eval(vd)
+            row[j] = v if v is not None else 1e18
+
+    segments = []
+    for i in range(ny):
+        y_b = y0 + i * dy
+        y_t = y_b + dy
+        row0 = grid[i]
+        row1 = grid[i + 1]
+        for j in range(nx):
+            v00 = row0[j]
+            v10 = row0[j + 1]
+            v11 = row1[j + 1]
+            v01 = row1[j]
+
+            if v00 > 1e17 or v10 > 1e17 or v11 > 1e17 or v01 > 1e17:
+                continue
+
+            case = 0
+            if v00 > 0: case |= 1
+            if v10 > 0: case |= 2
+            if v11 > 0: case |= 4
+            if v01 > 0: case |= 8
+
+            if case == 0 or case == 15:
+                continue
+
+            x_l = x0 + j * dx
+            x_r = x_l + dx
+
+            pts = []
+            if (v00 > 0) != (v10 > 0):
+                d = v00 - v10
+                t = v00 / d if abs(d) > 1e-15 else 0.5
+                pts.append((x_l + t * dx, y_b))
+            if (v10 > 0) != (v11 > 0):
+                d = v10 - v11
+                t = v10 / d if abs(d) > 1e-15 else 0.5
+                pts.append((x_r, y_b + t * dy))
+            if (v01 > 0) != (v11 > 0):
+                d = v01 - v11
+                t = v01 / d if abs(d) > 1e-15 else 0.5
+                pts.append((x_l + t * dx, y_t))
+            if (v00 > 0) != (v01 > 0):
+                d = v00 - v01
+                t = v00 / d if abs(d) > 1e-15 else 0.5
+                pts.append((x_l, y_b + t * dy))
+
+            if len(pts) == 2:
+                segments.append((pts[0][0], pts[0][1], pts[1][0], pts[1][1]))
+            elif len(pts) == 4:
+                center = (v00 + v10 + v11 + v01) * 0.25
+                if center > 0:
+                    segments.append((pts[0][0], pts[0][1], pts[1][0], pts[1][1]))
+                    segments.append((pts[2][0], pts[2][1], pts[3][0], pts[3][1]))
+                else:
+                    segments.append((pts[0][0], pts[0][1], pts[3][0], pts[3][1]))
+                    segments.append((pts[1][0], pts[1][1], pts[2][0], pts[2][1]))
+
+    return segments
+
+
+class _ImplicitTask:
+    __slots__ = ("curve_id", "expr", "domain", "n", "var_snapshot")
+
+    def __init__(self, curve_id, expr, domain, n, var_snapshot):
+        self.curve_id = curve_id
+        self.expr = expr
+        self.domain = domain
+        self.n = n
+        self.var_snapshot = var_snapshot
+
+
+class ImplicitSamplerThread(QThread):
+    sampled = Signal(int, list)  # curve_id, segments
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("ImplicitSamplerThread")
+        self._tasks = {}
+        self._queue = []
+        self._mutex = QMutex()
+        self._cond = QWaitCondition()
+        self._running = True
+
+    def submit(self, curve_id, expr, domain, n, var_snapshot):
+        task = _ImplicitTask(curve_id, expr, domain, n, var_snapshot)
+        self._mutex.lock()
+        self._tasks[curve_id] = task
+        if curve_id not in self._queue:
+            self._queue.append(curve_id)
+        self._cond.wakeOne()
+        self._mutex.unlock()
+
+    def stop(self):
+        self._mutex.lock()
+        self._running = False
+        self._cond.wakeOne()
+        self._mutex.unlock()
+        if self.isRunning():
+            self.wait(5000)
+
+    def run(self):
+        while True:
+            self._mutex.lock()
+            while self._running and not self._queue:
+                self._cond.wait(self._mutex)
+            if not self._running:
+                self._mutex.unlock()
+                break
+            curve_id = self._queue.pop(0)
+            task = self._tasks.pop(curve_id, None)
+            self._mutex.unlock()
+            if task is None:
+                continue
+            x0, x1, y0, y1 = task.domain
+            segments = _marching_squares(
+                task.expr, task.var_snapshot,
+                x0, x1, y0, y1, task.n, task.n
+            )
+            self.sampled.emit(curve_id, segments)
+
+
+_sampler = None
+
+
+def get_implicit_sampler():
+    global _sampler
+    if _sampler is None:
+        _sampler = ImplicitSamplerThread()
+        _sampler.start()
+    return _sampler
+
+
+def shutdown_implicit_sampler():
+    global _sampler
+    if _sampler is not None:
+        _sampler.stop()
+        _sampler = None
+
 """墨迹注释：自由手绘笔画，支持钢笔/荧光笔/铅笔。"""
 import math
 
@@ -6464,19 +8881,8 @@ def draw_eraser(p, obj, view):
         path.lineTo(view.to_screen(*pt))
     p.drawPath(path)
 
-"""通用交点框架：任意两个几何图形的交点。
-
-核心设计：
-  - INTERSECT_SOLVERS 求解器注册表：按图形类型对注册求交函数。
-    新图形（如多边形）在自己的文件里注册求解器即可，本文件无需改动。
-  - IntersectPoint：通用交点对象，AbstractPoint 子类 →
-    磁吸、拾取、渲染、级联删除自动继承；无解时 exists=False 自动隐身，
-    图形移动后重新出现（"活"的交点）。
-"""
 import math
-
 from PySide6.QtCore import QPointF, Qt
-
 from core.registry import register_geo, register_renderer
 from geo.circles import Circle
 from geo.points import AbstractPoint
@@ -6485,7 +8891,6 @@ from ui import theme
 
 INTERSECT_SOLVERS: dict = {}
 
-
 def register_solver(shape_a, shape_b):
     """注册一对图形类型的求交函数 fn(a, b) -> [(x, y), ...]。"""
     def deco(fn):
@@ -6493,6 +8898,73 @@ def register_solver(shape_a, shape_b):
         return fn
     return deco
 
+def _get_line_params(obj):
+    """提取线对象的起点、方向向量和参数范围。"""
+    tn = type(obj).__name__
+    if tn == "Segment":
+        return (obj.a.x, obj.a.y), (obj.b.x - obj.a.x, obj.b.y - obj.a.y), 0.0, 1.0
+    elif tn == "Ray":
+        return (obj.origin.x, obj.origin.y), (obj.through.x - obj.origin.x, obj.through.y - obj.origin.y), 0.0, float('inf')
+    elif tn in ("Line", "DirectedLine", "PerpLine", "ParallelLine", "AngleBisector", "AngleDivLine", "PerpBisector"):
+        if hasattr(obj, 'a') and hasattr(obj, 'b'):
+            return (obj.a.x, obj.a.y), (obj.b.x - obj.a.x, obj.b.y - obj.a.y), float('-inf'), float('inf')
+        elif hasattr(obj, 'point') and hasattr(obj, 'dx') and hasattr(obj, 'dy'):
+            return (obj.point.x, obj.point.y), (obj.dx, obj.dy), float('-inf'), float('inf')
+    return None
+
+def _get_circle_params(obj):
+    """提取圆对象的圆心和半径。"""
+    tn = type(obj).__name__
+    if tn in ("Circle", "ExprCircle", "ThreePointCircle"):
+        if hasattr(obj, 'center') and hasattr(obj, 'r'):
+            return (obj.center.x, obj.center.y), obj.r
+        elif hasattr(obj, 'cx') and hasattr(obj, 'cy') and hasattr(obj, 'r'): 
+            return (obj.cx, obj.cy), obj.r
+    return None
+
+def _fallback_solve(a, b):
+    """通用线-线、线-圆求交（Fallback）。"""
+    la = _get_line_params(a)
+    lb = _get_line_params(b)
+    ca = _get_circle_params(a)
+    cb = _get_circle_params(b)
+    
+    if la and lb:
+        p1, d1, tmin1, tmax1 = la
+        p2, d2, tmin2, tmax2 = lb
+        cross = d1[0]*d2[1] - d1[1]*d2[0]
+        if abs(cross) < 1e-12: return []
+        dx = p2[0] - p1[0]
+        dy = p2[1] - p1[1]
+        t1 = (dx*d2[1] - dy*d2[0]) / cross
+        t2 = (dx*d1[1] - dy*d1[0]) / cross
+        if tmin1 - 1e-9 <= t1 <= tmax1 + 1e-9 and tmin2 - 1e-9 <= t2 <= tmax2 + 1e-9:
+            return [(p1[0] + t1*d1[0], p1[1] + t1*d1[1])]
+        return []
+        
+    if la and cb:
+        p, d, tmin, tmax = la
+        c, r = cb
+        fx, fy = p[0] - c[0], p[1] - c[1]
+        a_q = d[0]*d[0] + d[1]*d[1]
+        if a_q < 1e-12: return []
+        b_q = 2 * (fx*d[0] + fy*d[1])
+        c_q = fx*fx + fy*fy - r*r
+        disc = b_q*b_q - 4*a_q*c_q
+        if disc < 0: return []
+        sq = math.sqrt(max(0, disc))
+        pts = []
+        for t in ((-b_q - sq)/(2*a_q), (-b_q + sq)/(2*a_q)):
+            if tmin - 1e-9 <= t <= tmax + 1e-9:
+                pts.append((p[0] + t*d[0], p[1] + t*d[1]))
+        if len(pts) == 2 and math.hypot(pts[0][0]-pts[1][0], pts[0][1]-pts[1][1]) < 1e-9:
+            pts = pts[:1]
+        return pts
+        
+    if ca and lb:
+        return _fallback_solve(b, a)
+        
+    return []
 
 def solve(a, b):
     """求两图形的全部交点 [(x, y), ...]。自动匹配类型（含对称与继承）。"""
@@ -6501,38 +8973,48 @@ def solve(a, b):
             return fn(a, b)
         if isinstance(a, tb) and isinstance(b, ta):
             return fn(b, a)
-    return []
-
+    return _fallback_solve(a, b)
 
 def has_solver(a, b) -> bool:
     for (ta, tb) in INTERSECT_SOLVERS:
         if (isinstance(a, ta) and isinstance(b, tb)) or \
            (isinstance(a, tb) and isinstance(b, ta)):
             return True
+    if _get_line_params(a) and (_get_line_params(b) or _get_circle_params(b)):
+        return True
+    if _get_circle_params(a) and _get_line_params(b):
+        return True
     return False
-
 
 def max_intersections(a, b) -> int:
     """一对图形最多可能的交点数（用于预创建交点对象，无解时自动隐身）。"""
-    na, nb = getattr(a, "n", 0), getattr(b, "n", 0)     # 多边形边数
+    na = getattr(a, "n", 0)     # 多边形边数
+    nb = getattr(b, "n", 0)     
+    tn_a = type(a).__name__
+    tn_b = type(b).__name__
+    
+    line_names = {"Segment", "Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine", "AngleBisector", "AngleDivLine", "PerpBisector"}
+    circle_names = {"Circle", "ExprCircle", "ThreePointCircle"}
+    
+    if tn_a in line_names and tn_b in line_names: return 1
+    if (tn_a in line_names and tn_b in circle_names) or (tn_a in circle_names and tn_b in line_names): return 2
+    if tn_a in circle_names and tn_b in circle_names: return 2
+    
     if na and nb:                                        # 多边形 × 多边形
         return 2 * min(na, nb)
     if na or nb:                                         # 多边形 × (圆|线段)
         n = na or nb
         other = b if na else a
-        return 2 * n if isinstance(other, Circle) else 2
-    if isinstance(a, Segment) and isinstance(b, Segment):
-        return 1
+        if type(other).__name__ in circle_names: return 2 * n
+        if type(other).__name__ in line_names: return n
+        return 2 * n
     return 2                                             # 线段×圆 / 圆×圆
 
-
 def _seg_seg(p1, p2, p3, p4):
-    """线段 p1p2 与 p3p4 的交点（0 或 1 个）。"""
     d1x, d1y = p2[0] - p1[0], p2[1] - p1[1]
     d2x, d2y = p4[0] - p3[0], p4[1] - p3[1]
     cross = d1x * d2y - d1y * d2x
-    if abs(cross) < 1e-12:
-        return []                                        # 平行（含共线）
+    if abs(cross) < 1e-12: return []
     ex, ey = p3[0] - p1[0], p3[1] - p1[1]
     t = (ex * d2y - ey * d2x) / cross
     u = (ex * d1y - ey * d1x) / cross
@@ -6540,32 +9022,25 @@ def _seg_seg(p1, p2, p3, p4):
         return [(p1[0] + t * d1x, p1[1] + t * d1y)]
     return []
 
-
 def _seg_circle(p1, p2, c, r):
-    """线段 p1p2 与圆 (c, r) 的交点（0/1/2 个）。"""
     dx, dy = p2[0] - p1[0], p2[1] - p1[1]
     fx, fy = p1[0] - c[0], p1[1] - c[1]
     a = dx * dx + dy * dy
-    if a < 1e-12:
-        return []
+    if a < 1e-12: return []
     b = 2 * (fx * dx + fy * dy)
     cc = fx * fx + fy * fy - r * r
     disc = b * b - 4 * a * cc
-    if disc < 0:
-        return []
+    if disc < 0: return []
     sq = math.sqrt(disc)
     pts = []
     for t in ((-b - sq) / (2 * a), (-b + sq) / (2 * a)):
         if -1e-9 <= t <= 1 + 1e-9:
             pts.append((p1[0] + t * dx, p1[1] + t * dy))
-    if len(pts) == 2 and math.hypot(pts[0][0] - pts[1][0],
-                                    pts[0][1] - pts[1][1]) < 1e-9:
-        pts = pts[:1]                                    # 相切去重
+    if len(pts) == 2 and math.hypot(pts[0][0] - pts[1][0], pts[0][1] - pts[1][1]) < 1e-9:
+        pts = pts[:1]
     return pts
 
-
 def _circle_circle(c1, r1, c2, r2):
-    """两圆的交点（0/1/2 个）。"""
     dx, dy = c2[0] - c1[0], c2[1] - c1[1]
     d = math.hypot(dx, dy)
     if d < 1e-12 or d > r1 + r2 + 1e-9 or d < abs(r1 - r2) - 1e-9:
@@ -6574,33 +9049,24 @@ def _circle_circle(c1, r1, c2, r2):
     h = math.sqrt(max(r1 * r1 - a * a, 0.0))
     mx, my = c1[0] + a * dx / d, c1[1] + a * dy / d
     px, py = h * dy / d, -h * dx / d
-    if h < 1e-9:
-        return [(mx, my)]                                # 相切
+    if h < 1e-9: return [(mx, my)]
     return [(mx + px, my + py), (mx - px, my - py)]
-
 
 @register_solver(Segment, Segment)
 def _solve_seg_seg(a, b):
-    return _seg_seg((a.a.x, a.a.y), (a.b.x, a.b.y),
-                    (b.a.x, b.a.y), (b.b.x, b.b.y))
-
+    return _seg_seg((a.a.x, a.a.y), (a.b.x, a.b.y), (b.a.x, b.a.y), (b.b.x, b.b.y))
 
 @register_solver(Segment, Circle)
 def _solve_seg_circle(seg, cir):
-    return _seg_circle((seg.a.x, seg.a.y), (seg.b.x, seg.b.y),
-                       (cir.center.x, cir.center.y), cir.r)
-
+    return _seg_circle((seg.a.x, seg.a.y), (seg.b.x, seg.b.y), (cir.center.x, cir.center.y), cir.r)
 
 @register_solver(Circle, Circle)
 def _solve_circle_circle(a, b):
-    return _circle_circle((a.center.x, a.center.y), a.r,
-                          (b.center.x, b.center.y), b.r)
-
+    return _circle_circle((a.center.x, a.center.y), a.r, (b.center.x, b.center.y), b.r)
 
 @register_geo("IntersectPoint")
 class IntersectPoint(AbstractPoint):
     """两图形交点中的一个（branch 指定取第几个解）。"""
-
     def __init__(self, a, b, branch=0):
         super().__init__(parents=(a, b))
         self.a, self.b = a, b
@@ -6622,10 +9088,9 @@ class IntersectPoint(AbstractPoint):
     def build(cls, parents, params):
         return cls(parents[0], parents[1], params.get("branch", 0))
 
-
 @register_renderer(IntersectPoint)
 def draw_intersect(p, obj, view):
-    """空心环 + 中心点（青蓝），与自由点区分；标注 X{id}。"""
+    """空心环 + 中心点（青蓝），与自由点区分；标注名字或 X{id}。"""
     qpt = view.to_screen(obj.x, obj.y)
     color = theme.SELECTED if obj.selected else theme.INTERSECT
     r = 5.5 if obj.selected else 4.5
@@ -6635,9 +9100,18 @@ def draw_intersect(p, obj, view):
     p.setPen(Qt.PenStyle.NoPen)
     p.setBrush(theme.brush(color))
     p.drawEllipse(qpt, 1.8, 1.8)
-    p.setPen(theme.pen(theme.LABEL))
-    p.setFont(theme.LABEL_FONT)
-    p.drawText(qpt + QPointF(9, -8), f"X{obj.id}")
+    
+    label = getattr(obj, "name", "") or f"X{obj.id}"
+    
+    from ui.math import draw_math
+    draw_math(
+        p,
+        qpt.x() + 9,
+        qpt.y() - 8,
+        label,
+        13,
+        theme.SELECTED if obj.selected else theme.LABEL
+    )
 
 """几何点对象库：自由点、吸附点，以及磁吸查询。
 
@@ -6857,51 +9331,58 @@ def draw_segment(p, obj, view):
 
 import sys
 import os
-
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
-
 from ui.main_window import MainWindow
 from ui import theme
 
-from geo.function_sampler import shutdown_sampler
+
+def _shutdown_all_threads():
+    """程序退出前安全终止所有后台线程。"""
+    from geo.function_sampler import shutdown_sampler
+    shutdown_sampler()
+    try:
+        from geo.implicit_sampler import shutdown_implicit_sampler
+        shutdown_implicit_sampler()
+    except ImportError:
+        pass
+
 
 def load_constraints() -> None:
     """加载几何约束求解器扩展"""
     try:
         import constraints
-        
     except Exception as e:
         print("无法加载几何约束求解器扩展，请确保已正确安装依赖。")
         print("错误信息:", e)
 
-
+def load_animation() -> None:
+    """加载动画系统扩展"""
+    try:
+        import animation
+    except Exception as e:
+        print("无法加载动画系统扩展。")
+        print("错误信息:", e)
 
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
-
     font = QFont()
     font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"])
     font.setPointSize(10)
     app.setFont(font)
-
     app.setStyleSheet(theme.app_stylesheet())
-
-    app.aboutToQuit.connect(shutdown_sampler)
-
+    app.aboutToQuit.connect(_shutdown_all_threads)
     win = MainWindow()
-
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".wgeo") and os.path.exists(sys.argv[1]):
         win.doc.load(sys.argv[1])
-
     win.show()
-
     sys.exit(app.exec())
 
 
 if __name__ == "__main__":
     load_constraints()
+    load_animation()
     main()
 
 """媒体对象包：图像 / 表格 / 图表。自动扫描子模块触发注册。"""
@@ -7113,8 +9594,8 @@ def draw_media_decorations(p, obj, view):
             p.drawEllipse(rot_rect.center(), 7.0, 7.0)
 
 """图表对象：饼状图（图例+变量占比）/ 柱状图，数据支持 {表达式}。"""
-from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QRectF, Qt , QPointF
+from PySide6.QtGui import QColor, QPainterPath
 from PySide6.QtWidgets import QDialog, QVBoxLayout, QDialogButtonBox, QFormLayout, QDoubleSpinBox
 
 from core.registry import register_geo, register_renderer
@@ -7274,6 +9755,169 @@ def draw_bar(p, obj, view):
                    Qt.AlignmentFlag.AlignCenter, label)
     draw_media_decorations(p, obj, view)
 
+@register_geo("LineChartObject")
+class LineChartObject(MediaObject):
+    def __init__(self, x, y, data=None, labels=None, colors=None,
+                 width=6.0, height=4.0):
+        super().__init__(x, y, width, height)
+        self.data = data if data is not None else [30.0, 50.0, 40.0, 70.0, 60.0]
+        n = len(self.data)
+        self.labels = labels or [f"项{i+1}" for i in range(n)]
+        self.colors = colors or [CHART_COLORS[0]]
+
+    def get_values(self):
+        return [_eval_value(v) for v in self.data]
+
+    def dump(self):
+        d = super().dump()
+        d.update({"data": self.data, "labels": self.labels,
+                  "colors": self.colors})
+        return d
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["x"], params["y"], params.get("data"),
+                   params.get("labels"), params.get("colors"),
+                   params.get("width", 6.0), params.get("height", 4.0))
+
+    def edit(self, canvas):
+        from media.pie_wizard import PieChartWizard
+        wiz = PieChartWizard(canvas, self.data, self.labels, self.colors)
+        if wiz.exec():
+            data, labels, colors = wiz.get_data()
+            self.data, self.labels, self.colors = data, labels, colors
+
+
+@register_renderer(LineChartObject)
+def draw_line_chart(p, obj, view):
+    rect = obj.screen_rect(view)
+    values = obj.get_values()
+    n = len(values)
+    if n == 0:
+        return
+    max_val = max(abs(v) for v in values) or 1.0
+    min_val = min(0.0, min(values))
+    span = (max_val - min_val) or 1.0
+
+    plot = QRectF(rect.x() + rect.width() * 0.06,
+                  rect.y() + rect.height() * 0.06,
+                  rect.width() * 0.88,
+                  rect.height() * 0.72)
+
+    color = QColor(obj.colors[0]) if obj.colors else QColor(CHART_COLORS[0])
+
+    p.setPen(theme.pen(color, 2.5))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    path = QPainterPath()
+    pts = []
+    for i in range(n):
+        x = plot.x() + plot.width() * i / max(n - 1, 1) if n > 1 \
+            else plot.center().x()
+        y = plot.bottom() - (values[i] - min_val) / span * plot.height()
+        pt = QPointF(x, y)
+        pts.append(pt)
+        if i == 0:
+            path.moveTo(pt)
+        else:
+            path.lineTo(pt)
+    p.drawPath(path)
+
+    p.setBrush(theme.brush(color))
+    p.setPen(theme.pen(theme.BG_TOP, 1.5))
+    for pt in pts:
+        p.drawEllipse(pt, 4.0, 4.0)
+
+    fh = max(int(rect.height() * 0.06), 8)
+    f = p.font()
+    f.setPixelSize(fh)
+    p.setFont(f)
+    p.setPen(theme.pen(theme.INK, 1))
+    slot = plot.width() / max(n, 1)
+    for i in range(n):
+        label = render_template(obj.labels[i]) if i < len(obj.labels) \
+            else f"项{i+1}"
+        p.drawText(QRectF(plot.x() + i * slot,
+                          plot.bottom() + 2, slot, rect.height() * 0.15),
+                   Qt.AlignmentFlag.AlignCenter, label)
+    draw_media_decorations(p, obj, view)
+
+
+@register_geo("DonutChartObject")
+class DonutChartObject(MediaObject):
+    def __init__(self, x, y, data=None, labels=None, colors=None,
+                 width=5.0, height=5.0, hole=0.55):
+        super().__init__(x, y, width, height)
+        self.data = data if data is not None else [25.0, 25.0, 25.0, 25.0]
+        n = len(self.data)
+        self.labels = labels or [f"项{i+1}" for i in range(n)]
+        self.colors = colors or [CHART_COLORS[i % len(CHART_COLORS)]
+                                 for i in range(n)]
+        self.hole = max(0.1, min(0.9, hole))
+
+    def get_values(self):
+        return [_eval_value(v) for v in self.data]
+
+    def dump(self):
+        d = super().dump()
+        d.update({"data": self.data, "labels": self.labels,
+                  "colors": self.colors, "hole": self.hole})
+        return d
+
+    @classmethod
+    def build(cls, parents, params):
+        return cls(params["x"], params["y"], params.get("data"),
+                   params.get("labels"), params.get("colors"),
+                   params.get("width", 5.0), params.get("height", 5.0),
+                   params.get("hole", 0.55))
+
+    def edit(self, canvas):
+        from media.pie_wizard import PieChartWizard
+        wiz = PieChartWizard(canvas, self.data, self.labels, self.colors)
+        if wiz.exec():
+            data, labels, colors = wiz.get_data()
+            self.data, self.labels, self.colors = data, labels, colors
+
+
+@register_renderer(DonutChartObject)
+def draw_donut(p, obj, view):
+    rect = obj.screen_rect(view)
+    values = obj.get_values()
+    total = sum(abs(v) for v in values) or 1.0
+    n = len(values)
+    if n == 0:
+        return
+
+    side = min(rect.width(), rect.height()) * 0.92
+    cx, cy = rect.center().x(), rect.center().y()
+    pie_sq = QRectF(cx - side / 2, cy - side / 2, side, side)
+
+    start = 0.0
+    for i in range(n):
+        span = abs(values[i]) / total * 360.0
+        color = obj.colors[i] if i < len(obj.colors) \
+            else CHART_COLORS[i % len(CHART_COLORS)]
+        p.setBrush(theme.brush(QColor(color)))
+        p.setPen(theme.pen(theme.BG_TOP, 1))
+        p.drawPie(pie_sq.toRect(), int(start * 16), int(span * 16))
+        start += span
+
+    hole_side = side * obj.hole
+    hole_sq = QRectF(cx - hole_side / 2, cy - hole_side / 2,
+                     hole_side, hole_side)
+    p.setBrush(theme.brush(theme.BG_TOP))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.drawEllipse(hole_sq)
+
+    p.setPen(theme.pen(theme.INK, 1))
+    f = p.font()
+    f.setPixelSize(max(int(hole_side * 0.22), 10))
+    f.setBold(True)
+    p.setFont(f)
+    p.drawText(hole_sq, Qt.AlignmentFlag.AlignCenter, f"{total:.0f}")
+
+    draw_media_decorations(p, obj, view)
+
+
 """图像对象：插入图片文件，随画布缩放。
 支持：
 - 拖动右下角手柄等比放大/缩小
@@ -7316,25 +9960,22 @@ class ImageObject(MediaObject):
         self.height = max(new_width * self.aspect, 0.5)
 
     def dump(self):
+        import os
         d = super().dump()
-        d["path"] = self.path
+        ext = os.path.splitext(self.path)[1] if self.path else ".png"
+        d["image_name"] = f"{self.id}{ext}"
         return d
 
     @classmethod
     def build(cls, parents, params):
+        path = params.get("path", "")
         obj = cls(
-            params["x"],
-            params["y"],
-            params["path"],
-            params.get("width"),
-            params.get("height")
+            params["x"], params["y"], path,
+            params.get("width"), params.get("height")
         )
-
         obj.rotation = params.get("rotation", 0.0)
-
         if obj.width > 0:
             obj.aspect = obj.height / obj.width
-
         return obj
 
 
@@ -7371,6 +10012,7 @@ from PySide6.QtWidgets import QFileDialog
 from core.registry import register_tool
 from tools.base import Tool
 
+from media.chart_obj import LineChartObject, DonutChartObject
 from media.image_obj import ImageObject
 from media.table_obj import TableObject
 from media.chart_obj import PieChartObject, BarChartObject
@@ -7425,6 +10067,21 @@ class InsertPieTool(Tool):
 class InsertBarTool(Tool):
     def press(self, canvas, wpt, hit):
         obj = BarChartObject(wpt[0], wpt[1])
+        _finish_insert(canvas, obj)
+        
+@register_tool(name="插入折线图", order=5, panel="insert", icon="insert_bar",
+               hint="点击画布插入折线统计图（点 ✎ 编辑数据）")
+class InsertLineTool(Tool):
+    def press(self, canvas, wpt, hit):
+        obj = LineChartObject(wpt[0], wpt[1])
+        _finish_insert(canvas, obj)
+
+
+@register_tool(name="插入环形图", order=6, panel="insert", icon="insert_pie",
+               hint="点击画布插入环形图 / 四等分图（点 ✎ 编辑数据）")
+class InsertDonutTool(Tool):
+    def press(self, canvas, wpt, hit):
+        obj = DonutChartObject(wpt[0], wpt[1])
         _finish_insert(canvas, obj)
 
 """图表数据向导：设置每项的标签 / 数值（支持 {表达式}）/ 颜色。"""
@@ -11828,6 +14485,175 @@ class TestMediaRenderSmoke:
         assert img.width() > 0
         assert img.height() > 0
 
+"""新特性综合测试：隐函数、橡皮擦、图表、图片内嵌、汉化、线程安全。
+运行：pytest tests/test_new_features.py -v
+"""
+import os
+import json
+import zipfile
+import pytest
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+@pytest.fixture(autouse=True)
+def clean_variables():
+    from core.variables import get_store
+    store = get_store()
+    saved_vars = dict(store._vars)
+    saved_version = store.version
+    yield
+    store._vars = saved_vars
+    store.version = saved_version
+
+class TestImplicitCurve:
+    def test_parse_equation(self):
+        from geo.implicit_curve import parse_equation
+        assert parse_equation("x^2+y^2=1") == "(x^2+y^2)-(1)"
+        assert parse_equation("x^2+y^2-1") == "x^2+y^2-1"
+        assert parse_equation(" sin(x)*cos(y) = 0.5 ") == "(sin(x)*cos(y))-(0.5)"
+
+    def test_implicit_curve_init(self):
+        from geo.implicit_curve import ImplicitCurve
+        c = ImplicitCurve("x^2+y^2=1")
+        assert c._resolved_expr == "(x^2+y^2)-(1)"
+        assert c.expr == "x^2+y^2=1"
+        
+    def test_marching_squares_circle(self):
+        from geo.implicit_sampler import _marching_squares
+        from core.variables import evaluate
+
+        class _Eval:
+            def __init__(self, e):
+                self.expr = e
+                self.valid = True
+            def eval(self, vd):
+                return evaluate(self.expr, vd)
+
+        test_val = evaluate("x^2+y^2-1", {"x": 0.0, "y": 0.0})
+        assert test_val is not None, "evaluate 无法求值 x^2+y^2-1"
+        assert abs(test_val - (-1.0)) < 1e-9, f"期望 -1.0，实际 {test_val}"
+
+        test_val2 = evaluate("x^2+y^2-1", {"x": 1.0, "y": 0.0})
+        assert test_val2 is not None, "evaluate 无法求值 x^2+y^2-1 在 (1,0)"
+        assert abs(test_val2 - 0.0) < 1e-9, f"期望 0.0，实际 {test_val2}"
+
+        fast = _Eval("x^2+y^2-1")  # ★ 直接传原始表达式
+        vd = {}
+        segments = _marching_squares(fast, vd, -2, 2, -2, 2, 20, 20)
+        assert len(segments) > 0, "圆 x²+y²=1 应产生等值线段"
+        for x1, y1, x2, y2 in segments:
+            assert abs(x1**2 + y1**2 - 1.0) < 0.25
+            assert abs(x2**2 + y2**2 - 1.0) < 0.25
+
+class TestInkEraser:
+    def test_split_stroke(self):
+        from tools.ink_tool import InkTool
+        points = [(float(x), 0.0) for x in range(-5, 6)]
+        segments = InkTool._split_stroke(points, (0.0, 0.0), 1.5)
+        assert len(segments) == 2
+        assert segments[0][0] == (-5.0, 0.0)
+        assert segments[0][-1] == (-2.0, 0.0)
+        assert segments[1][0] == (2.0, 0.0)
+        assert segments[1][-1] == (5.0, 0.0)
+
+    def test_split_stroke_no_erase(self):
+        from tools.ink_tool import InkTool
+        points = [(float(x), 0.0) for x in range(-5, 6)]
+        segments = InkTool._split_stroke(points, (10.0, 10.0), 1.0)
+        assert len(segments) == 1
+        assert len(segments[0]) == len(points)
+
+class TestChartObjects:
+    def test_line_chart_dump_build(self):
+        from media.chart_obj import LineChartObject
+        obj = LineChartObject(1, 2, data=[10, 20], labels=["A", "B"], colors=["#ff0000"])
+        d = obj.dump()
+        obj2 = LineChartObject.build([], d)
+        assert obj2.x == 1
+        assert obj2.data == [10, 20]
+        assert obj2.labels == ["A", "B"]
+
+    def test_donut_chart_dump_build(self):
+        from media.chart_obj import DonutChartObject
+        obj = DonutChartObject(0, 0, data=[25, 25, 25, 25], hole=0.5)
+        d = obj.dump()
+        obj2 = DonutChartObject.build([], d)
+        assert obj2.hole == 0.5
+        assert len(obj2.data) == 4
+
+class TestImageEmbed:
+    def test_image_embed_save_load(self, tmp_path, qapp):
+        from core.document import Document
+        from media.image_obj import ImageObject
+        
+        img_path = tmp_path / "test_img.png"
+        px = QPixmap(10, 10)
+        px.save(str(img_path))
+        
+        doc = Document()
+        img_obj = ImageObject(0, 0, str(img_path))
+        doc.add(img_obj)
+        
+        wgeo_path = tmp_path / "test.wgeo"
+        doc.save(str(wgeo_path))
+        
+        with zipfile.ZipFile(wgeo_path, 'r') as zf:
+            names = zf.namelist()
+            img_files = [n for n in names if n.startswith("media/images/")]
+            assert len(img_files) == 1, "图片应被内嵌到 media/images/ 目录"
+            
+            sketch = json.loads(zf.read("sketch.json"))
+            img_data = sketch[0]["params"]
+            assert "image_name" in img_data, "序列化应使用 image_name 而非绝对路径"
+            assert "path" not in img_data
+            
+        doc2 = Document()
+        doc2.load(str(wgeo_path))
+        assert len(doc2.objects) == 1
+        loaded_img = doc2.objects[0]
+        assert isinstance(loaded_img, ImageObject)
+        assert os.path.exists(loaded_img.path), "加载时应自动解压到临时目录"
+        assert not loaded_img.pixmap.isNull()
+
+class TestPropertyPanelI18n:
+    def test_chinese_labels(self, qapp):
+        from ui.property_panel import PropertyPanel
+        
+        class MockDoc:
+            changed = type('Signal', (), {'connect': lambda *a: None})()
+        class MockCanvas:
+            doc = MockDoc()
+            height = 800
+            width = 1200
+            
+        panel = PropertyPanel(MockCanvas())
+        
+        class DummyImplicit: pass
+        DummyImplicit.__name__ = "ImplicitCurve"
+        
+        class DummyParallel: pass
+        DummyParallel.__name__ = "ParallelLine"
+        
+        class DummyIncenter: pass
+        DummyIncenter.__name__ = "Incenter"
+        
+        assert panel._get_type_label(DummyImplicit()) == "隐函数曲线"
+        assert panel._get_type_label(DummyParallel()) == "平行线"
+        assert panel._get_type_label(DummyIncenter()) == "内心"
+
+class TestSamplerShutdown:
+    def test_implicit_sampler_shutdown(self):
+        from geo.implicit_sampler import get_implicit_sampler, shutdown_implicit_sampler
+        sampler = get_implicit_sampler()
+        assert sampler.isRunning()
+        shutdown_implicit_sampler()
+        assert not sampler.isRunning()
+
 """工具覆盖层 draw_overlay 可见性回归测试。
 
 用于防止：
@@ -12334,6 +15160,333 @@ __keep = true
         _run(doc, script)
 
         assert len(_points(doc)) >= 3
+
+"""根号渲染诊断测试。
+验证 sqrt 的各种输入形式是否被正确解析为 Sqrt 节点并渲染为根号图形。
+
+运行：pytest tests/test_sqrt_rendering.py -v
+"""
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage, QPainter, QColor
+from PySide6.QtCore import Qt
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestSqrtParsing:
+    """测试不同输入形式是否产生 Sqrt AST 节点。"""
+
+    def test_latex_sqrt_produces_sqrt_node(self):
+        """\\sqrt{x} 应产生 Sqrt 节点。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{x}")
+        if isinstance(ast, Row):
+            found = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            found = isinstance(ast, Sqrt)
+        assert found, (
+            f"\\sqrt{{x}} 未产生 Sqrt 节点，"
+            f"实际类型: {type(ast).__name__}"
+        )
+
+    def test_function_sqrt_NOT_produces_sqrt_node(self):
+        """sqrt(x) 当前【不会】产生 Sqrt 节点 —— 这是 bug 根源。"""
+        from ui.math.parser import parse, Sqrt, Row, Ord
+        ast = parse("sqrt(x)")
+        if isinstance(ast, Row):
+            types = [type(c).__name__ for c in ast.children]
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            types = [type(ast).__name__]
+            has_sqrt = isinstance(ast, Sqrt)
+
+        if not has_sqrt:
+            pytest.fail(
+                f"【确认 BUG】sqrt(x) 未产生 Sqrt 节点。\n"
+                f"AST 子节点类型: {types}\n"
+                f"原因: parser 将 'sqrt' 识别为 Ord(func) 而非 Sqrt 命令。\n"
+                f"修复: 需在 parser 或 draw_math 前将 sqrt(...) 转换为 \\sqrt{{...}}"
+            )
+
+    def test_unicode_sqrt_NOT_produces_sqrt_node(self):
+        """√(x) 当前【不会】产生 Sqrt 节点。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse("√(x)")
+        if isinstance(ast, Row):
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            has_sqrt = isinstance(ast, Sqrt)
+        if not has_sqrt:
+            pytest.fail(
+                "【确认 BUG】√(x) 未产生 Sqrt 节点。"
+                "parser 不认识 Unicode √ 字符。"
+            )
+
+    def test_nested_sqrt(self):
+        """\\sqrt{\\sqrt{x}} 嵌套根号。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{\sqrt{x}}")
+        if isinstance(ast, Row):
+            outer = [c for c in ast.children if isinstance(c, Sqrt)]
+        else:
+            outer = [ast] if isinstance(ast, Sqrt) else []
+        assert len(outer) > 0, "嵌套根号外层未识别"
+        inner = outer[0].content
+        if isinstance(inner, Row):
+            inner_sqrt = [c for c in inner.children if isinstance(c, Sqrt)]
+        else:
+            inner_sqrt = [inner] if isinstance(inner, Sqrt) else []
+        assert len(inner_sqrt) > 0, "嵌套根号内层未识别"
+
+    def test_sqrt_with_complex_content(self):
+        """\\sqrt{x^2+1} 根号内含上标。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{x^2+1}")
+        if isinstance(ast, Row):
+            found = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            found = isinstance(ast, Sqrt)
+        assert found, "\\sqrt{x^2+1} 未产生 Sqrt 节点"
+
+
+class TestSqrtLayout:
+    """测试 Sqrt 节点的度量是否正确（宽/升/降）。"""
+
+    def test_sqrt_measure_has_positive_dimensions(self):
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        ast = parse(r"\sqrt{x}")
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        w, a, d = lay.measure(ast)
+        assert w > 0, f"Sqrt 宽度应 > 0，实际 {w}"
+        assert a > 0, f"Sqrt 升部应 > 0，实际 {a}"
+
+    def test_sqrt_wider_than_plain_x(self):
+        """根号渲染应比纯文本 x 更宽（因为有根号勾）。"""
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        
+        w_sqrt, _, _ = lay.measure(parse(r"\sqrt{x}"))
+        w_text, _, _ = lay.measure(parse("x"))
+        
+        assert w_sqrt > w_text, (
+            f"根号宽度 {w_sqrt:.1f} 应大于纯 x 宽度 {w_text:.1f}"
+        )
+
+    def test_function_sqrt_measure_is_just_text(self):
+        """sqrt(x) 的度量应该只是纯文本宽度（无根号勾）。"""
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        w, a, d = lay.measure(parse("sqrt(x)"))
+        assert w > 0, "sqrt(x) 度量宽度应 > 0"
+
+
+class TestSqrtRendering:
+    """实际渲染到 QImage，检查根号勾是否被绘制。"""
+
+    def _render_to_image(self, text, size=20):
+        from ui.math import draw_math
+        img = QImage(300, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 20, 50, text, size, QColor(0, 0, 0))
+        p.end()
+        return img
+
+    def _count_dark_pixels(self, img):
+        """统计非白色像素数量。"""
+        count = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
+                    count += 1
+        return count
+
+    def test_latex_sqrt_renders_hook(self, qapp):
+        """\\sqrt{x} 应渲染出根号勾（比纯文本多笔画）。"""
+        img_sqrt = self._render_to_image(r"\sqrt{x}")
+        img_text = self._render_to_image("x")
+        px_sqrt = self._count_dark_pixels(img_sqrt)
+        px_text = self._count_dark_pixels(img_text)
+        assert px_sqrt > px_text, (
+            f"\\sqrt{{x}} 像素 {px_sqrt} 未多于 x 像素 {px_text}"
+        )
+
+    def test_function_sqrt_renders_as_text_only(self, qapp):
+        """sqrt(x) 当前只渲染为纯文本（无根号勾）。"""
+        img_func = self._render_to_image("sqrt(x)")
+        img_latex = self._render_to_image(r"\sqrt{x}")
+        px_func = self._count_dark_pixels(img_func)
+        px_latex = self._count_dark_pixels(img_latex)
+        if px_func < px_latex * 0.9:
+            pytest.fail(
+                f"【确认 BUG】sqrt(x) 像素 {px_func} 显著少于 "
+                f"\\sqrt{{x}} 像素 {px_latex}。\n"
+                f"差值 {px_latex - px_func} 像素 = 缺失的根号勾。"
+            )
+
+
+class TestFormulaEditorSqrt:
+    """测试公式编辑器中根号的完整链路。"""
+
+    def test_keypad_inserts_sqrt_text(self):
+        """键盘按钮 √( 插入的是 'sqrt(' 字符串。"""
+        from ui.formula_editor import FormulaKeypad
+        for label, ins, cls in FormulaKeypad.KEYS:
+            if "√" in label:
+                assert ins == "sqrt(", (
+                    f"√ 按钮插入的是 '{ins}' 而非 'sqrt('"
+                )
+                return
+        pytest.fail("FormulaKeypad.KEYS 中未找到 √ 按钮")
+
+    def test_preview_text_contains_sqrt_not_latex(self):
+        """预览文本是 'y = sqrt(x)' 而非 'y = \\sqrt{x}'。"""
+        expr = "sqrt(x)"
+        preview_text = f"y = {expr}"
+        assert "sqrt(" in preview_text
+        assert "\\sqrt" not in preview_text, (
+            "预览文本中不应包含 LaTeX \\sqrt（当前确实不包含，这是 bug）"
+        )
+
+    def test_draw_math_with_preview_text(self, qapp):
+        """用预览文本调用 draw_math，验证根号是否渲染。"""
+        from ui.math import draw_math
+        img = QImage(400, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 12, 40, "y = sqrt(x)", 18, QColor(0, 0, 0))
+        p.end()
+        px = self._count_non_white(img)
+        assert px > 0, "渲染结果不应为空白"
+
+    def _count_non_white(self, img):
+        count = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
+                    count += 1
+        return count
+
+
+class TestSqrtConversion:
+    """测试 sqrt(...) → \\sqrt{...} 的转换函数。
+    这是修复方案的核心：在 draw_math 之前进行语法转换。
+    """
+
+    @staticmethod
+    def _convert_sqrt_to_latex(text: str) -> str:
+        """将 sqrt(...) 函数调用转换为 \\sqrt{...} LaTeX 命令。
+        支持嵌套括号：sqrt(x^2+sqrt(x)) → \\sqrt{x^2+\\sqrt{x}}
+        """
+        import re
+        result = text
+        max_iter = 20
+        for _ in range(max_iter):
+            idx = result.find("sqrt(")
+            if idx == -1:
+                break
+            start = idx + 5  # "sqrt(" 的长度
+            depth = 1
+            end = start
+            while end < len(result) and depth > 0:
+                if result[end] == "(":
+                    depth += 1
+                elif result[end] == ")":
+                    depth -= 1
+                end += 1
+            inner = result[start:end - 1]
+            result = result[:idx] + "\\sqrt{" + inner + "}" + result[end:]
+        return result
+
+    def test_simple_sqrt(self):
+        assert self._convert_sqrt_to_latex("sqrt(x)") == "\\sqrt{x}"
+
+    def test_sqrt_with_expression(self):
+        assert self._convert_sqrt_to_latex("sqrt(x^2+1)") == "\\sqrt{x^2+1}"
+
+    def test_nested_sqrt(self):
+        result = self._convert_sqrt_to_latex("sqrt(x+sqrt(y))")
+        assert result == "\\sqrt{x+\\sqrt{y}}"
+
+    def test_sqrt_in_larger_expr(self):
+        result = self._convert_sqrt_to_latex("y = 2*sqrt(x) + 1")
+        assert result == "y = 2*\\sqrt{x} + 1"
+
+    def test_no_sqrt_unchanged(self):
+        assert self._convert_sqrt_to_latex("x^2 + 1") == "x^2 + 1"
+
+    def test_multiple_sqrt(self):
+        result = self._convert_sqrt_to_latex("sqrt(a) + sqrt(b)")
+        assert result == "\\sqrt{a} + \\sqrt{b}"
+
+    def test_sqrt_with_nested_parens(self):
+        result = self._convert_sqrt_to_latex("sqrt((x+1)*(x-1))")
+        assert result == "\\sqrt{(x+1)*(x-1)}"
+
+    def test_unicode_sqrt_conversion(self):
+        """√(x) 也应被转换。"""
+        text = "√(x)"
+        text = text.replace("√(", "sqrt(")
+        assert self._convert_sqrt_to_latex(text) == "\\sqrt{x}"
+
+
+class TestSqrtEndToEnd:
+    """转换后的完整渲染链路验证。"""
+
+    def test_converted_sqrt_renders_hook(self, qapp):
+        """转换后的 \\sqrt{x} 应渲染出根号勾。"""
+        from ui.math import draw_math
+        from ui.math.parser import parse, Sqrt, Row
+
+        text = "sqrt(x)"
+        converted = TestSqrtConversion._convert_sqrt_to_latex(text)
+        assert converted == "\\sqrt{x}"
+
+        ast = parse(converted)
+        if isinstance(ast, Row):
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            has_sqrt = isinstance(ast, Sqrt)
+        assert has_sqrt, f"转换后仍未产生 Sqrt 节点: {converted}"
+
+        img = QImage(200, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = draw_math(p, 20, 50, converted, 20, QColor(0, 0, 0))
+        p.end()
+        assert w > 0, "渲染宽度应 > 0"
+
+    def test_formula_editor_preview_with_conversion(self, qapp):
+        """模拟公式编辑器预览：先转换再渲染。"""
+        from ui.math import draw_math
+
+        user_input = "sqrt(x^2 + 1)"
+        preview = f"y = {user_input}"
+        converted = TestSqrtConversion._convert_sqrt_to_latex(preview)
+        assert "\\sqrt{" in converted
+
+        img = QImage(400, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 12, 40, converted, 18, QColor(0, 0, 0))
+        p.end()
 
 """工具测试：点、线段、圆、框选、选择拖动。"""
 
@@ -13517,25 +16670,25 @@ class FixedAngleTool(Tool):
             p.drawText(view.to_screen(*b) + QPointF(8, -8),
                        f"{self._panel.value():g}°")
 
-"""墨迹注释工具：钢笔/荧光笔/铅笔/橡皮擦，可选颜色与透明度，支持撤销单条笔画。"""
+"""墨迹注释工具：钢笔/荧光笔/铅笔/橡皮擦（真正擦除）。"""
 import math
-
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainterPath
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QPushButton,
                                QSlider, QLabel, QColorDialog, QGraphicsDropShadowEffect)
-
 from core.registry import register_tool
-from geo.ink import InkStroke, InkEraser
+from geo.ink import InkStroke
 from tools.base import Tool
 from ui import theme
 
-MODES = [("pen", "钢笔"), ("highlighter", "荧光笔"), ("pencil", "铅笔"), ("eraser", "橡皮擦")]
-PRESET_COLORS = ["#222222", "#e03131", "#1971c2", "#2f9e44", "#f08c00", "#9c36b5", "#ffd43b"]
+MODES = [("pen", "钢笔"), ("highlighter", "荧光笔"),
+         ("pencil", "铅笔"), ("eraser", "橡皮擦")]
+PRESET_COLORS = ["#222222", "#e03131", "#1971c2", "#2f9e44",
+                 "#f08c00", "#9c36b5", "#ffd43b"]
 
 
 class InkSettingsPanel(QWidget):
-    """墨迹设置浮层：笔型 / 颜色 / 透明度 / 撤销笔画。"""
+    """墨迹设置浮层。"""
     def __init__(self, tool, parent=None):
         super().__init__(parent)
         self.setObjectName("inkPanel")
@@ -13563,13 +16716,13 @@ class InkSettingsPanel(QWidget):
             b = QPushButton()
             b.setFixedSize(20, 20)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setStyleSheet(f"background:{c};border-radius:10px;border:2px solid transparent;")
+            b.setStyleSheet(f"background:{c};border-radius:10px;"
+                            f"border:2px solid transparent;")
             b.clicked.connect(lambda _=False, cc=c: self._set_color(cc))
             crow.addWidget(b)
             self._color_btns[c] = b
         self._custom = QPushButton("…")
         self._custom.setFixedSize(20, 20)
-        self._custom.setCursor(Qt.CursorShape.PointingHandCursor)
         self._custom.clicked.connect(self._pick_color)
         crow.addWidget(self._custom)
         crow.addStretch(1)
@@ -13588,7 +16741,6 @@ class InkSettingsPanel(QWidget):
         v.addLayout(orow)
 
         undo_btn = QPushButton("↩ 撤销笔画")
-        undo_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         undo_btn.clicked.connect(self.tool.undo_stroke)
         v.addWidget(undo_btn)
 
@@ -13608,7 +16760,8 @@ class InkSettingsPanel(QWidget):
 
     def _highlight_color(self, c):
         for cc, b in self._color_btns.items():
-            sel = "2px solid " + theme.ACCENT.name() if cc == c else "2px solid transparent"
+            sel = "2px solid " + theme.ACCENT.name() if cc == c \
+                else "2px solid transparent"
             b.setStyleSheet(f"background:{cc};border-radius:10px;border:{sel};")
 
     def _pick_color(self):
@@ -13622,7 +16775,7 @@ class InkSettingsPanel(QWidget):
 
 
 @register_tool(name="墨迹", shortcut="I", order=11, icon="ink", panel="rail",
-               hint="自由手绘：钢笔/荧光笔/铅笔/橡皮擦，可选颜色透明度，可撤销笔画")
+               hint="自由手绘：钢笔/荧光笔/铅笔/橡皮擦（真正擦除）")
 class InkTool(Tool):
     def __init__(self):
         self._points = []
@@ -13632,10 +16785,10 @@ class InkTool(Tool):
         self._opacity = 1.0
         self._panel = None
         self._strokes = []
-        self._canvas = None       # ★ 修复：保存 canvas 引用，避免用 panel.canvas 报错
+        self._canvas = None
 
     def activated(self, canvas):
-        self._canvas = canvas     # ★ 修复：在激活时记录 canvas
+        self._canvas = canvas
         self._drawing = False
         self._points = []
         self._strokes = []
@@ -13647,37 +16800,85 @@ class InkTool(Tool):
     def deactivated(self, canvas):
         self._drawing = False
         self._points = []
-        self._canvas = None       # ★ 清理引用
+        self._canvas = None
         if self._panel is not None:
             self._panel.hide(); self._panel.deleteLater()
-            self._panel = None
+        self._panel = None
 
     def press(self, canvas, wpt, hit):
+        if self._mode == "eraser":
+            canvas.doc.begin_action()
         self._drawing = True
         self._points = [wpt]
 
     def move(self, canvas, wpt, hit):
-        if self._drawing:
-            if self._points and math.hypot(wpt[0]-self._points[-1][0], wpt[1]-self._points[-1][1]) > 2.0/canvas.scale:
+        if not self._drawing:
+            return
+        if self._mode == "eraser":
+            self._erase_at(canvas, wpt)
+        else:
+            if (self._points and
+                math.hypot(wpt[0] - self._points[-1][0],
+                           wpt[1] - self._points[-1][1]) > 2.0 / canvas.scale):
                 self._points.append(wpt)
-                canvas.update()
+        canvas.update()
 
     def release(self, canvas, wpt, hit):
-        if self._drawing and len(self._points) > 1:
-            if self._mode == "eraser":
-                stroke = InkEraser(self._points, width=18.0)
-            else:
-                width = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
-                stroke = InkStroke(self._points, self._color, width, self._opacity, self._mode)
+        if self._mode == "eraser":
+            canvas.doc.end_action()
+        elif self._drawing and len(self._points) > 1:
+            width = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
+            stroke = InkStroke(self._points, self._color, width,
+                               self._opacity, self._mode)
             canvas.doc.add(stroke)
             self._strokes.append(stroke)
         self._drawing = False
         self._points = []
         canvas.update()
 
+    def _erase_at(self, canvas, wpt):
+        """在 wpt 处擦除笔画：把被擦到的笔画分割成多段。"""
+        radius = 0.35  # 世界坐标擦除半径
+        doc = canvas.doc
+        to_remove = []
+        to_add = []
+        for obj in list(doc.objects):
+            if not isinstance(obj, InkStroke) or not obj.exists:
+                continue
+            segments = self._split_stroke(obj.points, wpt, radius)
+            if len(segments) == 1 and len(segments[0]) == len(obj.points):
+                continue
+            to_remove.append(obj)
+            for seg in segments:
+                if len(seg) >= 2:
+                    to_add.append(InkStroke(seg, obj.color, obj.width,
+                                            obj.opacity, obj.mode))
+        for obj in to_remove:
+            doc._remove(obj)
+        for obj in to_add:
+            doc._add(obj)
+        if to_remove or to_add:
+            doc._mutation_count += 1
+
+    @staticmethod
+    def _split_stroke(points, center, radius):
+        """把笔画点列表分割成不在擦除圆内的连续段。"""
+        segments = []
+        current = []
+        cx, cy = center
+        for pt in points:
+            if math.hypot(pt[0] - cx, pt[1] - cy) < radius:
+                if len(current) >= 2:
+                    segments.append(current)
+                current = []
+            else:
+                current.append(pt)
+        if len(current) >= 2:
+            segments.append(current)
+        return segments
+
     def undo_stroke(self):
-        """撤销最近一条笔画（从文档中删除）。"""
-        if self._strokes and self._canvas is not None:   # ★ 修复：使用 self._canvas
+        if self._strokes and self._canvas is not None:
             stroke = self._strokes.pop()
             if stroke in self._canvas.doc.objects:
                 self._canvas.doc.remove(stroke)
@@ -13690,14 +16891,16 @@ class InkTool(Tool):
     def draw_overlay(self, p, view):
         if self._drawing and len(self._points) > 1:
             if self._mode == "eraser":
-                c = QColor(theme.BG_TOP)
-                w = 18.0
-            else:
-                c = QColor(self._color)
-                c.setAlphaF(self._opacity)
-                w = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
-                if self._mode == "highlighter":
-                    w *= 3.5
+                sp = view.to_screen(*self._points[-1])
+                p.setPen(theme.dashed_pen(theme.SUBINK, 1.5))
+                p.setBrush(Qt.BrushStyle.NoBrush)
+                p.drawEllipse(sp, 0.35 * view.scale, 0.35 * view.scale)
+                return
+            c = QColor(self._color)
+            c.setAlphaF(self._opacity)
+            w = {"pen": 2.5, "highlighter": 3.0, "pencil": 1.8}[self._mode]
+            if self._mode == "highlighter":
+                w *= 3.5
             pen = theme.pen(c, w)
             pen.setCapStyle(Qt.PenCapStyle.RoundCap)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
@@ -13710,16 +16913,16 @@ class InkTool(Tool):
             p.drawPath(path)
 
 """交点工具：依次点两个几何图形 → 生成它们的全部交点。
-支持：线段×线段、线段×圆、圆×圆，以及涉及多边形的任意组合
-（只要注册了求解器即可，无需改动本工具）。"""
+支持：线段、直线、射线、圆、多边形等任意组合（自动 Fallback）。
+"""
+import math
 from core.registry import register_tool
-from geo.intersects import IntersectPoint, has_solver, max_intersections
+from geo.intersects import IntersectPoint, has_solver, max_intersections, solve
 from geo.points import AbstractPoint
 from tools.base import Tool
 
-
 @register_tool(name="交点", shortcut="X", order=4, icon="intersect",
-               hint="依次点两个图形（线段/圆/多边形）求全部交点；交点可被磁吸；Esc 取消")
+               hint="依次点两个图形（线段/圆/多边形/直线/射线等）求全部交点；自动去重；Esc 取消")
 class IntersectTool(Tool):
     def __init__(self):
         self.first = None
@@ -13733,15 +16936,42 @@ class IntersectTool(Tool):
     def press(self, canvas, wpt, hit):
         if hit is None or isinstance(hit, AbstractPoint):
             return
+            
         if self.first is None:
             self.first = hit
             canvas.doc.set_selection([hit])              # 高亮第一个图形
         else:
             if hit is not self.first and has_solver(self.first, hit):
-                for i in range(max_intersections(self.first, hit)):
+                max_i = max_intersections(self.first, hit)
+                pts = solve(self.first, hit)
+                
+                for i in range(max_i):
+                    exists = False
+                    for obj in canvas.doc.objects:
+                        if type(obj).__name__ == "IntersectPoint":
+                            if (obj.a is self.first and obj.b is hit and obj.branch == i) or \
+                               (obj.b is self.first and obj.a is hit and obj.branch == i):
+                                exists = True
+                                break
+                    if exists:
+                        continue
+                        
+                    if i < len(pts):
+                        px, py = pts[i]
+                        too_close = False
+                        tol = 1e-5 # 世界坐标容差
+                        for obj in canvas.doc.objects:
+                            if isinstance(obj, AbstractPoint) and obj.exists:
+                                if math.hypot(obj.x - px, obj.y - py) < tol:
+                                    too_close = True
+                                    break
+                        if too_close:
+                            continue
+                            
                     canvas.doc.add(IntersectPoint(self.first, hit, i))
-            self.first = None
-            canvas.doc.set_selection([])
+                    
+                self.first = None
+                canvas.doc.set_selection([])
 
     def cancel(self, canvas):
         self.first = None
@@ -13895,7 +17125,8 @@ class SegmentTool(Tool):
 """选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
 from typing import Optional, Tuple, List
 from PySide6.QtGui import QColor
-
+from PySide6.QtCore import QTimer
+from PySide6.QtWidgets import QApplication
 from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject
 from media.base import MediaObject
@@ -13921,9 +17152,7 @@ def _free_points_of(obj, acc, seen):
 class SelectTool(Tool):
     def __init__(self):
         self._reset()
-
-    def activated(self, canvas):
-        self._reset()
+        self._script_timer = None          # ★ 脚本按钮单击延迟运行定时器
 
     def _reset(self):
         self.drag_pts: list[FreePoint] = []
@@ -13940,7 +17169,13 @@ class SelectTool(Tool):
         self._click_media = None
         self._press_wpt = None
         self._moved = False# ★ 智能参考线
-
+        
+    def cancel_pending_script(self):
+        """取消待运行的脚本按钮单击（双击编辑时调用）。"""
+        if self._script_timer is not None:
+            self._script_timer.stop()
+            self._script_timer = None
+            
     def _detect_snap(self, canvas, x, y) -> Tuple[float, float, List[Tuple[str, float]]]:
         """检测对齐吸附：坐标轴 / 其他点。返回 (吸附后x, 吸附后y, 参考线列表)。"""
         THRESHOLD_PX = 12.0
@@ -14138,31 +17373,43 @@ class SelectTool(Tool):
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
     def release(self, canvas, wpt, hit):
+        if self._click_media is not None and not self._moved:
+            from media.script_button import ScriptButtonObject
+            if isinstance(self._click_media, ScriptButtonObject):
+                btn = self._click_media
+                self.cancel_pending_script()
+                self._script_timer = QTimer()
+                self._script_timer.setSingleShot(True)
+                interval = max(200, QApplication.doubleClickInterval())
+                self._script_timer.setInterval(interval)
+                self._script_timer.timeout.connect(lambda: btn.run(canvas))
+                self._script_timer.start()
+
         if self._drag_undo_begun:
             from core.macro import get_macro_manager
-
             mm = get_macro_manager()
-
             if mm is not None and mm.is_recording():
                 if self.drag_poo is not None:
                     mm.recorder.record_move(self.drag_poo)
-
                 for p in self.drag_pts:
                     mm.recorder.record_move(p)
-
                 if self.drag_media is not None:
                     mm.recorder.record_move(self.drag_media)
-
                 if self.resize_media is not None:
                     mm.recorder.record_move(self.resize_media)
-
                 if self.rotate_media is not None:
                     mm.recorder.record_move(self.rotate_media)
-
             canvas.doc.end_action()
-
+        self._reset()
+        
+    def activated(self, canvas):
+        self.cancel_pending_script()       # ★ 切回选择工具时也清理
         self._reset()
 
+    def deactivated(self, canvas):         # ★ 新增：切离选择工具时清理
+        self.cancel_pending_script()
+        self._reset()
+        
     def cancel(self, canvas):
         self._reset()
 
@@ -15675,7 +18922,21 @@ class Canvas(QWidget):
         from geo.function_sampler import get_sampler
         self._sampler = get_sampler()
         self._sampler.sampled.connect(self._on_function_sampled)
-
+        from geo.implicit_sampler import get_implicit_sampler
+        self._implicit_sampler = get_implicit_sampler()
+        self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
+        
+    def _on_implicit_sampled(self, curve_id, segments):
+        """隐函数采样完成 → 更新缓存 → 触发重绘。"""
+        from geo.implicit_curve import ImplicitCurve
+        store = get_store()
+        for obj in self.doc.objects:
+            if isinstance(obj, ImplicitCurve) and obj.id == curve_id:
+                domain = obj.get_domain(self)
+                obj.update_cache(segments, store.version, domain)
+                self.update()
+                break
+                    
     def _on_function_sampled(self, curve_id, points):
         """子线程采样完成 → 更新对应曲线的缓存 → 触发重绘。"""
         from geo.function_curve import FunctionCurve
@@ -16109,7 +19370,14 @@ class Canvas(QWidget):
             if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
                 menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
                 menu.addSeparator()
-
+            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
+                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
+                menu.addSeparator()
+                
+            if type(hit).__name__ in ("FunctionCurve", "ImplicitCurve"):
+                menu.addAction("✎ 编辑函数", lambda: self._edit_function_object(hit))
+                menu.addSeparator()
+                
         if selected:
             menu.addAction("重命名…", lambda: self._rename_objects(selected))
 
@@ -16149,7 +19417,15 @@ class Canvas(QWidget):
         else:
             super().contextMenuEvent(ev)
             
-
+    
+    def _edit_function_object(self, obj):
+        """右键菜单：编辑函数曲线 / 隐函数。"""
+        from ui.formula_editor import FormulaEditor
+        dlg = FormulaEditor(self, obj, self)
+        if dlg.exec():
+            dlg.build_function()
+            self.doc.changed.emit()
+            
     def _doc_action(self, fn):
         """在撤销组中执行一个文档动作。"""
         self.doc.begin_action()
@@ -16547,6 +19823,7 @@ def _render_media_to_base64(obj):
         
     img = QImage(w_px, h_px, QImage.Format.Format_ARGB32_Premultiplied)
     img.fill(Qt.GlobalColor.transparent)
+    
     p = QPainter(img)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     
@@ -16554,11 +19831,11 @@ def _render_media_to_base64(obj):
         def __init__(self, obj, scale):
             self.scale = scale
             self.obj = obj
-
+            
         def to_screen(self, x, y):
             return QPointF((x - self.obj.x) * self.scale,
                            (self.obj.y - y) * self.scale)
-            
+                           
     mock_view = MockView(obj, view_scale)
     
     renderer = None
@@ -16580,8 +19857,11 @@ def _render_media_to_base64(obj):
     ba = QByteArray()
     buf = QBuffer(ba)
     buf.open(QBuffer.OpenModeFlag.WriteOnly)
-    img.save(buf, "PNG")
-    return ba.toBase64().data().decode('ascii')
+    
+    img.save(buf, b"PNG")
+    buf.close()  # 确保缓冲区数据完全刷入 QByteArray
+    
+    return bytes(ba.toBase64().data()).decode('ascii')
 
 
 def _py_expr_to_js(expr, var_names):
@@ -16589,27 +19869,15 @@ def _py_expr_to_js(expr, var_names):
     s = expr.replace("^", "**")
 
     funcs = [
-        ("arcsin", "Math.asin"),
-        ("arccos", "Math.acos"),
-        ("arctan", "Math.atan"),
-        ("asin", "Math.asin"),
-        ("acos", "Math.acos"),
-        ("atan", "Math.atan"),
-        ("sinh", "Math.sinh"),
-        ("cosh", "Math.cosh"),
-        ("tanh", "Math.tanh"),
-        ("sqrt", "Math.sqrt"),
-        ("abs", "Math.abs"),
-        ("ln", "Math.log"),
-        ("log", "Math.log10"),
-        ("exp", "Math.exp"),
-        ("sin", "Math.sin"),
-        ("cos", "Math.cos"),
-        ("tan", "Math.tan"),
-
-        ("cot", "cot"),
-        ("sec", "sec"),
-        ("csc", "csc"),
+    ("arcsin", "Math.asin"), ("arccos", "Math.acos"), ("arctan", "Math.atan"),
+    ("asin", "Math.asin"), ("acos", "Math.acos"), ("atan", "Math.atan"),
+    ("sinh", "Math.sinh"), ("cosh", "Math.cosh"), ("tanh", "Math.tanh"),
+    ("sqrt", "Math.sqrt"), ("abs", "Math.abs"),
+    ("ln", "Math.log"), ("log", "Math.log10"), ("exp", "Math.exp"),
+    ("sin", "Math.sin"), ("cos", "Math.cos"), ("tan", "Math.tan"),
+    ("floor", "Math.floor"), ("ceil", "Math.ceil"), ("round", "Math.round"),
+    ("sign", "Math.sign"), ("min", "Math.min"), ("max", "Math.max"),
+    ("cot", "cot"), ("sec", "sec"), ("csc", "csc"),
     ]
 
     for py_name, js_name in funcs:
@@ -16910,24 +20178,80 @@ def _jsx_export(doc, include_vars=True):
                          f"{{strokeColor: '{obj.color}', strokeWidth: {obj.width}, "
                          f"opacity: {obj.opacity}}});")
         elif isinstance(obj, MediaObject):
-            b64 = _render_media_to_base64(obj)
+                tn = type(obj).__name__
+                
+                def _data_to_js_func(data_list):
+                    js_items = []
+                    for item in data_list:
+                        if isinstance(item, (int, float)):
+                            js_items.append(str(item))
+                        else:
+                            s = str(item).strip()
+                            if s.startswith("{") and s.endswith("}"):
+                                s = s[1:-1].strip()
+                            js_expr = _py_expr_to_js(s, var_names)
+                            js_items.append(js_expr)
+                    return "function() { return [" + ", ".join(js_items) + "]; }"
 
-            if b64:
-                n = nv()
-                names[obj.id] = n
+                cx = obj.x + obj.width / 2.0
+                cy = obj.y - obj.height / 2.0
+                r = min(obj.width, obj.height) / 2.0 * 0.85
 
-                x_bl = obj.x
-                y_bl = obj.y - obj.height
-
-                b64_clean = b64.replace("\n", "")
-
-                lines.append(
-                    f"var {n} = board.create('image', "
-                    f"['data:image/png;base64,{b64_clean}', "
-                    f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
-                    f"{{fixed: false, highlight: false}});"
-                )
-
+                if tn in ("PieChartObject", "BarChartObject", "LineChartObject"):
+                    n = nv(); names[obj.id] = n
+                    
+                    data_list = getattr(obj, 'data', [])
+                    labels_list = getattr(obj, 'labels', [])
+                    colors_list = getattr(obj, 'colors', [])
+                    
+                    data_func = _data_to_js_func(data_list)
+                    labels_js = str([render_template(str(l)) for l in labels_list]).replace("'", '"')
+                    colors_js = str(colors_list).replace("'", '"')
+                    color = colors_list[0] if colors_list else "#1971c2"
+                    
+                    if tn == "LineChartObject":
+                        lines.append(
+                            f"var yData_{n} = {data_func};\n"
+                            f"var xLen_{n} = {len(data_list)};\n"
+                            f"var {n} = board.create('curve', [\n"
+                            f"  function(t) {{ return t; }},\n"
+                            f"  function(t) {{ \n"
+                            f"    var arr = yData_{n}(); \n"
+                            f"    var idx = Math.round(t); \n"
+                            f"    if(idx < 0) idx = 0; if(idx >= arr.length) idx = arr.length - 1; \n"
+                            f"    return arr[idx]; \n"
+                            f"  }}\n"
+                            f"], 0, xLen_{n} - 1, {{\n"
+                            f"  strokeColor: '{color}', strokeWidth: 3, highlight: false, fixed: true\n"
+                            f"}});"
+                        )
+                    else:
+                        chart_type = "pie" if tn == "PieChartObject" else "bar"
+                        lines.append(
+                            f"var {n} = board.create('chart', [{data_func}], {{\n"
+                            f"  center: [{cx:.4f}, {cy:.4f}], \n"
+                            f"  radius: {r:.4f}, width: {obj.width:.4f}, height: {obj.height:.4f},\n"
+                            f"  type: '{chart_type}', \n"
+                            f"  colors: {colors_js},\n"
+                            f"  labels: {labels_js},\n"
+                            f"  highlight: false, fixed: true\n"
+                            f"}});"
+                        )
+                    
+                else:
+                    b64 = _render_media_to_base64(obj)
+                    if b64:
+                        n = nv()
+                        names[obj.id] = n
+                        x_bl = obj.x
+                        y_bl = obj.y - obj.height
+                        b64_clean = b64.replace("\n", "")
+                        lines.append(
+                            f"var {n} = board.create('image', "
+                            f"['data:image/png;base64,{b64_clean}', "
+                            f"[{x_bl:.4f}, {y_bl:.4f}], [{obj.width:.4f}, {obj.height:.4f}]], "
+                            f"{{fixed: false, highlight: false}});"
+                        )
     return "\n".join(lines), bb
 
 
@@ -17274,21 +20598,19 @@ class ExportWizard(QDialog):
         else:
             self.accept()          # 导出成功后关闭向导
 
-"""函数编辑器：Desmos 风格 —— 虚拟数学键盘 + 实时数学预览。"""
+"""函数编辑器：支持 显函数/参数方程/极坐标/隐函数，虚拟键盘含 y、=、θ。"""
 from PySide6.QtCore import Qt, QEvent, QPointF
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QLabel, QLineEdit, QRadioButton, QButtonGroup,
                                QCheckBox, QDoubleSpinBox, QPushButton,
                                QColorDialog, QDialogButtonBox, QWidget)
-
 from geo.function_curve import FunctionCurve, PALETTE
 from ui import theme
 from ui.math import draw_math
-
+from geo.implicit_curve import ImplicitCurve, parse_equation
 
 class MathPreview(QWidget):
-    """实时把表达式渲染成排版后的数学式。"""
     def __init__(self, parent=None):
         super().__init__(parent)
         self._text = ""
@@ -17310,16 +20632,17 @@ class MathPreview(QWidget):
 
 
 class FormulaKeypad(QWidget):
-    """Desmos 风格虚拟数学键盘：按键不抢焦点，直接插入当前输入框。"""
+    """虚拟键盘：包含 x, y, t, θ, = 等隐函数所需按键。"""
     KEYS = [
-        ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"), ("a⁄b", "/", "op"), ("⌫", None, "util"),
-        ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"), ("×", "*", "op"), ("AC", None, "util"),
-        ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"), ("−", "-", "op"), ("sin(", "sin(", "fn"),
-        ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"), ("(", "(", "op"), ("cos(", "cos(", "fn"),
-        ("x", "x", "var"), ("t", "t", "var"), ("^", "^", "op"), (")", ")", "op"), ("tan(", "tan(", "fn"),
-        ("π", "π", "const"), ("e", "e", "const"), ("√(", "sqrt(", "fn"), ("ln(", "ln(", "fn"), ("abs(", "abs(", "fn"),
+    ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"), ("a⁄b", "/", "op"), ("⌫", None, "util"),
+    ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"), ("×", "*", "op"), ("AC", None, "util"),
+    ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"), ("−", "-", "op"), ("sin(", "sin(", "fn"),
+    ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"), ("(", "(", "op"), ("cos(", "cos(", "fn"),
+    ("x", "x", "var"), ("t", "t", "var"), ("^", "^", "op"), (")", ")", "op"), ("tan(", "tan(", "fn"),
+    ("π", "π", "const"), ("e", "e", "const"), ("√(", "sqrt(", "fn"), ("ln(", "ln(", "fn"), ("abs(", "abs(", "fn"),
+    ("asin", "arcsin(", "fn"), ("acos", "arccos(", "fn"), ("atan", "arctan(", "fn"), ("sinh", "sinh(", "fn"), ("cosh", "cosh(", "fn"),
+    ("tanh", "tanh(", "fn"), ("sec", "sec(", "fn"), ("csc", "csc(", "fn"), ("cot", "cot(", "fn"), ("exp", "exp(", "fn"),
     ]
-
     def __init__(self, target_getter, parent=None):
         super().__init__(parent)
         self.setObjectName("formulaKeypad")
@@ -17328,9 +20651,11 @@ class FormulaKeypad(QWidget):
         grid.setSpacing(5)
         grid.setContentsMargins(10, 10, 10, 10)
         for idx, (label, ins, cls) in enumerate(self.KEYS):
+            if cls == "empty":
+                continue
             b = QPushButton(label)
             b.setProperty("keyclass", cls)
-            b.setFixedHeight(38)
+            b.setFixedHeight(36)
             b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             if ins is None:
@@ -17344,14 +20669,27 @@ class FormulaKeypad(QWidget):
         self.setStyleSheet(self._style())
 
     def _style(self):
-        ink, sub = theme.INK.name(), theme.SUBINK.name()
+        ink = theme.INK.name()
+        sub = theme.SUBINK.name()
         accent = theme.ACCENT.name()
         return f"""
-            border: none; border-radius: 8px;
-            font-size: 15px; font-weight: 600; color: {ink};
-            background: rgba(120,140,170,0.12);
-        }}
-        """
+    border: none; border-radius: 7px;
+    font-size: 14px; font-weight: 600; color: {ink};
+    background: rgba(120,140,170,0.12);
+}}
+    background: rgba(25,113,194,0.14); color: {accent};
+}}
+    background: rgba(90,105,130,0.10); color: {sub}; font-size: 12px;
+}}
+    background: rgba(240,140,0,0.16); color: #e8590c;
+}}
+    background: rgba(47,158,68,0.18); color: #2f9e44; font-size: 16px;
+}}
+    background: rgba(47,158,68,0.16); color: #2f9e44;
+}}
+    background: rgba(230,73,128,0.12); color: {sub};
+}}
+"""
 
     def _insert(self, text):
         le = self._get_target()
@@ -17376,7 +20714,7 @@ class FormulaEditor(QDialog):
         self.func = func
         self._active_field = None
         self.setWindowTitle("编辑函数" if func else "新建函数")
-        self.setMinimumWidth(430)
+        self.setMinimumWidth(460)
         self._build()
         self._load()
 
@@ -17387,9 +20725,10 @@ class FormulaEditor(QDialog):
         kind_row = QHBoxLayout()
         self._kind_group = QButtonGroup(self)
         self._kinds = {}
-        for key, label in [("explicit", "显函数 y=f(x)"),
-                           ("parametric", "参数方程"),
-                           ("polar", "极坐标 r=f(θ)")]:
+        for key, label in [("explicit", "y=f(x)"),
+                           ("parametric", "参数"),
+                           ("polar", "极坐标"),
+                           ("implicit", "隐函数")]:
             rb = QRadioButton(label)
             self._kind_group.addButton(rb)
             self._kinds[key] = rb
@@ -17401,7 +20740,9 @@ class FormulaEditor(QDialog):
         self._expr1 = QLineEdit()
         self._expr1.installEventFilter(self)
         self._expr1.textChanged.connect(self._update_preview)
-        row1 = QHBoxLayout(); row1.addWidget(self._expr1_lbl); row1.addWidget(self._expr1)
+        row1 = QHBoxLayout()
+        row1.addWidget(self._expr1_lbl)
+        row1.addWidget(self._expr1)
         root.addLayout(row1)
 
         self._expr2_row = QHBoxLayout()
@@ -17409,7 +20750,8 @@ class FormulaEditor(QDialog):
         self._expr2 = QLineEdit()
         self._expr2.installEventFilter(self)
         self._expr2.textChanged.connect(self._update_preview)
-        self._expr2_row.addWidget(self._expr2_lbl); self._expr2_row.addWidget(self._expr2)
+        self._expr2_row.addWidget(self._expr2_lbl)
+        self._expr2_row.addWidget(self._expr2)
         root.addLayout(self._expr2_row)
 
         self._preview = MathPreview()
@@ -17419,14 +20761,20 @@ class FormulaEditor(QDialog):
         root.addWidget(self._keypad)
 
         dom = QHBoxLayout()
-        self._auto_dom = QCheckBox("自动（跟随视窗）")
+        self._auto_dom = QCheckBox("自动")
         self._auto_dom.toggled.connect(self._on_auto_toggled)
         dom.addWidget(self._auto_dom)
         dom.addWidget(QLabel("从"))
-        self._dom_a = QDoubleSpinBox(); self._dom_a.setRange(-1e6, 1e6); self._dom_a.setDecimals(3); self._dom_a.setValue(0)
+        self._dom_a = QDoubleSpinBox()
+        self._dom_a.setRange(-1e6, 1e6)
+        self._dom_a.setDecimals(3)
+        self._dom_a.setValue(0)
         dom.addWidget(self._dom_a)
         dom.addWidget(QLabel("到"))
-        self._dom_b = QDoubleSpinBox(); self._dom_b.setRange(-1e6, 1e6); self._dom_b.setDecimals(3); self._dom_b.setValue(6.283)
+        self._dom_b = QDoubleSpinBox()
+        self._dom_b.setRange(-1e6, 1e6)
+        self._dom_b.setDecimals(3)
+        self._dom_b.setValue(6.283)
         dom.addWidget(self._dom_b)
         dom.addStretch(1)
         root.addLayout(dom)
@@ -17443,7 +20791,8 @@ class FormulaEditor(QDialog):
         crow.addStretch(1)
         root.addLayout(crow)
 
-        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         root.addWidget(btns)
@@ -17454,17 +20803,23 @@ class FormulaEditor(QDialog):
         return super().eventFilter(obj, ev)
 
     def _load(self):
+        from geo.implicit_curve import ImplicitCurve
         f = self.func
         if f:
-            self._kinds[f.kind].setChecked(True)
-            self._expr1.setText(f.expr)
-            self._expr2.setText(f.expr2)
-            if f.domain:
-                self._auto_dom.setChecked(False)
-                self._dom_a.setValue(f.domain[0])
-                self._dom_b.setValue(f.domain[1])
+            if isinstance(f, ImplicitCurve):
+                self._kinds["implicit"].setChecked(True)
+                self._expr1.setText(f.expr)
             else:
-                self._auto_dom.setChecked(True)
+                self._kinds[f.kind].setChecked(True)
+                self._expr1.setText(f.expr)
+                self._expr2.setText(f.expr2)
+                if f.domain:
+                    self._auto_dom.setChecked(False)
+                    self._dom_a.setValue(f.domain[0])
+                    self._dom_b.setValue(f.domain[1])
+                else:
+                    self._auto_dom.setChecked(True)
+            self._color = QColor(f.color)
         else:
             self._kinds["explicit"].setChecked(True)
             self._auto_dom.setChecked(True)
@@ -17492,8 +20847,12 @@ class FormulaEditor(QDialog):
         elif kind == "parametric":
             self._expr1_lbl.setText("x(t) =")
             self._auto_dom.setVisible(False)
-        else:
+        elif kind == "polar":
             self._expr1_lbl.setText("r =")
+            self._auto_dom.setVisible(False)
+        elif kind == "implicit":
+            self._expr1_lbl.setText("F(x,y) =")
+            self._expr1.setPlaceholderText("如 x^2+y^2=1 或 sin(x)*cos(y)=0.5")
             self._auto_dom.setVisible(False)
         self._on_auto_toggled()
         self._update_preview()
@@ -17511,8 +20870,10 @@ class FormulaEditor(QDialog):
         elif kind == "parametric":
             e2 = self._expr2.text().strip()
             self._preview.set_text(f"({e1}, {e2})" if (e1 or e2) else "")
-        else:
+        elif kind == "polar":
             self._preview.set_text(f"r = {e1}" if e1 else "")
+        elif kind == "implicit":
+            self._preview.set_text(e1 if e1 else "")
 
     def _pick_color(self):
         c = QColorDialog.getColor(self._color, self, "选择曲线颜色")
@@ -17522,12 +20883,34 @@ class FormulaEditor(QDialog):
 
     def _update_color_btn(self):
         self._color_btn.setStyleSheet(
-            f"background:{self._color.name()};border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
+            f"background:{self._color.name()};"
+            f"border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
 
     def build_function(self):
+        from geo.implicit_curve import ImplicitCurve
         kind = self._current_kind()
         e1 = self._expr1.text().strip()
         e2 = self._expr2.text().strip()
+
+        if kind == "implicit":
+            if not e1:
+                return None
+            from geo.implicit_curve import ImplicitCurve, parse_equation
+
+            a, b = self._dom_a.value(), self._dom_b.value()
+            if a > b:
+                a, b = b, a
+            domain = (a, b, a, b)
+            
+            if self.func and isinstance(self.func, ImplicitCurve):
+                self.func.expr = e1
+                self.func._resolved_expr = parse_equation(e1)
+                self.func.color = self._color.name()
+                self.func.domain = domain  
+                self.func.invalidate_cache()
+                return self.func
+            return ImplicitCurve(e1, domain=domain, color=self._color.name())
+
         if not e1 or (kind == "parametric" and not e2):
             return None
         if self._auto_dom.isChecked() and kind == "explicit":
@@ -17537,24 +20920,31 @@ class FormulaEditor(QDialog):
             if a > b:
                 a, b = b, a
             domain = (a, b)
-        if self.func:
+        if self.func and not isinstance(self.func, ImplicitCurve):
             f = self.func
             f.kind, f.expr, f.expr2, f.domain = kind, e1, e2, domain
             f.color = self._color.name()
             return f
         return FunctionCurve(kind, e1, e2, domain, self._color.name())
 
-"""函数编辑器：可折叠的停靠侧栏（QDockWidget），函数显示于此。"""
+"""函数编辑器：可折叠停靠侧栏，按类型分页显示函数。"""
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QColorDialog, QCheckBox,
                                QScrollArea, QFrame, QDockWidget, QMainWindow)
-
 from geo.function_curve import FunctionCurve
 from ui.variable_widgets import VariableSliderPanel
 from ui import theme
 from ui.math import draw_math
+
+PAGES = [
+    ("all", "全部"),
+    ("explicit", "显函数"),
+    ("parametric", "参数"),
+    ("polar", "极坐标"),
+    ("implicit", "隐函数"),
+]
 
 
 class ExprLabel(QWidget):
@@ -17590,16 +20980,17 @@ class FunctionRow(QWidget):
         self.dot.clicked.connect(lambda _=False, f=func: editor.recolor(f))
         h.addWidget(self.dot)
 
-        self.expr = ExprLabel(func.default_label(), func.color)
+        label = self._get_label(func)
+        self.expr = ExprLabel(label, getattr(func, "color", "#1971c2"))
         h.addWidget(self.expr, 1)
 
-        self._ops = QWidget()                      # 不能叫 actions（与 QWidget.actions() 冲突）
+        self._ops = QWidget()
         ah = QHBoxLayout(self._ops)
         ah.setContentsMargins(0, 0, 0, 0)
         ah.setSpacing(2)
         self.eye = QCheckBox()
         self.eye.setToolTip("显示/隐藏")
-        self.eye.setChecked(func.visible)
+        self.eye.setChecked(getattr(func, "visible", True))
         self.eye.toggled.connect(lambda on, f=func: editor.toggle(f, on))
         ah.addWidget(self.eye)
         edit = QPushButton("✎")
@@ -17611,22 +21002,35 @@ class FunctionRow(QWidget):
         rm = QPushButton("×")
         rm.setFixedSize(22, 22)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
-        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};font-weight:700;")
+        rm.setStyleSheet(f"border:none;color:{theme.SELECTED.name()};"
+                         f"font-weight:700;")
         rm.clicked.connect(lambda _=False, f=func: editor.delete(f))
         ah.addWidget(rm)
         h.addWidget(self._ops)
         self._ops.hide()
-        self.setToolTip(func.default_label())
+        self.setToolTip(label)
         self._style()
 
+    @staticmethod
+    def _get_label(func):
+        from geo.implicit_curve import ImplicitCurve
+        if isinstance(func, ImplicitCurve):
+            return func.expr
+        if hasattr(func, "default_label"):
+            return func.default_label()
+        return getattr(func, "expr", "")
+
     def _style(self):
+        color = getattr(self.func, "color", "#1971c2")
         self.dot.setStyleSheet(
-            f"background:{self.func.color};border-radius:6px;border:1px solid rgba(0,0,0,0.25);")
-        self.expr.set_text(self.func.default_label(), self.func.color)
+            f"background:{color};border-radius:6px;"
+            f"border:1px solid rgba(0,0,0,0.25);")
+        self.expr.set_text(self._get_label(self.func), color)
 
     def enterEvent(self, ev):
         self._ops.show()
-        self.setStyleSheet("background:rgba(120,140,170,0.10);border-radius:7px;")
+        self.setStyleSheet("background:rgba(120,140,170,0.10);"
+                           "border-radius:7px;")
 
     def leaveEvent(self, ev):
         self._ops.hide()
@@ -17639,6 +21043,8 @@ class FunctionEditorWidget(QWidget):
     def __init__(self, canvas, parent=None):
         super().__init__(parent)
         self.canvas = canvas
+        self._current_page = "all"
+
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 9, 8, 9)
         outer.setSpacing(6)
@@ -17648,7 +21054,8 @@ class FunctionEditorWidget(QWidget):
         self._collapse_btn.setFixedWidth(24)
         self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_btn.setToolTip("折叠侧栏")
-        self._collapse_btn.clicked.connect(lambda: self.collapse_requested.emit(True))
+        self._collapse_btn.clicked.connect(
+            lambda: self.collapse_requested.emit(True))
         head.addWidget(self._collapse_btn)
         self._cap = QLabel("函数编辑器")
         head.addWidget(self._cap)
@@ -17662,8 +21069,8 @@ class FunctionEditorWidget(QWidget):
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
         self._scroll.setFrameShape(QFrame.Shape.NoFrame)
-        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._scroll.setStyleSheet("background:transparent;border:none;")
         self._content = QWidget()
         self._content.setStyleSheet("background:transparent;")
@@ -17671,26 +21078,57 @@ class FunctionEditorWidget(QWidget):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(10)
 
-        self.var_panel = VariableSliderPanel(canvas, self._content)   # 变量区
+        self.var_panel = VariableSliderPanel(canvas, self._content)
         cl.addWidget(self.var_panel)
-        self._func_cap = QLabel("函数")
-        cl.addWidget(self._func_cap)
+
+        self._page_btns = {}
+        page_row = QHBoxLayout()
+        page_row.setSpacing(4)
+        for kind, label in PAGES:
+            btn = QPushButton(label)
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.clicked.connect(lambda _=False, k=kind: self._switch_page(k))
+            page_row.addWidget(btn)
+            self._page_btns[kind] = btn
+        page_row.addStretch(1)
+        cl.addLayout(page_row)
+
         self._func_rows = QVBoxLayout()
         self._func_rows.setSpacing(2)
         cl.addLayout(self._func_rows)
         cl.addStretch(1)
+
         self._scroll.setWidget(self._content)
         outer.addWidget(self._scroll, 1)
 
+        self._switch_page("all")
+
+    def _switch_page(self, kind):
+        self._current_page = kind
+        for k, btn in self._page_btns.items():
+            btn.setChecked(k == kind)
+        self.refresh()
+
     def refresh(self):
         self._cap.setStyleSheet(
-            f"font-weight:800;font-size:13px;letter-spacing:2px;color:{theme.INK.name()};")
+            f"font-weight:800;font-size:13px;letter-spacing:2px;"
+            f"color:{theme.INK.name()};")
         self._add.setStyleSheet(
             f"border:none;border-radius:8px;background:{theme.ACCENT.name()};"
             f"color:#fff;font-weight:700;padding:5px 10px;")
-        self._func_cap.setStyleSheet(
-            f"font-weight:800;font-size:12px;color:{theme.INK.name()};")
+        for k, btn in self._page_btns.items():
+            if k == self._current_page:
+                btn.setStyleSheet(
+                    f"background:{theme.ACCENT.name()};color:#fff;"
+                    f"border:none;border-radius:6px;padding:4px 8px;"
+                    f"font-weight:600;")
+            else:
+                btn.setStyleSheet(
+                    f"background:transparent;color:{theme.SUBINK.name()};"
+                    f"border:none;border-radius:6px;padding:4px 8px;")
         self.var_panel.refresh()
+
         while self._func_rows.count():
             item = self._func_rows.takeAt(0)
             if item is None:
@@ -17698,9 +21136,18 @@ class FunctionEditorWidget(QWidget):
             w = item.widget()
             if w:
                 w.deleteLater()
-        for i, f in enumerate(o for o in self.canvas.doc.objects
-                              if isinstance(o, FunctionCurve)):
-            self._func_rows.insertWidget(i, FunctionRow(f, self))
+
+        from geo.implicit_curve import ImplicitCurve
+        for o in self.canvas.doc.objects:
+            if self._current_page == "all":
+                if isinstance(o, (FunctionCurve, ImplicitCurve)):
+                    self._func_rows.addWidget(FunctionRow(o, self))
+            elif self._current_page == "implicit":
+                if isinstance(o, ImplicitCurve):
+                    self._func_rows.addWidget(FunctionRow(o, self))
+            else:
+                if isinstance(o, FunctionCurve) and o.kind == self._current_page:
+                    self._func_rows.addWidget(FunctionRow(o, self))
 
     def new_function(self):
         from ui.formula_editor import FormulaEditor
@@ -17720,7 +21167,8 @@ class FunctionEditorWidget(QWidget):
             self.refresh()
 
     def recolor(self, f):
-        c = QColorDialog.getColor(QColor(f.color), self, "选择曲线颜色")
+        c = QColorDialog.getColor(QColor(getattr(f, "color", "#1971c2")),
+                                  self, "选择曲线颜色")
         if c.isValid():
             f.color = c.name()
             self.canvas.doc.changed.emit()
@@ -17734,13 +21182,15 @@ class FunctionEditorWidget(QWidget):
         self.canvas.doc.remove(f)
         self.refresh()
 
+
 class FunctionEditorDock(QDockWidget):
-    """可折叠函数编辑器侧栏：« 收成窄条，» 展开。"""
+    """可折叠函数编辑器侧栏。"""
     def __init__(self, canvas, parent=None):
         super().__init__("函数编辑器", parent)
         self.setObjectName("functionEditorDock")
         self.canvas = canvas
-        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea |
+                             Qt.DockWidgetArea.RightDockWidgetArea)
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
                          QDockWidget.DockWidgetFeature.DockWidgetFloatable |
                          QDockWidget.DockWidgetFeature.DockWidgetClosable)
@@ -17780,7 +21230,7 @@ class FunctionEditorDock(QDockWidget):
             self.setMinimumWidth(280)
             if isinstance(mw, QMainWindow):
                 mw.resizeDocks([self], [300], Qt.Orientation.Horizontal)
-            self._editor.refresh()
+        self._editor.refresh()
 
     def refresh(self):
         self._editor.refresh()
@@ -17884,23 +21334,71 @@ def build_tool_icon(spec: dict) -> QIcon:
     """tool_rail 的接口：从注册表里的字符串键解析图标。"""
     return tool_icon(spec.get("icon") or "")
 
-"""宏管理器对话框。"""
 
+"""宏管理器对话框：回放 / 重命名 / 删除 / 转为脚本。"""
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QListWidget,
-    QPushButton, QInputDialog, QMessageBox
+    QPushButton, QInputDialog, QMessageBox,
+    QPlainTextEdit, QLabel, QApplication
 )
+
+
+class ScriptPreviewDialog(QDialog):
+    """脚本预览对话框：显示转换后的脚本，支持一键复制。"""
+
+    def __init__(self, script: str, macro_name: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"宏转脚本 · {macro_name}" if macro_name else "宏转脚本")
+        self.resize(640, 520)
+
+        layout = QVBoxLayout(self)
+
+        tip = QLabel("以下是由宏自动生成的脚本代码，可直接复制使用或在脚本编辑器中进一步修改。")
+        tip.setWordWrap(True)
+        tip.setStyleSheet("color: #5a6b82; font-size: 12px; margin-bottom: 6px;")
+        layout.addWidget(tip)
+
+        self.editor = QPlainTextEdit()
+        self.editor.setPlainText(script)
+        self.editor.setReadOnly(True)
+        font = QFont("Consolas", 11)
+        font.setStyleHint(QFont.StyleHint.Monospace)
+        self.editor.setFont(font)
+        self.editor.setTabStopDistance(28)
+        layout.addWidget(self.editor, 1)
+
+        lines = script.split("\n")
+        total = len(lines)
+        supported = sum(1 for l in lines if l.strip() and not l.strip().startswith("#"))
+        comments = sum(1 for l in lines if l.strip().startswith("#"))
+        self.stats_label = QLabel(f"共 {total} 行 · {supported} 行有效代码 · {comments} 行注释/提示")
+        self.stats_label.setStyleSheet("color: #8a8f98; font-size: 11px;")
+        layout.addWidget(self.stats_label)
+
+        btn_row = QHBoxLayout()
+        copy_btn = QPushButton("📋 复制全部")
+        copy_btn.clicked.connect(self._copy)
+        close_btn = QPushButton("关闭")
+        close_btn.clicked.connect(self.accept)
+        btn_row.addStretch(1)
+        btn_row.addWidget(copy_btn)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+    def _copy(self):
+        QApplication.clipboard().setText(self.editor.toPlainText())
+        self.stats_label.setText("✔ 已复制到剪贴板")
 
 
 class MacroDialog(QDialog):
     def __init__(self, manager, parent=None):
         super().__init__(parent)
-
         self.manager = manager
         self.doc = manager.doc
-
         self.setWindowTitle("宏管理器")
-        self.resize(460, 380)
+        self.resize(520, 400)
 
         layout = QVBoxLayout(self)
 
@@ -17908,36 +21406,35 @@ class MacroDialog(QDialog):
         layout.addWidget(self.list, 1)
 
         btn_row = QHBoxLayout()
-
-        play_btn = QPushButton("回放")
-        rename_btn = QPushButton("重命名")
-        delete_btn = QPushButton("删除")
+        play_btn = QPushButton("▶ 回放")
+        rename_btn = QPushButton("✏ 重命名")
+        delete_btn = QPushButton("🗑 删除")
+        to_script_btn = QPushButton("📜 转为脚本")
+        to_script_btn.setStyleSheet("font-weight: bold;")
         close_btn = QPushButton("关闭")
 
         play_btn.clicked.connect(self._play)
         rename_btn.clicked.connect(self._rename)
         delete_btn.clicked.connect(self._delete)
+        to_script_btn.clicked.connect(self._to_script)
         close_btn.clicked.connect(self.accept)
 
         btn_row.addWidget(play_btn)
         btn_row.addWidget(rename_btn)
         btn_row.addWidget(delete_btn)
+        btn_row.addWidget(to_script_btn)
         btn_row.addStretch(1)
         btn_row.addWidget(close_btn)
-
         layout.addLayout(btn_row)
 
         self.list.itemDoubleClicked.connect(lambda *_: self._play())
-
         self._refresh()
-
 
     def _macros(self):
         return getattr(self.doc, "macros", [])
 
     def _refresh(self):
         self.list.clear()
-
         for i, m in enumerate(self._macros()):
             name = m.get("name", f"宏 {i + 1}")
             count = len(m.get("commands", []))
@@ -17946,66 +21443,64 @@ class MacroDialog(QDialog):
     def _selected_index(self):
         row = self.list.currentRow()
         macros = self._macros()
-
         if 0 <= row < len(macros):
             return row
-
         return None
-
 
     def _play(self):
         index = self._selected_index()
-
         if index is None:
             return
-
         if self.manager.is_recording():
-            QMessageBox.information(
-                self,
-                "宏",
-                "正在录制宏，请先停止录制再回放。"
-            )
+            QMessageBox.information(self, "宏", "正在录制宏，请先停止录制再回放。")
             return
-
         self.manager.play(self._macros()[index])
 
     def _rename(self):
         index = self._selected_index()
-
         if index is None:
             return
-
         old_name = self._macros()[index].get("name", "")
-
-        name, ok = QInputDialog.getText(
-            self,
-            "重命名宏",
-            "宏名称：",
-            text=old_name
-        )
-
+        name, ok = QInputDialog.getText(self, "重命名宏", "宏名称：", text=old_name)
         if ok and name.strip():
             self.manager.rename_macro(index, name.strip())
             self._refresh()
 
     def _delete(self):
         index = self._selected_index()
-
         if index is None:
             return
-
         name = self._macros()[index].get("name", f"宏 {index + 1}")
-
         reply = QMessageBox.question(
-            self,
-            "删除宏",
-            f"确定删除宏「{name}」吗？",
+            self, "删除宏", f"确定删除宏「{name}」吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
-
         if reply == QMessageBox.StandardButton.Yes:
             self.manager.delete_macro(index)
             self._refresh()
+
+    def _to_script(self):
+        index = self._selected_index()
+        if index is None:
+            QMessageBox.information(self, "提示", "请先选择一个宏。")
+            return
+
+        macro = self._macros()[index]
+        macro_name = macro.get("name", f"宏 {index + 1}")
+
+        try:
+            from core.scripting.macro_converter import macro_to_script
+            script = macro_to_script(macro, keep=True)
+        except Exception as e:
+            QMessageBox.critical(self, "转换失败", f"宏转脚本时出错：\n{e}")
+            return
+
+        if not script.strip():
+            QMessageBox.warning(self, "提示", "该宏为空，无法转换。")
+            return
+
+        dlg = ScriptPreviewDialog(script, macro_name, self)
+        dlg.exec()
 
 import datetime
 
@@ -18453,8 +21948,9 @@ class MainWindow(QMainWindow):
         self.canvas.update_snow_state()
 
 """迷你数学排版器对外接口：draw_math / measure_math。
-★ 新增：parse 缓存 + measure 缓存，避免每帧重复解析。"""
-
+★ 新增：parse 缓存 + measure 缓存，避免每帧重复解析。
+★ 修复：自动将 sqrt(...) 和 √(...) 转换为 \\sqrt{...} 以支持根号渲染。
+"""
 from PySide6.QtGui import QColor, QPen
 from .parser import parse
 from .layout import MathLayout
@@ -18465,18 +21961,50 @@ _PARSE_CACHE_MAX = 512
 _measure_cache: dict[tuple, tuple] = {}
 _MEASURE_CACHE_MAX = 512
 
+def _convert_sqrt_to_latex(text: str) -> str:
+    """将 sqrt(...) 函数调用和 √(...) 转换为 \\sqrt{...} LaTeX 命令。
+    支持嵌套括号：sqrt(x^2+sqrt(x)) → \\sqrt{x^2+\\\\sqrt{x}}
+    """
+    if not isinstance(text, str):
+        return str(text)
+        
+    result = text.replace("√(", "sqrt(").replace("√", "sqrt")
+    
+    max_iter = 20
+    for _ in range(max_iter):
+        idx = result.find("sqrt(")
+        if idx == -1:
+            break
+        start = idx + 5  # "sqrt(" 的长度
+        depth = 1
+        end = start
+        while end < len(result) and depth > 0:
+            if result[end] == "(":
+                depth += 1
+            elif result[end] == ")":
+                depth -= 1
+            end += 1
+        
+        if depth == 0:
+            inner = result[start:end - 1]
+            result = result[:idx] + "\\sqrt{" + inner + "}" + result[end:]
+        else:
+            break
+            
+    return result
 
 def parse_cached(text: str):
     """带缓存的 parse。AST 是只读的（layout 只遍历不修改），缓存安全。"""
-    cached = _parse_cache.get(text)
+    converted_text = _convert_sqrt_to_latex(text)
+    
+    cached = _parse_cache.get(converted_text)
     if cached is not None:
         return cached
-    result = parse(text)
+    result = parse(converted_text)
     if len(_parse_cache) >= _PARSE_CACHE_MAX:
         _parse_cache.clear()
-    _parse_cache[text] = result
+    _parse_cache[converted_text] = result
     return result
-
 
 def draw_math(p, x, y, text, size=13, color=None):
     """在 (x, y)【基线左端】渲染数学表达式，返回实际宽度。"""
@@ -18486,22 +22014,21 @@ def draw_math(p, x, y, text, size=13, color=None):
     color = QColor(color)
     p.setPen(QPen(color, 1.0))
     lay = MathLayout(p, size, color)
-    return lay.draw(parse_cached(text), x, y)    # ★ 使用缓存
-
+    return lay.draw(parse_cached(text), x, y)    # ★ 使用缓存（内部已转换）
 
 def measure_math(text, size=13):
     """只度量不绘制，返回 (宽, 升, 降)。带缓存。"""
-    key = (text, size)
+    converted_text = _convert_sqrt_to_latex(text)
+    key = (converted_text, size)
     cached = _measure_cache.get(key)
     if cached is not None:
         return cached
     lay = MathLayout(None, size, QColor(0, 0, 0))
-    result = lay.measure(parse_cached(text))     # ★ 使用缓存
+    result = lay.measure(parse_cached(converted_text))     # ★ 使用缓存
     if len(_measure_cache) >= _MEASURE_CACHE_MAX:
         _measure_cache.clear()
     _measure_cache[key] = result
     return result
-
 
 def clear_math_caches():
     """清空数学排版缓存（主题切换 / 文档切换时调用）。"""
@@ -18967,8 +22494,13 @@ class Row:
 
 
 FUNCS = {
-    "sin", "cos", "tan", "cot", "sqrt", "log", "ln", "abs", "exp",
-    "lim", "max", "min", "arcsin", "arccos", "arctan"
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "arcsin", "arccos", "arctan",
+    "asin", "acos", "atan",
+    "sinh", "cosh", "tanh",
+    "sqrt", "log", "ln", "abs", "exp",
+    "floor", "ceil", "round", "sign",
+    "lim", "max", "min",
 }
 
 GREEK = {
@@ -19463,10 +22995,12 @@ class PropertyPanel(QWidget):
             self._collapsed_widget.hide()
             self._expanded_widget.show()
             self.setFixedWidth(self._expanded_width)
-            self.setMaximumHeight(max(240, self.canvas.height() - 110))
             self.setMinimumHeight(0)
-        self.reposition()
-        self.raise_()
+            self.setMaximumHeight(16777215)   # QWIDGETSIZE_MAX
+            target_h = max(320, min(600, self.canvas.height() - 80))
+            self.resize(self._expanded_width, target_h)
+            self.reposition()
+            self.raise_()
 
     def reposition(self) -> None:
         x = max(10, self.canvas.width() - self.width() - 16)
@@ -19645,31 +23179,48 @@ class PropertyPanel(QWidget):
             "PointOnObject": "吸附点",
             "IntersectPoint": "交点",
             "DivisionPoint": "等分点",
-            "Segment": "线段",
-            "Circle": "圆",
-            "ExprCircle": "表达式圆",
-            "ExprSegment": "表达式线段",
-            "ExprAngle": "表达式角度",
+            "PolygonVertex": "多边形顶点",
+            "Incenter": "内心",
+            "Centroid": "重心",
             "ExprPoint": "表达式点",
+            "TransformPoint": "变换点",
+            "IterPoint": "迭代点",
+            "CircleAxisPoint": "圆轴点",
+            "Segment": "线段",
             "Line": "直线",
             "Ray": "射线",
-            "RegularPolygon": "正多边形",
+            "ParallelLine": "平行线",
+            "PerpLine": "垂线",
+            "AngleBisector": "角平分线",
+            "AngleDivLine": "等分角线",
+            "PerpBisector": "中垂线",
+            "DirectedLine": "方向直线",
+            "Circle": "圆",
+            "ThreePointCircle": "过三点圆",
+            "ExprCircle": "表达式圆",
+            "InvertedCircle": "反演圆",
             "Ellipse": "椭圆",
+            "RegularPolygon": "正多边形",
             "CubicBezier": "贝塞尔曲线",
             "FunctionCurve": "函数曲线",
+            "ImplicitCurve": "隐函数曲线",
             "ChainFill": "链式填充",
             "TextObject": "文本",
             "ScriptButtonObject": "脚本按钮",
             "TableObject": "表格",
             "PieChartObject": "饼图",
             "BarChartObject": "柱状图",
+            "LineChartObject": "折线图",
+            "DonutChartObject": "环形图",
             "ImageObject": "图片",
             "InkStroke": "墨迹",
             "Measure": "度量",
             "AngleMeasure": "角度",
             "RatioMeasure": "比例",
-            "TransformPoint": "变换点",
-            "IterPoint": "迭代点",
+            "RegionMeasure": "区域度量",
+            "ExprSegment": "表达式线段",
+            "ExprAngle": "表达式角度",
+            "TransformDriver": "变换驱动器",
         }
         return cn.get(name, name)
 
@@ -19888,9 +23439,11 @@ class PropertyPanel(QWidget):
 
 
     def _set_visible(self, objs: list[Any], visible: bool) -> None:
-        self._doc_action(
-            lambda: [setattr(o, "visible", bool(visible)) for o in objs]
-        )
+        def doit():
+            for o in objs:
+                o.visible = bool(visible)
+            self.canvas.doc._mutation_count += 1
+        self._doc_action(doit)
 
     def _reorder(self, objs: list[Any], front: bool) -> None:
         def doit() -> None:
@@ -19905,7 +23458,7 @@ class PropertyPanel(QWidget):
                     if o in doc_objects:
                         doc_objects.remove(o)
                         doc_objects.insert(0, o)
-
+            self.canvas.doc._mutation_count += 1
         self._doc_action(doit)
 
     def _select_related(self, obj: Any, mode: str) -> None:
@@ -19993,12 +23546,15 @@ KEYWORDS = [
 ]
 
 FUNCS = [
-    "point", "segment", "line", "ray", "circle", "ellipse", 
-    "polygon", "regular_polygon", "midpoint", "division_point", 
+    "point", "segment", "line", "ray", "circle", "ellipse",
+    "polygon", "regular_polygon", "midpoint", "division_point",
     "intersect", "text", "function", "parametric", "polar",
     "distance", "length", "slope", "radius", "area", "perimeter",
-    "sin", "cos", "tan", "arcsin", "arccos", "arctan",
-    "sqrt", "abs", "ln", "log", "exp", "floor", "ceil", "round",
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "arcsin", "arccos", "arctan", "asin", "acos", "atan",
+    "sinh", "cosh", "tanh",
+    "sqrt", "abs", "ln", "log", "exp", 
+    "floor", "ceil", "round", "sign", "min", "max",
     "print", "math", "geo", "draw", "doc"
 ]
 

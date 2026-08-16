@@ -134,11 +134,12 @@ class Document(QObject):
     # ================= 增删 =================
     def _add(self, obj):
         self._mutation_count += 1
-        self._objects_version += 1          # ★ 结构变化
+        self._objects_version += 1
         self.objects.append(obj)
-        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
+    # ★ 修复：expr_driver 对象（TransformDriver, IterPoint 等）也参与变量联动
+        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)) or \
+            getattr(obj, "expr_driver", False):
             self.expr_objects.append(obj)
-        # ★ 宏录制：通知对象新增
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
         return obj
@@ -330,14 +331,16 @@ class Document(QObject):
     # ================= 撤销 / 重做 =================
     def snapshot(self):
         return [
-            {
-                "id": o.id,
-                "type": o.type_name,
-                "name": getattr(o, "name", ""),
-                "parents": [p.id for p in o.parents],
-                "params": o.dump()
-            }
-            for o in self.objects
+        {
+            "id": o.id,
+            "type": o.type_name,
+            "name": getattr(o, "name", ""),
+            # ★ 修复：持久化 visible 状态
+            "visible": getattr(o, "visible", True),
+            "parents": [p.id for p in o.parents],
+            "params": o.dump()
+        }
+        for o in self.objects
         ]
 
     def _push_undo(self):
@@ -420,9 +423,8 @@ class Document(QObject):
     def _load_state(self, data):
         self.objects.clear()
         self.expr_objects.clear()
-        self._objects_version += 1          # ★ 结构变化
+        self._objects_version += 1
         pool = {}
-        # ★ 加载 / 撤销 / 重做期间不录制宏
         self._macro_suppress = True
         try:
             for item in data:
@@ -430,6 +432,9 @@ class Document(QObject):
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
                 obj.id = item["id"]
+                # ★ 修复：恢复自定义名称和可见性
+                obj.name = item.get("name", "")
+                obj.visible = item.get("visible", True)
                 pool[item["id"]] = self._add(obj)
             if data:
                 GeoObject.bump_ids(max(item["id"] for item in data))

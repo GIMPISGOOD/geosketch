@@ -19,16 +19,19 @@ class VariableTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled:
-            return
+        if self.muted or not self.enabled: return
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None:
-            return
+        if val is None: return
+        
         from core.variables import get_store
         store = get_store()
         var = store.get_var(self.var_name)
-        if var is not None and not var.expr:  # 从动变量不可手动改值
-            store.set(self.var_name, val)
+        
+        # ★ 修复：拦截从动变量，避免静默失效
+        if var is None or getattr(var, "expr", ""):
+            return 
+            
+        store.set(self.var_name, val)
 
     def duration(self) -> float:
         if not self.keyframes:
@@ -121,7 +124,11 @@ class PropertyTrack(AnimationTrack):
 
     绑定对象 + 属性名，随时间改变属性值。
     """
-
+    ALLOWED_ATTRS = {
+        "size", "rotation", "width", "height", "opacity", 
+        "color", "text_color", "t"
+    }
+    
     def __init__(self, obj_id: int, attr_name: str,
                  keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -130,13 +137,16 @@ class PropertyTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled:
+        if self.muted or not self.enabled: return
+        if self.target is None: return
+        
+        # 校验白名单
+        if self.attr_name not in self.ALLOWED_ATTRS:
             return
-        if self.target is None:
-            return
+            
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None:
-            return
+        if val is None: return
+        
         if hasattr(self.target, self.attr_name):
             setattr(self.target, self.attr_name, val)
 
