@@ -30,7 +30,15 @@ def build_global_env(interp):
         "floor": math.floor, "ceil": math.ceil, 
         "round": lambda x: float(round(x)),
         "min": min, "max": max,
-
+        "floor": math.floor,
+        "ceil": math.ceil,
+        "round": lambda x: float(round(x)),
+        "sign": lambda x: (x > 0) - (x < 0),
+        "min": min,
+        "max": max,
+        "sec": lambda x: 1.0 / math.cos(x),
+        "csc": lambda x: 1.0 / math.sin(x),
+        "cot": lambda x: 1.0 / math.tan(x),
         # 输出 / 等待
         "print": _print,
         "打印": _print,

@@ -34,22 +34,17 @@ class MathPreview(QWidget):
 class FormulaKeypad(QWidget):
     """虚拟键盘：包含 x, y, t, θ, = 等隐函数所需按键。"""
     KEYS = [
-        ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"),
-        ("÷", "/", "op"), ("⌫", None, "util"),
-        ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"),
-        ("×", "*", "op"), ("AC", None, "util"),
-        ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"),
-        ("−", "-", "op"), ("sin(", "sin(", "fn"),
-        ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"),
-        ("=", "=", "eq"), ("cos(", "cos(", "fn"),
-        ("x", "x", "var"), ("y", "y", "var"), ("t", "t", "var"),
-        ("θ", "θ", "var"), ("tan(", "tan(", "fn"),
-        ("(", "(", "op"), (")", ")", "op"), ("^", "^", "op"),
-        ("√(", "sqrt(", "fn"), ("π", "π", "const"),
-        ("e", "e", "const"), ("ln(", "ln(", "fn"), ("|x|", "abs(", "fn"),
-        ("", "", "empty"), ("", "", "empty"),
+    ("7", "7", "num"), ("8", "8", "num"), ("9", "9", "num"), ("a⁄b", "/", "op"), ("⌫", None, "util"),
+    ("4", "4", "num"), ("5", "5", "num"), ("6", "6", "num"), ("×", "*", "op"), ("AC", None, "util"),
+    ("1", "1", "num"), ("2", "2", "num"), ("3", "3", "num"), ("−", "-", "op"), ("sin(", "sin(", "fn"),
+    ("0", "0", "num"), (".", ".", "num"), ("+", "+", "op"), ("(", "(", "op"), ("cos(", "cos(", "fn"),
+    ("x", "x", "var"), ("t", "t", "var"), ("^", "^", "op"), (")", ")", "op"), ("tan(", "tan(", "fn"),
+    ("π", "π", "const"), ("e", "e", "const"), ("√(", "sqrt(", "fn"), ("ln(", "ln(", "fn"), ("abs(", "abs(", "fn"),
+    # ★ 新增：反三角与双曲函数
+    ("asin", "arcsin(", "fn"), ("acos", "arccos(", "fn"), ("atan", "arctan(", "fn"), ("sinh", "sinh(", "fn"), ("cosh", "cosh(", "fn"),
+    # ★ 新增：倒数三角与其他
+    ("tanh", "tanh(", "fn"), ("sec", "sec(", "fn"), ("csc", "csc(", "fn"), ("cot", "cot(", "fn"), ("exp", "exp(", "fn"),
     ]
-
     def __init__(self, target_getter, parent=None):
         super().__init__(parent)
         self.setObjectName("formulaKeypad")

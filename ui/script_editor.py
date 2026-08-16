@@ -35,12 +35,18 @@ KEYWORDS = [
 
 # 内置几何函数与数学函数
 FUNCS = [
-    "point", "segment", "line", "ray", "circle", "ellipse", 
-    "polygon", "regular_polygon", "midpoint", "division_point", 
+    # 几何构造
+    "point", "segment", "line", "ray", "circle", "ellipse",
+    "polygon", "regular_polygon", "midpoint", "division_point",
     "intersect", "text", "function", "parametric", "polar",
     "distance", "length", "slope", "radius", "area", "perimeter",
-    "sin", "cos", "tan", "arcsin", "arccos", "arctan",
-    "sqrt", "abs", "ln", "log", "exp", "floor", "ceil", "round",
+    # ★ 完整数学函数库
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "arcsin", "arccos", "arctan", "asin", "acos", "atan",
+    "sinh", "cosh", "tanh",
+    "sqrt", "abs", "ln", "log", "exp", 
+    "floor", "ceil", "round", "sign", "min", "max",
+    # 系统/库
     "print", "math", "geo", "draw", "doc"
 ]
 

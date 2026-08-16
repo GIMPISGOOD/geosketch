@@ -60,8 +60,13 @@ class Row:
 
 
 FUNCS = {
-    "sin", "cos", "tan", "cot", "sqrt", "log", "ln", "abs", "exp",
-    "lim", "max", "min", "arcsin", "arccos", "arctan"
+    "sin", "cos", "tan", "cot", "sec", "csc",
+    "arcsin", "arccos", "arctan",
+    "asin", "acos", "atan",
+    "sinh", "cosh", "tanh",
+    "sqrt", "log", "ln", "abs", "exp",
+    "floor", "ceil", "round", "sign",
+    "lim", "max", "min",
 }
 
 GREEK = {

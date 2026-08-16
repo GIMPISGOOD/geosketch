@@ -109,28 +109,20 @@ def _py_expr_to_js(expr, var_names):
 
     # 长函数名优先，避免 asin 被 sin 误伤
     funcs = [
-        ("arcsin", "Math.asin"),
-        ("arccos", "Math.acos"),
-        ("arctan", "Math.atan"),
-        ("asin", "Math.asin"),
-        ("acos", "Math.acos"),
-        ("atan", "Math.atan"),
-        ("sinh", "Math.sinh"),
-        ("cosh", "Math.cosh"),
-        ("tanh", "Math.tanh"),
-        ("sqrt", "Math.sqrt"),
-        ("abs", "Math.abs"),
-        ("ln", "Math.log"),
-        ("log", "Math.log10"),
-        ("exp", "Math.exp"),
-        ("sin", "Math.sin"),
-        ("cos", "Math.cos"),
-        ("tan", "Math.tan"),
-
-        # 这三个依赖 _jsx_export 里定义的辅助函数
-        ("cot", "cot"),
-        ("sec", "sec"),
-        ("csc", "csc"),
+    # 反三角
+    ("arcsin", "Math.asin"), ("arccos", "Math.acos"), ("arctan", "Math.atan"),
+    ("asin", "Math.asin"), ("acos", "Math.acos"), ("atan", "Math.atan"),
+    # 双曲
+    ("sinh", "Math.sinh"), ("cosh", "Math.cosh"), ("tanh", "Math.tanh"),
+    # 基础
+    ("sqrt", "Math.sqrt"), ("abs", "Math.abs"),
+    ("ln", "Math.log"), ("log", "Math.log10"), ("exp", "Math.exp"),
+    ("sin", "Math.sin"), ("cos", "Math.cos"), ("tan", "Math.tan"),
+    # ★ 新增：取整与极值
+    ("floor", "Math.floor"), ("ceil", "Math.ceil"), ("round", "Math.round"),
+    ("sign", "Math.sign"), ("min", "Math.min"), ("max", "Math.max"),
+    # 依赖辅助函数的倒数三角
+    ("cot", "cot"), ("sec", "sec"), ("csc", "csc"),
     ]
 
     for py_name, js_name in funcs:

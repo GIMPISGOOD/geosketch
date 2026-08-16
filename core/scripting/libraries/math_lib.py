@@ -44,4 +44,14 @@ def build_math_lib(interp=None):
         "round": lambda x: float(round(x)),
 
         "random": random.random,
+        
+"floor": math.floor,
+"ceil": math.ceil,
+"round": lambda x: float(round(x)),
+"sign": lambda x: (x > 0) - (x < 0),
+"min": min,
+"max": max,
+"sec": lambda x: 1.0 / math.cos(x),
+"csc": lambda x: 1.0 / math.sin(x),
+"cot": lambda x: 1.0 / math.tan(x),
     }

@@ -50,17 +50,24 @@ def is_valid_name(name):
     name = name.strip()
     return (bool(name) and name.isidentifier()
             and not keyword.iskeyword(name) and name not in RESERVED)
-
 _FUNCS = {
+    # 基础三角
     "sin": math.sin, "cos": math.cos, "tan": math.tan,
-    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
-    "asin": math.asin, "acos": math.acos, "atan": math.atan,
-    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
-    "sqrt": math.sqrt, "abs": abs, "ln": math.log, "log": math.log10,
-    "exp": math.exp,
     "cot": lambda x: 1.0 / math.tan(x),
     "sec": lambda x: 1.0 / math.cos(x),
     "csc": lambda x: 1.0 / math.sin(x),
+    # 反三角 (arcsin 与 asin 互为别名)
+    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    # 双曲函数
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    # 指数与对数
+    "sqrt": math.sqrt, "abs": abs, "ln": math.log, "log": math.log10, "exp": math.exp,
+    # 取整与符号
+    "floor": math.floor, "ceil": math.ceil, "round": round,
+    "sign": lambda x: (x > 0) - (x < 0),  # 符号函数：返回 -1, 0, 1
+    # 极值
+    "min": min, "max": max,
 }
 _FUNC_NAMES = set(_FUNCS)
 
