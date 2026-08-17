@@ -1208,12 +1208,12 @@ def _find_label_offset(p, sp, label, view, screen_segments):
     from PySide6.QtGui import QFontMetricsF
     from PySide6.QtCore import QRectF, QPointF, QSizeF
     import math
-
+    
     fm = QFontMetricsF(p.font())
-    tw = fm.horizontalAdvance(label)
-    th = fm.height()
-
-    # 8 个候选方向（顺时针）
+    # ★ 修复 Pylance 警告：显式转换为 float，避免类型推断为 Unknown
+    tw = float(fm.horizontalAdvance(label))
+    th = float(fm.height())
+    
     candidates = [
         QPointF(9, -9),              # 右上（默认）
         QPointF(9, th * 0.7),        # 右下
@@ -1224,10 +1224,8 @@ def _find_label_offset(p, sp, label, view, screen_segments):
         QPointF(-tw - 9, -th / 2),   # 正左
         QPointF(tw / 2 + 9, -th / 2),  # 正右
     ]
-
     best_offset = candidates[0]
     best_score = float('inf')
-
     for offset in candidates:
         rect = QRectF(sp + offset, QSizeF(tw, th))
         score = 0.0
@@ -1235,14 +1233,21 @@ def _find_label_offset(p, sp, label, view, screen_segments):
             if _rect_intersects_segment(rect, seg):
                 score += 10.0  # 相交惩罚大
             else:
-                (sx, sy), (ex, ey) = seg
+                # ★ 修复 TypeError：安全提取 QPointF 的坐标，兼容元组
+                p1, p2 = seg
+                if hasattr(p1, 'x') and callable(p1.x):
+                    sx, sy = p1.x(), p1.y()
+                    ex, ey = p2.x(), p2.y()
+                else:
+                    sx, sy = p1
+                    ex, ey = p2
+                    
                 d = min(_point_rect_dist(sx, sy, rect),
                         _point_rect_dist(ex, ey, rect))
                 score += 1.0 / (d + 1.0)
         if score < best_score:
             best_score = score
             best_offset = offset
-
     return best_offset
 
 

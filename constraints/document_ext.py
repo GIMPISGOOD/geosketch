@@ -126,7 +126,7 @@ def remove_constraint(self, constraint):
         self.constraints.remove(constraint)
         self.changed.emit()
 
-def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
+def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0, quick=False):
     MAX_DEPTH = 5
     if not self.constraints or _depth >= MAX_DEPTH:
         return True
@@ -134,22 +134,27 @@ def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
         affected = get_affected_constraints(trigger_points, self.constraints)
     else:
         affected = [c for c in self.constraints if c.enabled]
-    if not affected: return True
-    
+    if not affected:
+        return True
     pinned_set = set(pinned_points or [])
     free_set = set()
     for c in affected:
         for p in c.involved_points():
             if isinstance(p, FreePoint) and p not in pinned_set:
                 free_set.add(p)
-    if not free_set: return True
-    
-    solver = ConstraintSolver(max_iter=50, tol=1e-9)
+    if not free_set:
+        return True
+
+    if quick:
+        solver = ConstraintSolver(max_iter=12, tol=1e-6)
+    else:
+        solver = ConstraintSolver(max_iter=50, tol=1e-9)
+
     success = solver.solve(affected, list(free_set), list(pinned_set))
     _recompute_silent(self, list(free_set))
-    
+
     if list(free_set):
-        self.solve_constraints(list(free_set), pinned_points, _depth + 1)
+        self.solve_constraints(list(free_set), pinned_points, _depth + 1, quick=quick)
     return success
 
 def patch_document():

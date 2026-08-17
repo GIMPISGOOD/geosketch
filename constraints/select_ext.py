@@ -6,15 +6,10 @@ _original_release = SelectTool.release
 
 
 def _new_move(self, canvas, wpt, hit):
-    # 先执行原有的拖动逻辑（移动点）
     _original_move(self, canvas, wpt, hit)
-
-    # ★ 拖动后触发约束求解
     doc = canvas.doc
     if not hasattr(doc, 'constraints') or not doc.constraints:
         return
-
-    # 收集正在被拖动的点作为 pinned（它们跟随鼠标，不被约束移动）
     pinned = []
     if self.drag_poo is not None:
         pinned.append(self.drag_poo)
@@ -22,19 +17,25 @@ def _new_move(self, canvas, wpt, hit):
         pinned.append(p)
     if self.drag_media is not None:
         pinned.append(self.drag_media)
-
     if pinned:
         try:
             doc.solve_constraints(
                 trigger_points=pinned,
                 pinned_points=pinned,
+                quick=True,
             )
         except Exception:
-            pass  # 约束求解失败不应阻断拖动
+            pass
 
 
 def _new_release(self, canvas, wpt, hit):
     _original_release(self, canvas, wpt, hit)
+    doc = canvas.doc
+    if hasattr(doc, 'constraints') and doc.constraints:
+        try:
+            doc.solve_constraints(quick=False)
+        except Exception:
+            pass
 
 
 def patch_select_tool():

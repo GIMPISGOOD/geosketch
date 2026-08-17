@@ -3,10 +3,8 @@ import math
 from typing import List, Any, Dict
 from .base import GeometricConstraint
 
+
 def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
-    """高斯消元（列主元）求解 Ax = b。返回 None 表示奇异。
-    ★ 必须是模块级函数，不能缩进到类内部。
-    """
     n = len(b)
     if n == 0:
         return []
@@ -28,13 +26,18 @@ def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
         x[i] /= M[i][i]
     return x
 
+
 class ConstraintSolver:
-    """LM 求解器。"""
+    """LM 求解器。
+    quick=True 时降低迭代次数和精度，用于拖动帧。
+    quick=False 时完整精度，用于松手后收敛。
+    """
+
     def __init__(self, max_iter=50, tol=1e-9):
         self.max_iter = max_iter
         self.tol = tol
 
-    def solve(self, constraints: List[GeometricConstraint], 
+    def solve(self, constraints: List[GeometricConstraint],
               free_points: List[Any], pinned_points: List[Any]) -> bool:
         valid = [c for c in constraints if c.enabled]
         if not valid or not free_points:
@@ -44,16 +47,15 @@ class ConstraintSolver:
         n_vars = 2 * len(free_points)
         lam = 1e-3
         lam_up, lam_down = 10.0, 0.1
+        no_improve = 0
 
         for _ in range(self.max_iter):
             F: List[float] = []
             J: List[List[float]] = []
-            
             for c in valid:
                 try:
                     r = c.residual()
                     jac = c.jacobian(vars_map)
-                    # ★ 修复：严格校验维度，防止 F 和 J 错位导致崩溃
                     if not isinstance(r, list) or not isinstance(jac, list):
                         continue
                     if len(r) != len(jac):
@@ -72,7 +74,9 @@ class ConstraintSolver:
             if norm < self.tol:
                 return True
 
-            # 构建法方程 (JᵀJ + λI)Δ = −JᵀF
+            if no_improve >= 5:
+                return norm < 1e-3
+
             JtJ = [[0.0] * n_vars for _ in range(n_vars)]
             JtF = [0.0] * n_vars
             for i in range(len(F)):
@@ -80,13 +84,16 @@ class ConstraintSolver:
                     JtF[j] += J[i][j] * F[i]
                     for k in range(n_vars):
                         JtJ[j][k] += J[i][j] * J[i][k]
+
             for i in range(n_vars):
                 JtJ[i][i] += lam
 
             delta = _solve_linear(JtJ, [-f for f in JtF])
             if delta is None:
                 lam *= lam_up
-                if lam > 1e10: return False
+                no_improve += 1
+                if lam > 1e10:
+                    return False
                 continue
 
             old_coords = [(p.x, p.y) for p in free_points]
@@ -96,16 +103,23 @@ class ConstraintSolver:
 
             new_F = []
             for c in valid:
-                try: new_F.extend(c.residual())
-                except: continue
+                try:
+                    new_F.extend(c.residual())
+                except:
+                    continue
             new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
 
             if new_norm < norm:
                 lam = max(lam * lam_down, 1e-12)
-                if new_norm < self.tol: return True
+                no_improve = 0
+                if new_norm < self.tol:
+                    return True
             else:
                 for i, p in enumerate(free_points):
                     p.x, p.y = old_coords[i]
                 lam *= lam_up
-                if lam > 1e10: return False
+                no_improve += 1
+                if lam > 1e10:
+                    return False
+
         return False

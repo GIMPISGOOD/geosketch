@@ -290,12 +290,14 @@ class AnimationController(QObject):
         self._evaluate(self._current_time)
         self.ticked.emit(self._current_time)
 
+
     def _evaluate(self, time: float) -> None:
         """求值所有轨道。"""
         if self.clip is None:
             return
-
         self._bind_targets()
+
+        moved = []  # ★ 新增：收集被修改的几何对象
 
         for track in self.clip.tracks:
             if not track.enabled or track.muted:
@@ -305,16 +307,22 @@ class AnimationController(QObject):
             except Exception:
                 pass
 
+            if isinstance(track, (GliderTrack, PropertyTrack)):
+                if track.target is not None:
+                    moved.append(track.target)
+
+        if moved:
+            self.doc.recompute_silent(moved)
+
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
-        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
         if self.clip is None:
             return
         obj_map = {o.id: o for o in self.doc.objects}
         for track in self.clip.tracks:
             if isinstance(track, (GliderTrack, PropertyTrack)):
-                if track.target is None:
+                if track.target is None or track.target not in self.doc.objects:
                     track.target = obj_map.get(track.obj_id)
 
 """关键帧与插值器。"""
@@ -19929,11 +19937,11 @@ def _find_label_offset(p, sp, label, view, screen_segments):
     from PySide6.QtGui import QFontMetricsF
     from PySide6.QtCore import QRectF, QPointF, QSizeF
     import math
-
+    
     fm = QFontMetricsF(p.font())
-    tw = fm.horizontalAdvance(label)
-    th = fm.height()
-
+    tw = float(fm.horizontalAdvance(label))
+    th = float(fm.height())
+    
     candidates = [
         QPointF(9, -9),              # 右上（默认）
         QPointF(9, th * 0.7),        # 右下
@@ -19944,10 +19952,8 @@ def _find_label_offset(p, sp, label, view, screen_segments):
         QPointF(-tw - 9, -th / 2),   # 正左
         QPointF(tw / 2 + 9, -th / 2),  # 正右
     ]
-
     best_offset = candidates[0]
     best_score = float('inf')
-
     for offset in candidates:
         rect = QRectF(sp + offset, QSizeF(tw, th))
         score = 0.0
@@ -19955,14 +19961,20 @@ def _find_label_offset(p, sp, label, view, screen_segments):
             if _rect_intersects_segment(rect, seg):
                 score += 10.0  # 相交惩罚大
             else:
-                (sx, sy), (ex, ey) = seg
+                p1, p2 = seg
+                if hasattr(p1, 'x') and callable(p1.x):
+                    sx, sy = p1.x(), p1.y()
+                    ex, ey = p2.x(), p2.y()
+                else:
+                    sx, sy = p1
+                    ex, ey = p2
+                    
                 d = min(_point_rect_dist(sx, sy, rect),
                         _point_rect_dist(ex, ey, rect))
                 score += 1.0 / (d + 1.0)
         if score < best_score:
             best_score = score
             best_offset = offset
-
     return best_offset
 
 
