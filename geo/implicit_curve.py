@@ -14,12 +14,10 @@ PALETTE = ["#e8590c", "#1971c2", "#2f9e44", "#9c36b5",
            "#0c8599", "#e64980", "#f08c00", "#5f3dc4"]
 _color_index = [0]
 
-
 def next_color():
     c = PALETTE[_color_index[0] % len(PALETTE)]
     _color_index[0] += 1
     return c
-
 
 def parse_equation(expr: str) -> str:
     """把 'x^2+y^2=1' 转为 '(x^2+y^2)-(1)'；无等号则原样返回。"""
@@ -28,7 +26,6 @@ def parse_equation(expr: str) -> str:
         parts = expr.split("=", 1)
         return f"({parts[0].strip()})-({parts[1].strip()})"
     return expr
-
 
 @register_geo("ImplicitCurve")
 class ImplicitCurve(GeoObject):
@@ -39,14 +36,36 @@ class ImplicitCurve(GeoObject):
         super().__init__(parents=())
         self.expr = expr
         self._resolved_expr = parse_equation(expr)
-        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)  # x0, x1, y0, y1
+        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)
         self.color = color or next_color()
         self.resolution = max(30, min(200, resolution))
         self.label_text = label_text
         self._segments: List[Tuple[float, float, float, float]] = []
         self._cache_version: int = -1
         self._cache_dirty: bool = True
+        self._cache_domain: tuple = (None, None, None, None)  # ★ 新增
         self.recompute()
+
+    # ★ 新增：获取当前采样域
+    def get_domain(self, view):
+        """获取当前采样域。隐函数使用固定域或跟随视口。"""
+        if self.domain:
+            return self.domain
+        # 跟随视口
+        x0, _ = view.to_world(QPointF(0, 0))
+        x1, _ = view.to_world(QPointF(view.width(), 0))
+        _, y0 = view.to_world(QPointF(0, view.height()))
+        _, y1 = view.to_world(QPointF(0, 0))
+        return (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
+
+    # ★ 新增：子线程采样完成后更新缓存
+    def update_cache(self, segments, var_version, domain):
+        """子线程采样完成后更新缓存（由信号槽调用）。"""
+        self._segments = segments
+        self._cache_version = var_version
+        self._cache_domain = domain
+        self._cache_dirty = False
+        self.exists = len(self._segments) > 0
 
     def invalidate_cache(self):
         self._cache_dirty = True
@@ -65,7 +84,6 @@ class ImplicitCurve(GeoObject):
         vd["x"] = x
         vd["y"] = y
         v = evaluate(self._resolved_expr, vd)
-        # ★ 修复：复数结果视为无效（负数分数次幂、sqrt负数等）
         if isinstance(v, complex):
             return None
         return v
@@ -76,14 +94,12 @@ class ImplicitCurve(GeoObject):
         dx = (x1 - x0) / n
         dy = (y1 - y0) / n
 
-        # 采样网格
         grid = [[0.0] * (n + 1) for _ in range(n + 1)]
         for i in range(n + 1):
             yy = y0 + i * dy
             for j in range(n + 1):
                 xx = x0 + j * dx
                 v = self._eval(xx, yy)
-                # ★ 修复：None / 复数 / 非有限值 均视为无效
                 if v is None or isinstance(v, complex) or not math.isfinite(v):
                     grid[i][j] = 1e18
                 else:
@@ -184,7 +200,6 @@ class ImplicitCurve(GeoObject):
                    params.get("color"),
                    params.get("resolution", 80),
                    params.get("label_text"))
-
 
 @register_renderer(ImplicitCurve)
 def draw_implicit(p, obj, view):

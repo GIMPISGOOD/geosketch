@@ -1,16 +1,9 @@
-"""导出向导：可视化配置导出选项，带实时预览。
-
-选项：
-  视图范围 —— 当前视图 / 适配内容并居中
-  背景内容 —— 网格+坐标轴 / 仅坐标轴 / 无
-  格式     —— PNG（可选分辨率）/ SVG 矢量
-"""
+"""导出向导：可视化配置导出选项，带实时预览。"""
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QRadioButton, QGroupBox, QVBoxLayout,
                                QHBoxLayout, QLabel, QComboBox, QPushButton,
-                               QFileDialog, QMessageBox)
-
+                               QFileDialog, QMessageBox, QCheckBox)
 
 class ExportWizard(QDialog):
     def __init__(self, canvas, parent=None):
@@ -22,13 +15,11 @@ class ExportWizard(QDialog):
         self._build_ui()
         self._refresh_preview()
 
-    # ───────────── UI 搭建 ─────────────
     def _build_ui(self):
         root = QHBoxLayout(self)
         root.setContentsMargins(18, 18, 18, 18)
         root.setSpacing(18)
 
-        # 左侧：实时预览
         left = QVBoxLayout()
         cap = QLabel("实时预览")
         cap.setStyleSheet("font-weight:700; font-size:13px;")
@@ -46,9 +37,7 @@ class ExportWizard(QDialog):
         left.addStretch(1)
         root.addLayout(left)
 
-        # 右侧：选项
         right = QVBoxLayout()
-
         g1 = QGroupBox("视图范围")
         v1 = QVBoxLayout(g1)
         self._r_cur = QRadioButton("当前视图")
@@ -67,6 +56,11 @@ class ExportWizard(QDialog):
         v2.addWidget(self._bg_grid)
         v2.addWidget(self._bg_axes)
         v2.addWidget(self._bg_none)
+        
+        # ★ 新增：出版样式
+        self._pub_chk = QCheckBox("出版样式（黑白线稿，无网格，点置顶）")
+        self._pub_chk.setStyleSheet("font-weight: bold; color: #1971c2; margin-top: 8px;")
+        v2.addWidget(self._pub_chk)
         right.addWidget(g2)
 
         g3 = QGroupBox("格式")
@@ -84,7 +78,6 @@ class ExportWizard(QDialog):
         res_row.addWidget(self._res)
         v3.addLayout(res_row)
         right.addWidget(g3)
-
         right.addStretch(1)
 
         btns = QHBoxLayout()
@@ -97,31 +90,27 @@ class ExportWizard(QDialog):
         btns.addWidget(cancel)
         btns.addWidget(export)
         right.addLayout(btns)
-
         root.addLayout(right)
 
-        # 任一选项变化 → 立即刷新预览
         for w in (self._r_cur, self._r_fit, self._bg_grid, self._bg_axes,
-                  self._bg_none, self._fmt_png, self._fmt_svg):
+                  self._bg_none, self._fmt_png, self._fmt_svg, self._pub_chk):
             w.toggled.connect(self._refresh_preview)
         self._res.currentIndexChanged.connect(self._refresh_preview)
 
-    # ───────────── 选项读取 ─────────────
     def _bg_mode(self):
-        if self._bg_grid.isChecked():
-            return "grid"
-        if self._bg_axes.isChecked():
-            return "axes"
+        if self._pub_chk.isChecked(): return "none" # 出版样式强制无背景
+        if self._bg_grid.isChecked(): return "grid"
+        if self._bg_axes.isChecked(): return "axes"
         return "none"
 
     def _png_scale(self):
-        return float(self._res.currentText()[0])     # "2× (高清)" → 2.0
+        return float(self._res.currentText()[0])
 
-    # ───────────── 预览 / 导出 ─────────────
     def _refresh_preview(self):
         self._res.setEnabled(self._fmt_png.isChecked())
         img = self.canvas.render_to_image(
-            fit=self._r_fit.isChecked(), bg_mode=self._bg_mode(), scale=1.0)
+            fit=self._r_fit.isChecked(), bg_mode=self._bg_mode(), scale=1.0,
+            publication=self._pub_chk.isChecked()) # ★ 透传
         pix = QPixmap.fromImage(img).scaled(
             self._preview.size() - QSize(12, 12),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -143,8 +132,9 @@ class ExportWizard(QDialog):
         try:
             self.canvas.export_image(path, fit=self._r_fit.isChecked(),
                                      bg_mode=self._bg_mode(),
-                                     png_scale=self._png_scale())
+                                     png_scale=self._png_scale(),
+                                     publication=self._pub_chk.isChecked()) # ★ 透传
         except Exception as e:
             QMessageBox.warning(self, "导出失败", f"导出图像时出错：\n{e}")
         else:
-            self.accept()          # 导出成功后关闭向导
+            self.accept()

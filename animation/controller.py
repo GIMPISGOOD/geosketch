@@ -108,13 +108,15 @@ class AnimationController(QObject):
         self._evaluate(self._current_time)
         self.ticked.emit(self._current_time)
 
+    # animation/controller.py
+
     def _evaluate(self, time: float) -> None:
         """求值所有轨道。"""
         if self.clip is None:
             return
-
-        # 绑定目标对象（延迟查找）
         self._bind_targets()
+
+        moved = []  # ★ 新增：收集被修改的几何对象
 
         for track in self.clip.tracks:
             if not track.enabled or track.muted:
@@ -124,15 +126,24 @@ class AnimationController(QObject):
             except Exception:
                 pass
 
-        # 触发文档重算
+            # ★ 新增：记录被 GliderTrack / PropertyTrack 修改的目标
+            if isinstance(track, (GliderTrack, PropertyTrack)):
+                if track.target is not None:
+                    moved.append(track.target)
+
+        # ★ 新增：传播几何依赖（重算 PointOnObject 自身 + 其所有子对象）
+        if moved:
+            self.doc.recompute_silent(moved)
+
+        # 保留：处理变量轨道驱动的表达式对象
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
-        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
         if self.clip is None:
             return
         obj_map = {o.id: o for o in self.doc.objects}
         for track in self.clip.tracks:
             if isinstance(track, (GliderTrack, PropertyTrack)):
-                if track.target is None:
+                # ★ 修复：target 为空 或 已不在文档中 时重新绑定
+                if track.target is None or track.target not in self.doc.objects:
                     track.target = obj_map.get(track.obj_id)

@@ -270,12 +270,14 @@ class Canvas(QWidget):
         # 线段/圆/曲线等：第一版不裁剪，默认可见
         return True
     
-    def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
-        """渲染几何场景（背景 + 可选网格/坐标轴 + 全部对象）。
-        bg_mode: "grid"=网格+坐标轴, "axes"=仅坐标轴, "none"=都不画。"""
-
-        # ★ 优化：背景/网格/坐标轴使用缓存
-        if bg_mode == "grid":
+    def render_scene(self, p: QPainter, bg_mode: str = "grid", publication: bool = False) -> None:
+        """渲染几何场景。publication=True 时启用黑白出版样式。"""
+        from geo.points import AbstractPoint
+        
+        # 1. 背景处理
+        if publication:
+            p.fillRect(self.rect(), QColor("#ffffff")) # 纯白背景
+        elif bg_mode == "grid":
             self._draw_background_cached(p)
         elif bg_mode == "axes":
             self._draw_background(p)
@@ -283,13 +285,28 @@ class Canvas(QWidget):
         else:
             self._draw_background(p)
 
-        # ★ 优化：使用渲染列表缓存 + 视口裁剪
-        for obj, renderer in self._get_render_list():
-            if self._in_viewport(obj):
-                renderer(p, obj, self)
+        render_list = self._get_render_list()
+        
+        if publication:
+            # ★ 出版样式：分层绘制，确保点永远在最顶层不被遮挡
+            # 第一轮：绘制所有非点对象（线、面、圆）
+            for obj, renderer in render_list:
+                if not isinstance(obj, AbstractPoint) and self._in_viewport(obj):
+                    _draw_publication(p, obj, self)
 
-        # ================= 图像导出 =================
-        # ================= 图像导出 =================
+            # ★ 收集所有线段（屏幕坐标），用于点标签智能避让
+            screen_segments = _collect_screen_segments(self)
+
+            # 第二轮：绘制所有点对象（带标签避让）
+            for obj, renderer in render_list:
+                if isinstance(obj, AbstractPoint) and self._in_viewport(obj):
+                    _draw_publication_point(p, obj, self, screen_segments)
+        else:
+            # 常规样式
+            for obj, renderer in render_list:
+                if self._in_viewport(obj):
+                    renderer(p, obj, self)
+                    
     def _apply_fit(self, bbox) -> None:
         """把包围盒适配到画布尺寸并居中（四周留白 70px）。"""
         x0, y0, x1, y1 = bbox
@@ -302,43 +319,38 @@ class Canvas(QWidget):
         self.origin = QPointF(self.width() / 2 - cx * self.scale,
                               self.height() / 2 + cy * self.scale)
 
-    def render_to_image(self, fit=False, bg_mode="grid", scale=2.0):
-        """渲染为 QImage（PNG 导出与向导预览共用）。fit=True 时先适配内容并居中。
-        临时改写 scale/origin，结束后恢复，不影响当前视图。"""
+    def render_to_image(self, fit=False, bg_mode="grid", scale=2.0, publication=False):
         saved = (self.scale, self.origin)
         try:
             if fit:
                 bbox = content_bbox(self.doc)
-                if bbox:
-                    self._apply_fit(bbox)
+                if bbox: self._apply_fit(bbox)
             img = QImage(int(self.width() * scale), int(self.height() * scale),
                          QImage.Format.Format_ARGB32)
             p = QPainter()
             p.begin(img)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.scale(scale, scale)
-            self.render_scene(p, bg_mode)
+            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
             p.end()
             return img
         finally:
             self.scale, self.origin = saved
 
-    def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0):
-        """按扩展名导出：.svg → 矢量；其余 → PNG 位图。"""
+    def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0, publication=False):
         if os.path.splitext(path)[1].lower() == ".svg":
-            self._export_svg(path, fit, bg_mode)
+            self._export_svg(path, fit, bg_mode, publication=publication) # ★ 透传
         else:
-            self.render_to_image(fit, bg_mode, png_scale).save(path)
+            self.render_to_image(fit, bg_mode, png_scale, publication=publication).save(path)
 
-    def _export_svg(self, path, fit=False, bg_mode="grid"):
+    def _export_svg(self, path, fit=False, bg_mode="grid", publication=False):
         from PySide6.QtCore import QRectF
         from PySide6.QtSvg import QSvgGenerator
         saved = (self.scale, self.origin)
         try:
             if fit:
                 bbox = content_bbox(self.doc)
-                if bbox:
-                    self._apply_fit(bbox)
+                if bbox: self._apply_fit(bbox)
             gen = QSvgGenerator()
             gen.setFileName(path)
             gen.setSize(self.size())
@@ -347,10 +359,11 @@ class Canvas(QWidget):
             p = QPainter()
             p.begin(gen)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self.render_scene(p, bg_mode)
+            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
             p.end()
         finally:
             self.scale, self.origin = saved
+            
     def _draw_background(self, p: QPainter) -> None:
         g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
         g.setColorAt(0.0, theme.BG_TOP)
@@ -964,3 +977,288 @@ def content_bbox(doc):
         return None
 
     return min(xs), min(ys), max(xs), max(ys)
+
+def _draw_publication(p: QPainter, obj, view):
+    """出版样式渲染器：纯黑白线稿，无填充，无小圆球。线宽加粗。"""
+    from PySide6.QtGui import QFont, QPainterPath, QPen
+    from PySide6.QtCore import Qt
+    from geo.points import AbstractPoint, _point_label
+    import math
+
+    # ★ 线宽从 1.5 加粗到 2.2
+    pen = QPen(QColor("#000000"), 2.2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    tn = type(obj).__name__
+
+    # 点对象由 _draw_publication_point 单独处理
+    if isinstance(obj, AbstractPoint):
+        return
+
+    # 2. 线段
+    if tn == "Segment":
+        p.drawLine(view.to_screen(obj.a.x, obj.a.y), view.to_screen(obj.b.x, obj.b.y))
+        return
+
+    # 3. 直线/射线/垂线/平行线
+    if tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
+              "AngleBisector", "AngleDivLine", "PerpBisector"):
+        w, h = view.width(), view.height()
+        ts = [obj.project(*view.to_world(QPointF(cx, cy)))
+              for cx, cy in ((0, 0), (w, 0), (0, h), (w, h))]
+        if tn == "Ray":
+            p0 = obj.point_at(0.0)
+            p1 = obj.point_at(max(ts))
+        else:
+            p0 = obj.point_at(min(ts))
+            p1 = obj.point_at(max(ts))
+        p.drawLine(view.to_screen(*p0), view.to_screen(*p1))
+        return
+
+    # 4. 圆
+    if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
+        c = view.to_screen(obj.center.x if hasattr(obj, 'center') else obj.cx,
+                           obj.center.y if hasattr(obj, 'center') else obj.cy)
+        r = obj.r if hasattr(obj, 'r') else getattr(obj, 'radius', 0)
+        p.drawEllipse(c, r * view.scale, r * view.scale)
+        return
+
+    # 5. 椭圆
+    if tn == "Ellipse":
+        path = QPainterPath()
+        for i in range(73):
+            sp = view.to_screen(*obj.point_at(i / 72))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        path.closeSubpath()
+        p.drawPath(path)
+        return
+
+    # 6. 正多边形
+    if tn == "RegularPolygon":
+        path = QPainterPath()
+        for i, v in enumerate(obj.verts):
+            sp = view.to_screen(*v)
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        path.closeSubpath()
+        p.drawPath(path)
+        return
+
+    # 7. 贝塞尔曲线
+    if tn == "CubicBezier":
+        path = QPainterPath()
+        for i in range(61):
+            sp = view.to_screen(*obj.point_at(i / 60))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    # 8. 函数曲线
+    if tn == "FunctionCurve":
+        path = QPainterPath()
+        has_path = False
+        a, b = obj._param_domain()
+        for i in range(401):
+            u = a + (b - a) * i / 400
+            pt = obj._eval_point(u)
+            if pt is None:
+                has_path = False
+                continue
+            sp = view.to_screen(*pt)
+            if not has_path:
+                path.moveTo(sp)
+                has_path = True
+            else:
+                path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    # 9. 角度弧（不画数字，只画黑线弧）
+    if tn == "AngleMeasure":
+        v, p1, p2 = obj.vertex, obj.p1, obj.p2
+        a1 = math.atan2(p1.y - v.y, p1.x - v.x)
+        a2 = math.atan2(p2.y - v.y, p2.x - v.x)
+        span = (a2 - a1 + 3 * math.pi) % (2 * math.pi) - math.pi
+        r = 25.0 / view.scale
+        path = QPainterPath()
+        for i in range(33):
+            a = a1 + span * i / 32
+            sp = view.to_screen(v.x + r * math.cos(a), v.y + r * math.sin(a))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    # 10. 文本
+    if tn == "TextObject":
+        font = QFont("Microsoft YaHei", obj.size)
+        p.setFont(font)
+        p.drawText(view.to_screen(*obj.world_pos()) + QPointF(12, 24), obj.text)
+        return
+
+
+# ═══════════════ 点标签智能避让 ═══════════════
+
+def _collect_screen_segments(view):
+    """收集所有可见线段/直线/圆的屏幕坐标线段，用于标签避让。"""
+    from geo.points import AbstractPoint
+    import math
+
+    segments = []
+    for obj in view.doc.objects:
+        if not (obj.visible and obj.exists):
+            continue
+        tn = type(obj).__name__
+        if tn == "Segment":
+            sa = view.to_screen(obj.a.x, obj.a.y)
+            sb = view.to_screen(obj.b.x, obj.b.y)
+            segments.append((sa, sb))
+        elif tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
+                    "AngleBisector", "AngleDivLine", "PerpBisector"):
+            w, h = view.width(), view.height()
+            try:
+                ts = [obj.project(*view.to_world(QPointF(cx, cy)))
+                      for cx, cy in ((0, 0), (w, 0), (0, h), (w, h))]
+                if tn == "Ray":
+                    p0 = obj.point_at(0.0)
+                    p1 = obj.point_at(max(ts))
+                else:
+                    p0 = obj.point_at(min(ts))
+                    p1 = obj.point_at(max(ts))
+                segments.append((view.to_screen(*p0), view.to_screen(*p1)))
+            except Exception:
+                pass
+        elif tn in ("Circle", "ExprCircle", "ThreePointCircle"):
+            # 圆用 36 段折线近似
+            try:
+                n = 36
+                r = obj.r if hasattr(obj, 'r') else 0
+                cx = obj.center.x if hasattr(obj, 'center') else getattr(obj, 'cx', 0)
+                cy = obj.center.y if hasattr(obj, 'center') else getattr(obj, 'cy', 0)
+                for i in range(n):
+                    a0 = 2 * math.pi * i / n
+                    a1 = 2 * math.pi * (i + 1) / n
+                    p0 = view.to_screen(cx + r * math.cos(a0), cy + r * math.sin(a0))
+                    p1 = view.to_screen(cx + r * math.cos(a1), cy + r * math.sin(a1))
+                    segments.append((p0, p1))
+            except Exception:
+                pass
+    return segments
+
+
+def _segments_intersect(p1, p2, p3, p4):
+    """检查两条线段是否相交（叉积法）。"""
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    d1 = cross(p3, p4, p1)
+    d2 = cross(p3, p4, p2)
+    d3 = cross(p1, p2, p3)
+    d4 = cross(p1, p2, p4)
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+       ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+        return True
+    return False
+
+
+def _rect_intersects_segment(rect, seg):
+    """检查矩形是否与线段相交。支持 QPointF 和元组两种格式。"""
+    p1, p2 = seg
+    # 处理 QPointF 或元组
+    if hasattr(p1, 'x') and callable(p1.x):
+        x1, y1 = p1.x(), p1.y()
+    else:
+        x1, y1 = p1
+    if hasattr(p2, 'x') and callable(p2.x):
+        x2, y2 = p2.x(), p2.y()
+    else:
+        x2, y2 = p2
+
+    # 检查线段端点是否在矩形内
+    if rect.contains(QPointF(x1, y1)) or rect.contains(QPointF(x2, y2)):
+        return True
+
+    # 检查线段是否与矩形边相交
+    edges = [
+        (QPointF(rect.left(), rect.top()), QPointF(rect.right(), rect.top())),
+        (QPointF(rect.right(), rect.top()), QPointF(rect.right(), rect.bottom())),
+        (QPointF(rect.right(), rect.bottom()), QPointF(rect.left(), rect.bottom())),
+        (QPointF(rect.left(), rect.bottom()), QPointF(rect.left(), rect.top())),
+    ]
+    for e0, e1 in edges:
+        if _segments_intersect((x1, y1), (x2, y2),
+                               (e0.x(), e0.y()), (e1.x(), e1.y())):
+            return True
+    return False
+
+
+def _point_rect_dist(x, y, rect):
+    """点到矩形的最短距离。"""
+    dx = max(rect.left() - x, 0, x - rect.right())
+    dy = max(rect.top() - y, 0, y - rect.bottom())
+    return math.hypot(dx, dy)
+
+
+def _find_label_offset(p, sp, label, view, screen_segments):
+    """为点标签找到不与线相交的最佳偏移位置。"""
+    from PySide6.QtGui import QFontMetricsF
+    from PySide6.QtCore import QRectF, QPointF, QSizeF
+    import math
+
+    fm = QFontMetricsF(p.font())
+    tw = fm.horizontalAdvance(label)
+    th = fm.height()
+
+    # 8 个候选方向（顺时针）
+    candidates = [
+        QPointF(9, -9),              # 右上（默认）
+        QPointF(9, th * 0.7),        # 右下
+        QPointF(-tw - 9, -9),        # 左上
+        QPointF(-tw - 9, th * 0.7),  # 左下
+        QPointF(-tw / 2, -th - 6),   # 正上
+        QPointF(-tw / 2, th + 6),    # 正下
+        QPointF(-tw - 9, -th / 2),   # 正左
+        QPointF(tw / 2 + 9, -th / 2),  # 正右
+    ]
+
+    best_offset = candidates[0]
+    best_score = float('inf')
+
+    for offset in candidates:
+        rect = QRectF(sp + offset, QSizeF(tw, th))
+        score = 0.0
+        for seg in screen_segments:
+            if _rect_intersects_segment(rect, seg):
+                score += 10.0  # 相交惩罚大
+            else:
+                (sx, sy), (ex, ey) = seg
+                d = min(_point_rect_dist(sx, sy, rect),
+                        _point_rect_dist(ex, ey, rect))
+                score += 1.0 / (d + 1.0)
+        if score < best_score:
+            best_score = score
+            best_offset = offset
+
+    return best_offset
+
+
+def _draw_publication_point(p, obj, view, screen_segments):
+    """出版样式：绘制点标签（智能避让，不画圆球）。"""
+    from PySide6.QtGui import QFont, QPen
+    from PySide6.QtCore import Qt, QPointF
+    from geo.points import _point_label
+    import math
+
+    label = getattr(obj, "name", "") or _point_label(obj, view)
+    font = QFont("Times New Roman", 16)
+    font.setItalic(True)
+    p.setFont(font)
+    p.setPen(QPen(QColor("#000000"), 1.0))
+
+    sp = view.to_screen(obj.x, obj.y)
+    offset = _find_label_offset(p, sp, label, view, screen_segments)
+    p.drawText(sp + offset, label)

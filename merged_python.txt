@@ -188,7 +188,7 @@ class AnimationClip:
 from __future__ import annotations
 from typing import Any, Optional
 
-from PySide6.QtCore import QTimer, Signal, QObject
+from PySide6.QtCore import QTimer, Signal, QObject, QElapsedTimer
 
 from .clip import AnimationClip
 from .tracks import VariableTrack, GliderTrack, PropertyTrack
@@ -207,17 +207,19 @@ class AnimationController(QObject):
     ticked = Signal(float)   # 当前时间（秒）
     finished = Signal()
 
-    def __init__(self, doc: Any, canvas: Any):
+    def __init__(self, doc, canvas):
         super().__init__()
         self.doc = doc
         self.canvas = canvas
-        self.clip: Optional[AnimationClip] = None
-        self._current_time: float = 0.0
-        self._playing: bool = False
+        self.clip = None
+        self._current_time = 0.0
+        self._playing = False
+        
         self._timer = QTimer(self)
-        self._timer.setInterval(16)  # ~60fps
+        self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        self._last_elapsed: int = 0
+        
+        self._elapsed_timer = QElapsedTimer()
 
     def set_clip(self, clip: AnimationClip) -> None:
         self.clip = clip
@@ -230,6 +232,7 @@ class AnimationController(QObject):
             return
         self._current_time = 0.0
         self._playing = True
+        self._elapsed_timer.start()
         self._last_elapsed = 0
         self._timer.start()
         self.started.emit()
@@ -267,12 +270,13 @@ class AnimationController(QObject):
             return clips[0]
         return None
 
-    def _tick(self) -> None:
-        if not self._playing or self.clip is None:
-            return
+    def _tick(self):
+        if not self._playing or self.clip is None: return
 
-        dt = 0.016 * self.clip.speed
-        self._current_time += dt
+        real_dt = self._elapsed_timer.elapsed() / 1000.0
+        self._elapsed_timer.restart() # 重置计时器
+        
+        self._current_time += real_dt * self.clip.speed
 
         total = self.clip.total_duration()
         if self._current_time >= total:
@@ -301,7 +305,7 @@ class AnimationController(QObject):
             except Exception:
                 pass
 
-        self.doc.changed.emit()
+        self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
         """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
@@ -422,55 +426,71 @@ def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
 
     return sorted_frames[-1].value
 
-"""动画序列化：注入 Document.save / load，支持 animations.json。"""
-from __future__ import annotations
+"""动画序列化：注入 Document 的 save/load 以及 snapshot/_load_state。"""
 import json
 import zipfile
-
 from core.document import Document
 from .clip import AnimationClip
 
 _original_save = Document.save
 _original_load = Document.load
-
+_original_snapshot = Document.snapshot
+_original_load_state = Document._load_state
 
 def _new_save(self, path):
     _original_save(self, path)
     animations = getattr(self, "animations", [])
-    if not animations:
-        return
+    if not animations: return
     data = [clip.dump() for clip in animations]
     with zipfile.ZipFile(path, "a") as zf:
-        zf.writestr(
-            "animations.json",
-            json.dumps(data, ensure_ascii=False, indent=1)
-        )
-
+        zf.writestr("animations.json", json.dumps(data, ensure_ascii=False, indent=1))
 
 def _new_load(self, path):
     _original_load(self, path)
-    with zipfile.ZipFile(path, "r") as zf:
-        if "animations.json" in zf.namelist():
-            data = json.loads(zf.read("animations.json"))
-            self.animations = []
-            for item in data:
-                try:
-                    clip = AnimationClip.build(self, item)
-                    self.animations.append(clip)
-                except Exception:
-                    pass
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            if "animations.json" in zf.namelist():
+                data = json.loads(zf.read("animations.json"))
+                self.animations = []
+                for item in data:
+                    try: self.animations.append(AnimationClip.build(self, item))
+                    except: pass
+    except: pass
 
+def _new_snapshot(self):
+    data = _original_snapshot(self)
+    animations = getattr(self, "animations", [])
+    if animations:
+        c_data = []
+        for clip in animations:
+            try: c_data.append(clip.dump())
+            except: pass
+        if c_data:
+            data.append({"__animations__": c_data})
+    return data
+
+def _new_load_state(self, data):
+    anim_data = []
+    geo_data = []
+    for item in data:
+        if isinstance(item, dict) and "__animations__" in item:
+            anim_data = item["__animations__"]
+        else:
+            geo_data.append(item)
+            
+    _original_load_state(self, geo_data)
+    
+    if hasattr(self, "animations"):
+        self.animations = []
+        for item in anim_data:
+            try: self.animations.append(AnimationClip.build(self, item))
+            except: pass
 
 def patch_document():
-    _original_init = Document.__init__
-
-    def _new_init(self, *args, **kwargs):
-        _original_init(self, *args, **kwargs)
-        self.animations = []
-
-    setattr(Document, "__init__", _new_init)
     setattr(Document, "save", _new_save)
     setattr(Document, "load", _new_load)
+    setattr(Document, "snapshot", _new_snapshot)
+    setattr(Document, "_load_state", _new_load_state)
 
 """具体轨道类型：变量轨道、路径轨道、属性轨道。"""
 from __future__ import annotations
@@ -493,16 +513,18 @@ class VariableTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled:
-            return
+        if self.muted or not self.enabled: return
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None:
-            return
+        if val is None: return
+        
         from core.variables import get_store
         store = get_store()
         var = store.get_var(self.var_name)
-        if var is not None and not var.expr:  # 从动变量不可手动改值
-            store.set(self.var_name, val)
+        
+        if var is None or getattr(var, "expr", ""):
+            return 
+            
+        store.set(self.var_name, val)
 
     def duration(self) -> float:
         if not self.keyframes:
@@ -592,7 +614,11 @@ class PropertyTrack(AnimationTrack):
 
     绑定对象 + 属性名，随时间改变属性值。
     """
-
+    ALLOWED_ATTRS = {
+        "size", "rotation", "width", "height", "opacity", 
+        "color", "text_color", "t"
+    }
+    
     def __init__(self, obj_id: int, attr_name: str,
                  keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -601,13 +627,15 @@ class PropertyTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled:
+        if self.muted or not self.enabled: return
+        if self.target is None: return
+        
+        if self.attr_name not in self.ALLOWED_ATTRS:
             return
-        if self.target is None:
-            return
+            
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None:
-            return
+        if val is None: return
+        
         if hasattr(self.target, self.attr_name):
             setattr(self.target, self.attr_name, val)
 
@@ -1222,12 +1250,9 @@ inject()
 """约束基类与注册表。"""
 from typing import List, Any, Dict, Type
 
-
 class GeometricConstraint:
-    """几何约束基类。不继承 GeoObject，独立于依赖图。"""
-
+    """几何约束基类。"""
     _next_id = 1
-
     def __init__(self):
         self.cid = f"c{GeometricConstraint._next_id}"
         GeometricConstraint._next_id += 1
@@ -1240,49 +1265,44 @@ class GeometricConstraint:
     def residual(self) -> List[float]:
         raise NotImplementedError
 
-
     def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """雅可比矩阵。子类实现 _jacobian_analytic(vars_map) 即可启用解析版本；
-        未实现时自动回退数值中心差分。"""
+        """雅可比矩阵。优先使用解析解，否则使用带异常保护的数值差分。"""
         analytic = getattr(self, '_jacobian_analytic', None)
         if analytic is not None:
             try:
                 return analytic(vars_map)
             except Exception:
                 pass
-        return self._jacobian_numeric(vars_map)
 
-    def _jacobian_numeric(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """数值雅可比（中心差分）。"""
         eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
         jac = [[0.0] * n_cols for _ in range(n_res)]
+        
         for p in pts:
             if id(p) not in vars_map:
                 continue
             idx = vars_map[id(p)]
             for axis in range(2):
                 old = p.x if axis == 0 else p.y
-                if axis == 0:
-                    p.x = old + eps
-                else:
-                    p.y = old + eps
-                r_plus = self.residual()
-                if axis == 0:
-                    p.x = old - eps
-                else:
-                    p.y = old - eps
-                r_minus = self.residual()
-                if axis == 0:
-                    p.x = old
-                else:
-                    p.y = old
-                for j in range(n_res):
-                    jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
+                r_plus = r_minus = None
+                try:
+                    if axis == 0: p.x = old + eps
+                    else: p.y = old + eps
+                    r_plus = self.residual()
+                    
+                    if axis == 0: p.x = old - eps
+                    else: p.y = old - eps
+                    r_minus = self.residual()
+                finally:
+                    if axis == 0: p.x = old
+                    else: p.y = old
+                
+                if r_plus is not None and r_minus is not None:
+                    for j in range(min(n_res, len(r_plus), len(r_minus))):
+                        jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
         return jac
-
 
     def dump(self) -> dict:
         raise NotImplementedError
@@ -1291,10 +1311,7 @@ class GeometricConstraint:
     def build(cls, point_map: dict, params: dict) -> 'GeometricConstraint':
         raise NotImplementedError
 
-
-
 CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
-
 
 def register_constraint(name: str):
     def deco(cls):
@@ -1303,131 +1320,130 @@ def register_constraint(name: str):
         return cls
     return deco
 
-"""Document 补丁：添加 constraints 列表、solve_constraints、recompute_silent。
-新增：过约束检测 —— add_constraint 时若约束冲突，弹窗提示并自动回滚。
-"""
-import math
+"""Document 补丁：约束序列化、撤销恢复、过约束回滚。"""
 from core.document import Document
 from geo.points import FreePoint
 from .solver import ConstraintSolver
 from .graph import get_affected_constraints
-
-OVERCONSTRAINT_TOL = 1e-3
+from .base import CONSTRAINT_REGISTRY
 
 _original_init = Document.__init__
 _original_recompute = Document.recompute_from
 _original_remove = Document._remove
-
-
-
-def _residual_norm(constraints):
-    """计算约束列表的总残差范数（欧氏）。"""
-    total = 0.0
-    for c in constraints:
-        if not getattr(c, "enabled", True):
-            continue
-        try:
-            for f in c.residual():
-                total += f * f
-        except Exception:
-            pass
-    return math.sqrt(total)
-
-
-def _notify_overconstrained():
-    """弹窗提示过约束（无 GUI 环境静默失败）。"""
-    try:
-        import logging
-        logging.getLogger(__name__).warning("过约束：约束冲突，已自动撤销")
-    except Exception:
-        pass
-    try:
-        from PySide6.QtWidgets import QMessageBox, QApplication
-        parent = QApplication.activeWindow()
-        QMessageBox.warning(
-            parent,
-            "过约束",
-            "添加的约束与现有约束冲突（过约束）。\n"
-            "系统已自动撤销本次操作，几何图形已恢复。",
-        )
-    except Exception:
-        pass
-
-
+_original_snapshot = Document.snapshot
+_original_load_state = Document._load_state
 
 def _recompute_silent(self, roots):
-    """静默重算：不 emit changed。"""
     roots = roots if isinstance(roots, (list, tuple)) else [roots]
     dirty = set()
     stack = list(roots)
     while stack:
         o = stack.pop()
-        if o in dirty:
-            continue
+        if o in dirty: continue
         dirty.add(o)
         stack.extend(o.children)
     for o in sorted(dirty, key=lambda o: o.id):
         o.exists = all(p.exists for p in o.parents)
-        if o.exists:
-            o.recompute()
+        if o.exists: o.recompute()
     self._mutation_count += 1
-
 
 def _new_init(self, *args, **kwargs):
     _original_init(self, *args, **kwargs)
     self.constraints = []
 
-
 def _new_recompute(self, roots):
     _recompute_silent(self, roots)
     self.changed.emit()
-
 
 def _new_remove(self, obj):
     doomed = _original_remove(self, obj)
     doomed_ids = {o.id for o in doomed}
     if hasattr(self, 'constraints') and self.constraints:
-        to_remove = [
-            c for c in self.constraints
-            if any(getattr(p, 'id', None) in doomed_ids
-                   for p in c.involved_points())
-        ]
-        for c in to_remove:
-            self.constraints.remove(c)
+        to_remove = [c for c in self.constraints 
+                     if any(getattr(p, 'id', None) in doomed_ids for p in c.involved_points())]
+        for c in to_remove: self.constraints.remove(c)
     return doomed
 
+def _new_snapshot(self):
+    """快照 = 几何对象 + 约束数据。"""
+    data = _original_snapshot(self)
+    if hasattr(self, 'constraints') and self.constraints:
+        c_data = []
+        for c in self.constraints:
+            try:
+                d = c.dump()
+                d["__ctype__"] = c.type_name
+                d["__cid__"] = c.cid
+                c_data.append(d)
+            except: pass
+        if c_data:
+            data.append({"__constraints__": c_data})
+    return data
+
+def _new_load_state(self, data):
+    """恢复状态：先恢复几何，再重建约束并绑定新实例。"""
+    c_data = []
+    geo_data = []
+    for item in data:
+        if isinstance(item, dict) and "__constraints__" in item:
+            c_data = item["__constraints__"]
+        else:
+            geo_data.append(item)
+            
+    _original_load_state(self, geo_data)
+    
+    if hasattr(self, 'constraints'):
+        point_map = {o.id: o for o in self.objects}
+        self.constraints = []
+        for item in c_data:
+            ctype = item.pop("__ctype__", "")
+            cid = item.pop("__cid__", "")
+            cls = CONSTRAINT_REGISTRY.get(ctype)
+            if cls:
+                try:
+                    c = cls.build(point_map, item)
+                    c.cid = cid
+                    self.constraints.append(c)
+                except: pass
 
 def add_constraint(self, constraint):
-    """添加约束并立即求解。过约束时弹窗提示并自动回滚。"""
-    backup = [
-        (p, p.x, p.y)
-        for p in self.objects
-        if isinstance(p, FreePoint)
-    ]
+    """添加约束。如果导致过约束（冲突），自动回滚并提示。"""
+    backup = [(p, p.x, p.y) for p in self.objects if isinstance(p, FreePoint)]
     self.constraints.append(constraint)
-    self.solve_constraints()
-    if _residual_norm(self.constraints) > OVERCONSTRAINT_TOL:
+    
+    success = self.solve_constraints()
+    
+    import math
+    total_err = 0.0
+    for c in self.constraints:
+        try:
+            for v in c.residual(): total_err += v * v
+        except: pass
+        
+    if not success or math.sqrt(total_err) > 1e-3:
         if constraint in self.constraints:
             self.constraints.remove(constraint)
         for p, x, y in backup:
             p.x, p.y = x, y
         if backup:
-            self._recompute_silent([p for p, _, _ in backup])
+            _recompute_silent(self, [p for p, _, _ in backup])
         self.changed.emit()
-        _notify_overconstrained()
+        
+        try:
+            from PySide6.QtWidgets import QMessageBox, QApplication
+            parent = QApplication.activeWindow()
+            QMessageBox.warning(parent, "过约束", "添加的约束与现有约束冲突，已自动撤销。")
+        except: pass
         return
+
     self.changed.emit()
 
-
 def remove_constraint(self, constraint):
-    """删除约束。"""
     if constraint in self.constraints:
         self.constraints.remove(constraint)
         self.changed.emit()
 
-
 def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
-    """求解约束系统。返回是否收敛成功。"""
     MAX_DEPTH = 5
     if not self.constraints or _depth >= MAX_DEPTH:
         return True
@@ -1435,30 +1451,31 @@ def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
         affected = get_affected_constraints(trigger_points, self.constraints)
     else:
         affected = [c for c in self.constraints if c.enabled]
-    if not affected:
-        return True
+    if not affected: return True
+    
     pinned_set = set(pinned_points or [])
     free_set = set()
     for c in affected:
         for p in c.involved_points():
             if isinstance(p, FreePoint) and p not in pinned_set:
                 free_set.add(p)
-    if not free_set:
-        return True
+    if not free_set: return True
+    
     solver = ConstraintSolver(max_iter=50, tol=1e-9)
     success = solver.solve(affected, list(free_set), list(pinned_set))
-    self._recompute_silent(list(free_set))
-    moved = list(free_set)
-    if moved:
-        self.solve_constraints(moved, pinned_points, _depth + 1)
+    _recompute_silent(self, list(free_set))
+    
+    if list(free_set):
+        self.solve_constraints(list(free_set), pinned_points, _depth + 1)
     return success
-
 
 def patch_document():
     setattr(Document, "__init__", _new_init)
     setattr(Document, "recompute_from", _new_recompute)
     setattr(Document, "_recompute_silent", _recompute_silent)
     setattr(Document, "_remove", _new_remove)
+    setattr(Document, "snapshot", _new_snapshot)          # ★ 新增
+    setattr(Document, "_load_state", _new_load_state)    # ★ 新增
     setattr(Document, "add_constraint", add_constraint)
     setattr(Document, "remove_constraint", remove_constraint)
     setattr(Document, "solve_constraints", solve_constraints)
@@ -1535,269 +1552,174 @@ def patch_select_tool():
     setattr(SelectTool, "move", _new_move)
     setattr(SelectTool, "release", _new_release)
 
-"""注入 Document.save / load：支持 constraints.json。"""
+"""注入 Document.save / load：支持 constraints.json。
+★ 注意：_load_state 已由 document_ext patch，此处只处理文件级别的约束加载。
+"""
 from core.document import Document
 from .base import CONSTRAINT_REGISTRY
-import json, zipfile
+import json
+import zipfile
 
 _original_save = Document.save
 _original_load = Document.load
 
+
 def _new_save(self, path):
     _original_save(self, path)
-    if not hasattr(self, 'constraints') or not self.constraints: return
-    
+    if not hasattr(self, 'constraints') or not self.constraints:
+        return
     data = []
     for c in self.constraints:
-        data.append({
-            "id": c.cid,
-            "type": c.type_name,
-            "params": c.dump()
-        })
-        
-    with zipfile.ZipFile(path, "a") as zf:
-        zf.writestr("constraints.json", json.dumps(data, ensure_ascii=False, indent=1))
+        try:
+            data.append({
+                "id": c.cid,
+                "type": c.type_name,
+                "params": c.dump()
+            })
+        except Exception:
+            pass
+    if data:
+        with zipfile.ZipFile(path, "a") as zf:
+            zf.writestr("constraints.json",
+                        json.dumps(data, ensure_ascii=False, indent=1))
+
 
 def _new_load(self, path):
     _original_load(self, path)
-    with zipfile.ZipFile(path, "r") as zf:
-        if "constraints.json" in zf.namelist():
-            data = json.loads(zf.read("constraints.json"))
-            point_map = {o.id: o for o in self.objects}
-            self.constraints = []
-            for item in data:
-                cls = CONSTRAINT_REGISTRY.get(item["type"])
-                if cls:
-                    try:
-                        c = cls.build(point_map, item["params"])
-                        c.cid = item["id"]
-                        self.constraints.append(c)
-                    except Exception: pass
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            if "constraints.json" in zf.namelist():
+                data = json.loads(zf.read("constraints.json"))
+                point_map = {o.id: o for o in self.objects}
+                existing_cids = {c.cid for c in getattr(self, 'constraints', [])}
+                for item in data:
+                    if item.get("id") in existing_cids:
+                        continue  # 已由 _load_state 恢复
+                    cls = CONSTRAINT_REGISTRY.get(item["type"])
+                    if cls:
+                        try:
+                            c = cls.build(point_map, item["params"])
+                            c.cid = item["id"]
+                            self.constraints.append(c)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+
 
 def patch_save_load():
     setattr(Document, "save", _new_save)
     setattr(Document, "load", _new_load)
 
-"""Levenberg-Marquardt 约束求解器（优化版）。
-优化点：
-1. Cholesky 分解替代高斯消元（对称正定，快约 2 倍）
-2. 稀疏法方程组装（只累加约束涉及点的列）
-3. 独立连通分量分组求解（减小矩阵规模）
-4. λ 复用（拒绝步时不重新组装雅可比）
-5. 解析雅可比优先（通过 base.py 钩子）
-"""
+"""Levenberg-Marquardt 约束求解器。纯 Python，无外部依赖。"""
 import math
-from typing import List, Any, Dict, Optional
-
+from typing import List, Any, Dict
 from .base import GeometricConstraint
 
-
-
-def _cholesky(A: List[List[float]]) -> Optional[List[List[float]]]:
-    """对称正定矩阵 Cholesky 分解 A = L·Lᵀ。失败返回 None。"""
-    n = len(A)
-    L = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        for j in range(i + 1):
-            s = 0.0
-            for k in range(j):
-                s += L[i][k] * L[j][k]
-            if i == j:
-                val = A[i][i] - s
-                if val <= 1e-15:
-                    return None
-                L[i][j] = math.sqrt(val)
-            else:
-                if abs(L[j][j]) < 1e-15:
-                    return None
-                L[i][j] = (A[i][j] - s) / L[j][j]
-    return L
-
-
-def _cholesky_solve(L: List[List[float]], b: List[float]) -> List[float]:
-    """前代 + 回代求解 L·Lᵀ·x = b。"""
+def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
+    """高斯消元（列主元）求解 Ax = b。返回 None 表示奇异。
+    ★ 必须是模块级函数，不能缩进到类内部。
+    """
     n = len(b)
-    y = [0.0] * n
-    for i in range(n):
-        s = 0.0
-        for k in range(i):
-            s += L[i][k] * y[k]
-        y[i] = (b[i] - s) / L[i][i]
+    if n == 0:
+        return []
+    M = [row[:] + [b[i]] for i, row in enumerate(A)]
+    for col in range(n):
+        pivot = max(range(col, n), key=lambda r: abs(M[r][col]))
+        if abs(M[pivot][col]) < 1e-15:
+            return None
+        M[col], M[pivot] = M[pivot], M[col]
+        for row in range(col + 1, n):
+            f = M[row][col] / M[col][col]
+            for j in range(col, n + 1):
+                M[row][j] -= f * M[col][j]
     x = [0.0] * n
     for i in range(n - 1, -1, -1):
-        s = 0.0
-        for k in range(i + 1, n):
-            s += L[k][i] * x[k]
-        x[i] = (y[i] - s) / L[i][i]
+        x[i] = M[i][n]
+        for j in range(i + 1, n):
+            x[i] -= M[i][j] * x[j]
+        x[i] /= M[i][i]
     return x
 
-
-
-def _group_independent(constraints, free_points):
-    """用并查集将共享自由点的约束分组，返回 [(constraints, points), ...]。
-    不共享点的约束组互相独立，可分别求解小矩阵。"""
-    if not free_points:
-        return []
-    fp_ids = {id(p) for p in free_points}
-    parent = {pid: pid for pid in fp_ids}
-
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(x, y):
-        rx, ry = find(x), find(y)
-        if rx != ry:
-            parent[rx] = ry
-
-    for c in constraints:
-        pts = [id(p) for p in c.involved_points() if id(p) in fp_ids]
-        for i in range(1, len(pts)):
-            union(pts[0], pts[i])
-
-    groups = {}
-    for p in free_points:
-        root = find(id(p))
-        groups.setdefault(root, []).append(p)
-
-    result = []
-    for root, pts in groups.items():
-        pt_set = {id(p) for p in pts}
-        cs = [c for c in constraints
-              if any(id(p) in pt_set for p in c.involved_points())]
-        if cs:
-            result.append((cs, pts))
-    return result
-
-
-
 class ConstraintSolver:
-    """LM 求解器（优化版）。"""
-
+    """LM 求解器。"""
     def __init__(self, max_iter=50, tol=1e-9):
         self.max_iter = max_iter
         self.tol = tol
 
-    def solve(self, constraints, free_points, pinned_points) -> bool:
+    def solve(self, constraints: List[GeometricConstraint], 
+              free_points: List[Any], pinned_points: List[Any]) -> bool:
         valid = [c for c in constraints if c.enabled]
         if not valid or not free_points:
             return True
-        groups = _group_independent(valid, free_points)
-        if not groups:
-            return True
-        all_ok = True
-        for group_cs, group_pts in groups:
-            if not self._solve_group(group_cs, group_pts):
-                all_ok = False
-        return all_ok
 
-    def _solve_group(self, constraints, free_points) -> bool:
-        """对单个连通分量执行 LM 迭代。"""
         vars_map: Dict[int, int] = {id(p): i for i, p in enumerate(free_points)}
         n_vars = 2 * len(free_points)
-        if n_vars == 0:
-            return True
-
         lam = 1e-3
         lam_up, lam_down = 10.0, 0.1
 
-        F: List[float] = []
-        JtJ_base: List[List[float]] = []
-        JtF: List[float] = []
-        norm = float('inf')
-        need_assemble = True
-
         for _ in range(self.max_iter):
-            if need_assemble:
-                F, JtJ_base, JtF, norm = self._assemble(
-                    constraints, vars_map, n_vars)
-                need_assemble = False
-                if not F:
-                    return True
-                if norm < self.tol:
-                    return True
+            F: List[float] = []
+            J: List[List[float]] = []
+            
+            for c in valid:
+                try:
+                    r = c.residual()
+                    jac = c.jacobian(vars_map)
+                    if not isinstance(r, list) or not isinstance(jac, list):
+                        continue
+                    if len(r) != len(jac):
+                        continue
+                    if len(jac) > 0 and len(jac[0]) != n_vars:
+                        continue
+                    F.extend(r)
+                    J.extend(jac)
+                except Exception:
+                    continue
 
-            JtJ = [row[:] for row in JtJ_base]
+            if not F:
+                return True
+
+            norm = math.sqrt(sum(f * f for f in F))
+            if norm < self.tol:
+                return True
+
+            JtJ = [[0.0] * n_vars for _ in range(n_vars)]
+            JtF = [0.0] * n_vars
+            for i in range(len(F)):
+                for j in range(n_vars):
+                    JtF[j] += J[i][j] * F[i]
+                    for k in range(n_vars):
+                        JtJ[j][k] += J[i][j] * J[i][k]
             for i in range(n_vars):
                 JtJ[i][i] += lam
 
-            L = _cholesky(JtJ)
-            if L is None:
+            delta = _solve_linear(JtJ, [-f for f in JtF])
+            if delta is None:
                 lam *= lam_up
-                if lam > 1e10:
-                    return False
+                if lam > 1e10: return False
                 continue
-
-            delta = _cholesky_solve(L, [-f for f in JtF])
 
             old_coords = [(p.x, p.y) for p in free_points]
             for i, p in enumerate(free_points):
                 p.x += delta[2 * i]
                 p.y += delta[2 * i + 1]
 
-            new_norm = self._residual_norm(constraints)
+            new_F = []
+            for c in valid:
+                try: new_F.extend(c.residual())
+                except: continue
+            new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
+
             if new_norm < norm:
                 lam = max(lam * lam_down, 1e-12)
-                norm = new_norm
-                need_assemble = True          # 点变了，下次重新组装
-                if norm < self.tol:
-                    return True
+                if new_norm < self.tol: return True
             else:
                 for i, p in enumerate(free_points):
                     p.x, p.y = old_coords[i]
                 lam *= lam_up
-                if lam > 1e10:
-                    return False
+                if lam > 1e10: return False
         return False
-
-    def _assemble(self, constraints, vars_map, n_vars):
-        """组装 F、JᵀJ（不含 λ）、JᵀF。稀疏累加：只遍历约束涉及点的列。"""
-        F: List[float] = []
-        JtJ = [[0.0] * n_vars for _ in range(n_vars)]
-        JtF = [0.0] * n_vars
-
-        for c in constraints:
-            try:
-                r = c.residual()
-                jac = c.jacobian(vars_map)
-            except Exception:
-                continue
-
-            cols = []
-            for p in c.involved_points():
-                if id(p) in vars_map:
-                    idx = vars_map[id(p)]
-                    cols.extend([idx * 2, idx * 2 + 1])
-            cols = sorted(set(cols))
-
-            for i in range(len(r)):
-                fi = r[i]
-                F.append(fi)
-                if i >= len(jac):
-                    continue
-                row = jac[i]
-                if len(row) != n_vars:
-                    continue
-                for j in cols:
-                    JtF[j] += row[j] * fi
-                    for k in cols:
-                        JtJ[j][k] += row[j] * row[k]
-
-        norm = math.sqrt(sum(f * f for f in F)) if F else 0.0
-        return F, JtJ, JtF, norm
-
-    @staticmethod
-    def _residual_norm(constraints) -> float:
-        total = 0.0
-        for c in constraints:
-            try:
-                for f in c.residual():
-                    total += f * f
-            except Exception:
-                pass
-        return math.sqrt(total)
 
 
 import math
@@ -2868,9 +2790,10 @@ class Document(QObject):
         
     def _add(self, obj):
         self._mutation_count += 1
-        self._objects_version += 1          # ★ 结构变化
+        self._objects_version += 1
         self.objects.append(obj)
-        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)):
+        if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)) or \
+            getattr(obj, "expr_driver", False):
             self.expr_objects.append(obj)
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
@@ -3056,14 +2979,15 @@ class Document(QObject):
 
     def snapshot(self):
         return [
-            {
-                "id": o.id,
-                "type": o.type_name,
-                "name": getattr(o, "name", ""),
-                "parents": [p.id for p in o.parents],
-                "params": o.dump()
-            }
-            for o in self.objects
+        {
+            "id": o.id,
+            "type": o.type_name,
+            "name": getattr(o, "name", ""),
+            "visible": getattr(o, "visible", True),
+            "parents": [p.id for p in o.parents],
+            "params": o.dump()
+        }
+        for o in self.objects
         ]
 
     def _push_undo(self):
@@ -3143,7 +3067,7 @@ class Document(QObject):
     def _load_state(self, data):
         self.objects.clear()
         self.expr_objects.clear()
-        self._objects_version += 1          # ★ 结构变化
+        self._objects_version += 1
         pool = {}
         self._macro_suppress = True
         try:
@@ -3152,6 +3076,8 @@ class Document(QObject):
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
                 obj.id = item["id"]
+                obj.name = item.get("name", "")
+                obj.visible = item.get("visible", True)
                 pool[item["id"]] = self._add(obj)
             if data:
                 GeoObject.bump_ids(max(item["id"] for item in data))
@@ -8429,12 +8355,10 @@ PALETTE = ["#e8590c", "#1971c2", "#2f9e44", "#9c36b5",
            "#0c8599", "#e64980", "#f08c00", "#5f3dc4"]
 _color_index = [0]
 
-
 def next_color():
     c = PALETTE[_color_index[0] % len(PALETTE)]
     _color_index[0] += 1
     return c
-
 
 def parse_equation(expr: str) -> str:
     """把 'x^2+y^2=1' 转为 '(x^2+y^2)-(1)'；无等号则原样返回。"""
@@ -8443,7 +8367,6 @@ def parse_equation(expr: str) -> str:
         parts = expr.split("=", 1)
         return f"({parts[0].strip()})-({parts[1].strip()})"
     return expr
-
 
 @register_geo("ImplicitCurve")
 class ImplicitCurve(GeoObject):
@@ -8454,14 +8377,33 @@ class ImplicitCurve(GeoObject):
         super().__init__(parents=())
         self.expr = expr
         self._resolved_expr = parse_equation(expr)
-        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)  # x0, x1, y0, y1
+        self.domain = domain or (-5.0, 5.0, -5.0, 5.0)
         self.color = color or next_color()
         self.resolution = max(30, min(200, resolution))
         self.label_text = label_text
         self._segments: List[Tuple[float, float, float, float]] = []
         self._cache_version: int = -1
         self._cache_dirty: bool = True
+        self._cache_domain: tuple = (None, None, None, None)  # ★ 新增
         self.recompute()
+
+    def get_domain(self, view):
+        """获取当前采样域。隐函数使用固定域或跟随视口。"""
+        if self.domain:
+            return self.domain
+        x0, _ = view.to_world(QPointF(0, 0))
+        x1, _ = view.to_world(QPointF(view.width(), 0))
+        _, y0 = view.to_world(QPointF(0, view.height()))
+        _, y1 = view.to_world(QPointF(0, 0))
+        return (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
+
+    def update_cache(self, segments, var_version, domain):
+        """子线程采样完成后更新缓存（由信号槽调用）。"""
+        self._segments = segments
+        self._cache_version = var_version
+        self._cache_domain = domain
+        self._cache_dirty = False
+        self.exists = len(self._segments) > 0
 
     def invalidate_cache(self):
         self._cache_dirty = True
@@ -8596,7 +8538,6 @@ class ImplicitCurve(GeoObject):
                    params.get("color"),
                    params.get("resolution", 80),
                    params.get("label_text"))
-
 
 @register_renderer(ImplicitCurve)
 def draw_implicit(p, obj, view):
@@ -10965,12 +10906,10 @@ class AngleDivideTool(Tool):
         self.pts = []
         canvas.update()
 
-"""角度插件：先点顶点再点两侧点，测量夹角（度）。拖动任一点实时刷新。"""
+"""角度插件：依次点边1、顶点、边2，测量夹角（度）。拖动任一点实时刷新。"""
 import math
-
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QPainterPath
-
 from core.registry import register_geo, register_renderer, register_tool
 from geo.base import GeoObject
 from tools.base import Tool, point_or_snap
@@ -10985,11 +10924,10 @@ class AngleMeasure(GeoObject):
         self.vertex, self.p1, self.p2 = vertex, p1, p2
         self.a1 = self.a2 = 0.0
         self.degrees = 0.0
-        self.anchor = (0.0, 0.0)        # 拾取锚点（世界坐标）
+        self.anchor = (0.0, 0.0)
         self.recompute()
 
     def _span(self):
-        """带符号的较短扫掠角（弧度）"""
         s = self.a2 - self.a1
         while s > math.pi: s -= 2 * math.pi
         while s < -math.pi: s += 2 * math.pi
@@ -11017,14 +10955,13 @@ class AngleMeasure(GeoObject):
     def build(cls, parents, params):
         return cls(parents[0], parents[1], parents[2])
 
-
 @register_renderer(AngleMeasure)
 def draw_angle(p, obj, view):
     v = obj.vertex
     color = theme.SELECTED if obj.selected else theme.MEASURE
     a1 = math.atan2(obj.p1.y - v.y, obj.p1.x - v.x)
     a2 = math.atan2(obj.p2.y - v.y, obj.p2.x - v.x)
-    span = (a2 - a1 + 3 * math.pi) % (2 * math.pi) - math.pi   # 较短扫掠
+    span = (a2 - a1 + 3 * math.pi) % (2 * math.pi) - math.pi
     arm = 30.0 / view.scale
     p.setPen(theme.pen(color, 1.5))
     for a in (a1, a2):
@@ -11047,7 +10984,7 @@ def draw_angle(p, obj, view):
               theme.SELECTED if obj.selected else theme.LABEL)
 
 @register_tool(name="角度", shortcut="A", order=24, icon="angle", panel="menu",
-               hint="先点顶点，再点两侧的点，测量夹角")
+               hint="★ 依次点击：边1上的点 → 顶点 → 边2上的点")
 class AngleTool(Tool):
     def __init__(self):
         self.pts = []
@@ -11061,7 +10998,7 @@ class AngleTool(Tool):
     def press(self, canvas, wpt, hit):
         self.pts.append(point_or_snap(canvas, wpt, hit))
         if len(self.pts) == 3:
-            v, p1, p2 = self.pts
+            p1, v, p2 = self.pts
             canvas.doc.add(AngleMeasure(v, p1, p2))
             self.pts = []
 
@@ -11073,12 +11010,13 @@ class AngleTool(Tool):
         if not self.pts:
             return
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
-        for i in range(1, len(self.pts)):
-            p.drawLine(view.to_screen(self.pts[i-1].x, self.pts[i-1].y),
-                       view.to_screen(self.pts[i].x, self.pts[i].y))
-        last = self.pts[-1]
-        p.drawLine(view.to_screen(last.x, last.y),
-                   view.to_screen(*view.cursor_wpt))
+        if len(self.pts) == 1:
+            p.drawLine(view.to_screen(self.pts[0].x, self.pts[0].y),
+                       view.to_screen(*view.cursor_wpt))
+        elif len(self.pts) == 2:
+            p1, v = self.pts
+            p.drawLine(view.to_screen(p1.x, p1.y), view.to_screen(v.x, v.y))
+            p.drawLine(view.to_screen(v.x, v.y), view.to_screen(*view.cursor_wpt))
 
 """贝塞尔曲线插件：4 个控制点确定一条三次贝塞尔曲线。"""
 from PySide6.QtCore import Qt
@@ -19093,11 +19031,13 @@ class Canvas(QWidget):
                         y1 < -margin or y0 > h + margin)
         return True
     
-    def render_scene(self, p: QPainter, bg_mode: str = "grid") -> None:
-        """渲染几何场景（背景 + 可选网格/坐标轴 + 全部对象）。
-        bg_mode: "grid"=网格+坐标轴, "axes"=仅坐标轴, "none"=都不画。"""
-
-        if bg_mode == "grid":
+    def render_scene(self, p: QPainter, bg_mode: str = "grid", publication: bool = False) -> None:
+        """渲染几何场景。publication=True 时启用黑白出版样式。"""
+        from geo.points import AbstractPoint
+        
+        if publication:
+            p.fillRect(self.rect(), QColor("#ffffff")) # 纯白背景
+        elif bg_mode == "grid":
             self._draw_background_cached(p)
         elif bg_mode == "axes":
             self._draw_background(p)
@@ -19105,10 +19045,23 @@ class Canvas(QWidget):
         else:
             self._draw_background(p)
 
-        for obj, renderer in self._get_render_list():
-            if self._in_viewport(obj):
-                renderer(p, obj, self)
+        render_list = self._get_render_list()
+        
+        if publication:
+            for obj, renderer in render_list:
+                if not isinstance(obj, AbstractPoint) and self._in_viewport(obj):
+                    _draw_publication(p, obj, self)
 
+            screen_segments = _collect_screen_segments(self)
+
+            for obj, renderer in render_list:
+                if isinstance(obj, AbstractPoint) and self._in_viewport(obj):
+                    _draw_publication_point(p, obj, self, screen_segments)
+        else:
+            for obj, renderer in render_list:
+                if self._in_viewport(obj):
+                    renderer(p, obj, self)
+                    
     def _apply_fit(self, bbox) -> None:
         """把包围盒适配到画布尺寸并居中（四周留白 70px）。"""
         x0, y0, x1, y1 = bbox
@@ -19121,43 +19074,38 @@ class Canvas(QWidget):
         self.origin = QPointF(self.width() / 2 - cx * self.scale,
                               self.height() / 2 + cy * self.scale)
 
-    def render_to_image(self, fit=False, bg_mode="grid", scale=2.0):
-        """渲染为 QImage（PNG 导出与向导预览共用）。fit=True 时先适配内容并居中。
-        临时改写 scale/origin，结束后恢复，不影响当前视图。"""
+    def render_to_image(self, fit=False, bg_mode="grid", scale=2.0, publication=False):
         saved = (self.scale, self.origin)
         try:
             if fit:
                 bbox = content_bbox(self.doc)
-                if bbox:
-                    self._apply_fit(bbox)
+                if bbox: self._apply_fit(bbox)
             img = QImage(int(self.width() * scale), int(self.height() * scale),
                          QImage.Format.Format_ARGB32)
             p = QPainter()
             p.begin(img)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.scale(scale, scale)
-            self.render_scene(p, bg_mode)
+            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
             p.end()
             return img
         finally:
             self.scale, self.origin = saved
 
-    def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0):
-        """按扩展名导出：.svg → 矢量；其余 → PNG 位图。"""
+    def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0, publication=False):
         if os.path.splitext(path)[1].lower() == ".svg":
-            self._export_svg(path, fit, bg_mode)
+            self._export_svg(path, fit, bg_mode, publication=publication) # ★ 透传
         else:
-            self.render_to_image(fit, bg_mode, png_scale).save(path)
+            self.render_to_image(fit, bg_mode, png_scale, publication=publication).save(path)
 
-    def _export_svg(self, path, fit=False, bg_mode="grid"):
+    def _export_svg(self, path, fit=False, bg_mode="grid", publication=False):
         from PySide6.QtCore import QRectF
         from PySide6.QtSvg import QSvgGenerator
         saved = (self.scale, self.origin)
         try:
             if fit:
                 bbox = content_bbox(self.doc)
-                if bbox:
-                    self._apply_fit(bbox)
+                if bbox: self._apply_fit(bbox)
             gen = QSvgGenerator()
             gen.setFileName(path)
             gen.setSize(self.size())
@@ -19166,10 +19114,11 @@ class Canvas(QWidget):
             p = QPainter()
             p.begin(gen)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self.render_scene(p, bg_mode)
+            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
             p.end()
         finally:
             self.scale, self.origin = saved
+            
     def _draw_background(self, p: QPainter) -> None:
         g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
         g.setColorAt(0.0, theme.BG_TOP)
@@ -19765,6 +19714,274 @@ def content_bbox(doc):
         return None
 
     return min(xs), min(ys), max(xs), max(ys)
+
+def _draw_publication(p: QPainter, obj, view):
+    """出版样式渲染器：纯黑白线稿，无填充，无小圆球。线宽加粗。"""
+    from PySide6.QtGui import QFont, QPainterPath, QPen
+    from PySide6.QtCore import Qt
+    from geo.points import AbstractPoint, _point_label
+    import math
+
+    pen = QPen(QColor("#000000"), 2.2)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    p.setPen(pen)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    tn = type(obj).__name__
+
+    if isinstance(obj, AbstractPoint):
+        return
+
+    if tn == "Segment":
+        p.drawLine(view.to_screen(obj.a.x, obj.a.y), view.to_screen(obj.b.x, obj.b.y))
+        return
+
+    if tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
+              "AngleBisector", "AngleDivLine", "PerpBisector"):
+        w, h = view.width(), view.height()
+        ts = [obj.project(*view.to_world(QPointF(cx, cy)))
+              for cx, cy in ((0, 0), (w, 0), (0, h), (w, h))]
+        if tn == "Ray":
+            p0 = obj.point_at(0.0)
+            p1 = obj.point_at(max(ts))
+        else:
+            p0 = obj.point_at(min(ts))
+            p1 = obj.point_at(max(ts))
+        p.drawLine(view.to_screen(*p0), view.to_screen(*p1))
+        return
+
+    if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
+        c = view.to_screen(obj.center.x if hasattr(obj, 'center') else obj.cx,
+                           obj.center.y if hasattr(obj, 'center') else obj.cy)
+        r = obj.r if hasattr(obj, 'r') else getattr(obj, 'radius', 0)
+        p.drawEllipse(c, r * view.scale, r * view.scale)
+        return
+
+    if tn == "Ellipse":
+        path = QPainterPath()
+        for i in range(73):
+            sp = view.to_screen(*obj.point_at(i / 72))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        path.closeSubpath()
+        p.drawPath(path)
+        return
+
+    if tn == "RegularPolygon":
+        path = QPainterPath()
+        for i, v in enumerate(obj.verts):
+            sp = view.to_screen(*v)
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        path.closeSubpath()
+        p.drawPath(path)
+        return
+
+    if tn == "CubicBezier":
+        path = QPainterPath()
+        for i in range(61):
+            sp = view.to_screen(*obj.point_at(i / 60))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    if tn == "FunctionCurve":
+        path = QPainterPath()
+        has_path = False
+        a, b = obj._param_domain()
+        for i in range(401):
+            u = a + (b - a) * i / 400
+            pt = obj._eval_point(u)
+            if pt is None:
+                has_path = False
+                continue
+            sp = view.to_screen(*pt)
+            if not has_path:
+                path.moveTo(sp)
+                has_path = True
+            else:
+                path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    if tn == "AngleMeasure":
+        v, p1, p2 = obj.vertex, obj.p1, obj.p2
+        a1 = math.atan2(p1.y - v.y, p1.x - v.x)
+        a2 = math.atan2(p2.y - v.y, p2.x - v.x)
+        span = (a2 - a1 + 3 * math.pi) % (2 * math.pi) - math.pi
+        r = 25.0 / view.scale
+        path = QPainterPath()
+        for i in range(33):
+            a = a1 + span * i / 32
+            sp = view.to_screen(v.x + r * math.cos(a), v.y + r * math.sin(a))
+            if i == 0: path.moveTo(sp)
+            else: path.lineTo(sp)
+        p.drawPath(path)
+        return
+
+    if tn == "TextObject":
+        font = QFont("Microsoft YaHei", obj.size)
+        p.setFont(font)
+        p.drawText(view.to_screen(*obj.world_pos()) + QPointF(12, 24), obj.text)
+        return
+
+
+
+def _collect_screen_segments(view):
+    """收集所有可见线段/直线/圆的屏幕坐标线段，用于标签避让。"""
+    from geo.points import AbstractPoint
+    import math
+
+    segments = []
+    for obj in view.doc.objects:
+        if not (obj.visible and obj.exists):
+            continue
+        tn = type(obj).__name__
+        if tn == "Segment":
+            sa = view.to_screen(obj.a.x, obj.a.y)
+            sb = view.to_screen(obj.b.x, obj.b.y)
+            segments.append((sa, sb))
+        elif tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
+                    "AngleBisector", "AngleDivLine", "PerpBisector"):
+            w, h = view.width(), view.height()
+            try:
+                ts = [obj.project(*view.to_world(QPointF(cx, cy)))
+                      for cx, cy in ((0, 0), (w, 0), (0, h), (w, h))]
+                if tn == "Ray":
+                    p0 = obj.point_at(0.0)
+                    p1 = obj.point_at(max(ts))
+                else:
+                    p0 = obj.point_at(min(ts))
+                    p1 = obj.point_at(max(ts))
+                segments.append((view.to_screen(*p0), view.to_screen(*p1)))
+            except Exception:
+                pass
+        elif tn in ("Circle", "ExprCircle", "ThreePointCircle"):
+            try:
+                n = 36
+                r = obj.r if hasattr(obj, 'r') else 0
+                cx = obj.center.x if hasattr(obj, 'center') else getattr(obj, 'cx', 0)
+                cy = obj.center.y if hasattr(obj, 'center') else getattr(obj, 'cy', 0)
+                for i in range(n):
+                    a0 = 2 * math.pi * i / n
+                    a1 = 2 * math.pi * (i + 1) / n
+                    p0 = view.to_screen(cx + r * math.cos(a0), cy + r * math.sin(a0))
+                    p1 = view.to_screen(cx + r * math.cos(a1), cy + r * math.sin(a1))
+                    segments.append((p0, p1))
+            except Exception:
+                pass
+    return segments
+
+
+def _segments_intersect(p1, p2, p3, p4):
+    """检查两条线段是否相交（叉积法）。"""
+    def cross(o, a, b):
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    d1 = cross(p3, p4, p1)
+    d2 = cross(p3, p4, p2)
+    d3 = cross(p1, p2, p3)
+    d4 = cross(p1, p2, p4)
+    if ((d1 > 0 and d2 < 0) or (d1 < 0 and d2 > 0)) and \
+       ((d3 > 0 and d4 < 0) or (d3 < 0 and d4 > 0)):
+        return True
+    return False
+
+
+def _rect_intersects_segment(rect, seg):
+    """检查矩形是否与线段相交。支持 QPointF 和元组两种格式。"""
+    p1, p2 = seg
+    if hasattr(p1, 'x') and callable(p1.x):
+        x1, y1 = p1.x(), p1.y()
+    else:
+        x1, y1 = p1
+    if hasattr(p2, 'x') and callable(p2.x):
+        x2, y2 = p2.x(), p2.y()
+    else:
+        x2, y2 = p2
+
+    if rect.contains(QPointF(x1, y1)) or rect.contains(QPointF(x2, y2)):
+        return True
+
+    edges = [
+        (QPointF(rect.left(), rect.top()), QPointF(rect.right(), rect.top())),
+        (QPointF(rect.right(), rect.top()), QPointF(rect.right(), rect.bottom())),
+        (QPointF(rect.right(), rect.bottom()), QPointF(rect.left(), rect.bottom())),
+        (QPointF(rect.left(), rect.bottom()), QPointF(rect.left(), rect.top())),
+    ]
+    for e0, e1 in edges:
+        if _segments_intersect((x1, y1), (x2, y2),
+                               (e0.x(), e0.y()), (e1.x(), e1.y())):
+            return True
+    return False
+
+
+def _point_rect_dist(x, y, rect):
+    """点到矩形的最短距离。"""
+    dx = max(rect.left() - x, 0, x - rect.right())
+    dy = max(rect.top() - y, 0, y - rect.bottom())
+    return math.hypot(dx, dy)
+
+
+def _find_label_offset(p, sp, label, view, screen_segments):
+    """为点标签找到不与线相交的最佳偏移位置。"""
+    from PySide6.QtGui import QFontMetricsF
+    from PySide6.QtCore import QRectF, QPointF, QSizeF
+    import math
+
+    fm = QFontMetricsF(p.font())
+    tw = fm.horizontalAdvance(label)
+    th = fm.height()
+
+    candidates = [
+        QPointF(9, -9),              # 右上（默认）
+        QPointF(9, th * 0.7),        # 右下
+        QPointF(-tw - 9, -9),        # 左上
+        QPointF(-tw - 9, th * 0.7),  # 左下
+        QPointF(-tw / 2, -th - 6),   # 正上
+        QPointF(-tw / 2, th + 6),    # 正下
+        QPointF(-tw - 9, -th / 2),   # 正左
+        QPointF(tw / 2 + 9, -th / 2),  # 正右
+    ]
+
+    best_offset = candidates[0]
+    best_score = float('inf')
+
+    for offset in candidates:
+        rect = QRectF(sp + offset, QSizeF(tw, th))
+        score = 0.0
+        for seg in screen_segments:
+            if _rect_intersects_segment(rect, seg):
+                score += 10.0  # 相交惩罚大
+            else:
+                (sx, sy), (ex, ey) = seg
+                d = min(_point_rect_dist(sx, sy, rect),
+                        _point_rect_dist(ex, ey, rect))
+                score += 1.0 / (d + 1.0)
+        if score < best_score:
+            best_score = score
+            best_offset = offset
+
+    return best_offset
+
+
+def _draw_publication_point(p, obj, view, screen_segments):
+    """出版样式：绘制点标签（智能避让，不画圆球）。"""
+    from PySide6.QtGui import QFont, QPen
+    from PySide6.QtCore import Qt, QPointF
+    from geo.points import _point_label
+    import math
+
+    label = getattr(obj, "name", "") or _point_label(obj, view)
+    font = QFont("Times New Roman", 16)
+    font.setItalic(True)
+    p.setFont(font)
+    p.setPen(QPen(QColor("#000000"), 1.0))
+
+    sp = view.to_screen(obj.x, obj.y)
+    offset = _find_label_offset(p, sp, label, view, screen_segments)
+    p.drawText(sp + offset, label)
 
 """导出到课件：一键生成课件包（含向导）。
 修复：bat 中文路径乱码、网页图形拉伸、缺少新对象类型。
@@ -20453,19 +20670,12 @@ def export_courseware(canvas, parent=None):
     wiz = CoursewareWizard(canvas, parent)
     wiz.exec()
 
-"""导出向导：可视化配置导出选项，带实时预览。
-
-选项：
-  视图范围 —— 当前视图 / 适配内容并居中
-  背景内容 —— 网格+坐标轴 / 仅坐标轴 / 无
-  格式     —— PNG（可选分辨率）/ SVG 矢量
-"""
+"""导出向导：可视化配置导出选项，带实时预览。"""
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (QDialog, QRadioButton, QGroupBox, QVBoxLayout,
                                QHBoxLayout, QLabel, QComboBox, QPushButton,
-                               QFileDialog, QMessageBox)
-
+                               QFileDialog, QMessageBox, QCheckBox)
 
 class ExportWizard(QDialog):
     def __init__(self, canvas, parent=None):
@@ -20500,7 +20710,6 @@ class ExportWizard(QDialog):
         root.addLayout(left)
 
         right = QVBoxLayout()
-
         g1 = QGroupBox("视图范围")
         v1 = QVBoxLayout(g1)
         self._r_cur = QRadioButton("当前视图")
@@ -20519,6 +20728,10 @@ class ExportWizard(QDialog):
         v2.addWidget(self._bg_grid)
         v2.addWidget(self._bg_axes)
         v2.addWidget(self._bg_none)
+        
+        self._pub_chk = QCheckBox("出版样式（黑白线稿，无网格，点置顶）")
+        self._pub_chk.setStyleSheet("font-weight: bold; color: #1971c2; margin-top: 8px;")
+        v2.addWidget(self._pub_chk)
         right.addWidget(g2)
 
         g3 = QGroupBox("格式")
@@ -20536,7 +20749,6 @@ class ExportWizard(QDialog):
         res_row.addWidget(self._res)
         v3.addLayout(res_row)
         right.addWidget(g3)
-
         right.addStretch(1)
 
         btns = QHBoxLayout()
@@ -20549,28 +20761,27 @@ class ExportWizard(QDialog):
         btns.addWidget(cancel)
         btns.addWidget(export)
         right.addLayout(btns)
-
         root.addLayout(right)
 
         for w in (self._r_cur, self._r_fit, self._bg_grid, self._bg_axes,
-                  self._bg_none, self._fmt_png, self._fmt_svg):
+                  self._bg_none, self._fmt_png, self._fmt_svg, self._pub_chk):
             w.toggled.connect(self._refresh_preview)
         self._res.currentIndexChanged.connect(self._refresh_preview)
 
     def _bg_mode(self):
-        if self._bg_grid.isChecked():
-            return "grid"
-        if self._bg_axes.isChecked():
-            return "axes"
+        if self._pub_chk.isChecked(): return "none" # 出版样式强制无背景
+        if self._bg_grid.isChecked(): return "grid"
+        if self._bg_axes.isChecked(): return "axes"
         return "none"
 
     def _png_scale(self):
-        return float(self._res.currentText()[0])     # "2× (高清)" → 2.0
+        return float(self._res.currentText()[0])
 
     def _refresh_preview(self):
         self._res.setEnabled(self._fmt_png.isChecked())
         img = self.canvas.render_to_image(
-            fit=self._r_fit.isChecked(), bg_mode=self._bg_mode(), scale=1.0)
+            fit=self._r_fit.isChecked(), bg_mode=self._bg_mode(), scale=1.0,
+            publication=self._pub_chk.isChecked()) # ★ 透传
         pix = QPixmap.fromImage(img).scaled(
             self._preview.size() - QSize(12, 12),
             Qt.AspectRatioMode.KeepAspectRatio,
@@ -20592,11 +20803,12 @@ class ExportWizard(QDialog):
         try:
             self.canvas.export_image(path, fit=self._r_fit.isChecked(),
                                      bg_mode=self._bg_mode(),
-                                     png_scale=self._png_scale())
+                                     png_scale=self._png_scale(),
+                                     publication=self._pub_chk.isChecked()) # ★ 透传
         except Exception as e:
             QMessageBox.warning(self, "导出失败", f"导出图像时出错：\n{e}")
         else:
-            self.accept()          # 导出成功后关闭向导
+            self.accept()
 
 """函数编辑器：支持 显函数/参数方程/极坐标/隐函数，虚拟键盘含 y、=、θ。"""
 from PySide6.QtCore import Qt, QEvent, QPointF
