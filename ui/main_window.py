@@ -1,4 +1,5 @@
 import datetime
+import os
 
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence
 from PySide6.QtCore import Qt
@@ -41,7 +42,7 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.function_dock)
         self.doc.changed.connect(self.function_dock.refresh)
         self.function_dock.refresh()
-
+        self._help_gallery = None
         self._actions: dict[type, QAction] = {}
         self._create_tool_actions()
         self._build_menubar()
@@ -285,15 +286,55 @@ class MainWindow(QMainWindow):
             im.addAction(self._actions[spec["cls"]])
         if not insert_specs:
             e = im.addAction("（暂无插入工具）"); e.setEnabled(False)
-        
+            
+        hm = mb.addMenu("帮助(&H)")
+
+        help_act = QAction("示例项目库(&E)…", self)
+        help_act.setShortcut(QKeySequence("F1"))
+        help_act.triggered.connect(self._show_help_gallery)
+        hm.addAction(help_act)
+
+        about_act = QAction("关于(&A)…", self)
+        about_act.triggered.connect(self._show_about)
+        hm.addAction(about_act)
+                
     def _open_script_library_manager(self):
         from ui.script_library_manager import ScriptLibraryManager
         ScriptLibraryManager(self.doc, self).exec()
         
+    def _show_help_gallery(self):
+        """全屏显示帮助浏览视图。"""
+        from ui.help_gallery import HelpGalleryWidget
+        if hasattr(self, "_help_gallery") and self._help_gallery is not None:
+            self._help_gallery.show()
+            self._help_gallery.raise_()
+            return
+
+        self._help_gallery = HelpGalleryWidget(self.doc, self)
+        self._help_gallery.setGeometry(self.rect())
+        self._help_gallery.closed.connect(self._close_help_gallery)
+        self._help_gallery.project_loaded.connect(self._on_project_loaded)
+        self._help_gallery.show()
+        self._help_gallery.raise_()
+
+    def _close_help_gallery(self):
+        """关闭帮助浏览视图。"""
+        if hasattr(self, "_help_gallery") and self._help_gallery is not None:
+            self._help_gallery.hide()
+
+    def _on_project_loaded(self, path: str):
+        """项目加载完成后的回调。"""
+        self.setWindowTitle(f"{os.path.basename(path)} — GeoSketch")
+                
     def _open_theme_editor(self):
         from ui.theme_editor import ThemeEditorDialog
         ThemeEditorDialog(self).exec()
         
+    def _show_about(self):
+        from ui.about_dialog import AboutDialog
+        dlg = AboutDialog(self)
+        dlg.exec()
+                
     def _on_theme_changed(self, name) -> None:
         app = QApplication.instance()
         assert isinstance(app, QApplication)
