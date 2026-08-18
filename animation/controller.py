@@ -1,45 +1,38 @@
 """动画控制器：QTimer 驱动，主线程安全。"""
 from __future__ import annotations
-from typing import Any, Optional
-
+from typing import Any, Optional, List
 from PySide6.QtCore import QTimer, Signal, QObject, QElapsedTimer
-
 from .clip import AnimationClip
 from .tracks import VariableTrack, GliderTrack, PropertyTrack
 
 
 class AnimationController(QObject):
-    """动画播放控制器。
-
-    - 使用 QTimer 以 60fps 触发
-    - 每帧遍历所有轨道，调用 evaluate(time)
-    - 播放结束后 emit finished 信号
-    """
+    """动画播放控制器。"""
 
     started = Signal()
     stopped = Signal()
-    ticked = Signal(float)   # 当前时间（秒）
+    ticked = Signal(float)
     finished = Signal()
+    clip_changed = Signal()
 
     def __init__(self, doc, canvas):
         super().__init__()
         self.doc = doc
         self.canvas = canvas
-        self.clip = None
+        self.clip: Optional[AnimationClip] = None
         self._current_time = 0.0
         self._playing = False
-        
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        
-        # ★ 修复：使用高精度计时器计算真实 dt
         self._elapsed_timer = QElapsedTimer()
+        self._bound_version = -1
 
-    # ─────────────── 对外接口 ───────────────
     def set_clip(self, clip: AnimationClip) -> None:
         self.clip = clip
         self._current_time = 0.0
+        self._bound_version = -1
+        self.clip_changed.emit()
 
     def play(self) -> None:
         if self.clip is None:
@@ -49,7 +42,6 @@ class AnimationController(QObject):
         self._current_time = 0.0
         self._playing = True
         self._elapsed_timer.start()
-        self._last_elapsed = 0
         self._timer.start()
         self.started.emit()
 
@@ -66,7 +58,6 @@ class AnimationController(QObject):
         self.stopped.emit()
 
     def seek(self, time: float) -> None:
-        """跳转到指定时间并求值。"""
         self._current_time = max(0.0, time)
         if self.clip:
             self._evaluate(self._current_time)
@@ -79,23 +70,18 @@ class AnimationController(QObject):
     def current_time(self) -> float:
         return self._current_time
 
-    # ─────────────── 内部 ───────────────
     def _get_clip_from_doc(self) -> Optional[AnimationClip]:
-        """从文档中获取当前动画片段。"""
         clips = getattr(self.doc, "animations", [])
         if clips:
             return clips[0]
         return None
 
     def _tick(self):
-        if not self._playing or self.clip is None: return
-
-        # ★ 修复：计算真实经过的时间（秒），而不是固定 0.016
+        if not self._playing or self.clip is None:
+            return
         real_dt = self._elapsed_timer.elapsed() / 1000.0
-        self._elapsed_timer.restart() # 重置计时器
-        
+        self._elapsed_timer.restart()
         self._current_time += real_dt * self.clip.speed
-
         total = self.clip.total_duration()
         if self._current_time >= total:
             if self.clip.loop:
@@ -104,14 +90,10 @@ class AnimationController(QObject):
                 self.stop()
                 self.finished.emit()
                 return
-
         self._evaluate(self._current_time)
         self.ticked.emit(self._current_time)
 
-    # animation/controller.py
-
     def _evaluate(self, time: float) -> None:
-        """求值所有轨道。"""
         if self.clip is None:
             return
         self._bind_targets()
@@ -128,15 +110,20 @@ class AnimationController(QObject):
                     moved.append(track.target)
         if moved:
             self.doc.recompute_silent(moved)
+        # ★ 统一刷新一次（VariableTrack 已静默修改，不触发信号）
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
-        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
+        """为 GliderTrack 和 PropertyTrack 绑定目标对象。
+        ★ 只在文档结构变化时重建 obj_map。
+        """
         if self.clip is None:
             return
+        if self._bound_version == self.doc._mutation_count:
+            return
+        self._bound_version = self.doc._mutation_count
         obj_map = {o.id: o for o in self.doc.objects}
         for track in self.clip.tracks:
             if isinstance(track, (GliderTrack, PropertyTrack)):
                 if track.target is None or track.target not in self.doc.objects:
-                    # ★ 使用 getattr 替代直接访问，消除 Pylance 报错
                     track.target = obj_map.get(getattr(track, "obj_id", None))

@@ -1,9 +1,15 @@
 """具体轨道类型：变量轨道、路径轨道、属性轨道。"""
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-
 from .base import AnimationTrack, register_track
 from .keyframe import Keyframe, evaluate_keyframes
+
+# ★ 轨道类型中文名映射
+TRACK_TYPE_NAMES_CN = {
+    "variable": "变量轨道",
+    "glider": "路径轨道（吸附点）",
+    "property": "属性轨道",
+}
 
 
 @register_track("variable")
@@ -26,9 +32,7 @@ class VariableTrack(AnimationTrack):
         var = store.get_var(self.var_name)
         if var is None or getattr(var, "expr", ""):
             return
-        # ★ 静默修改：直接写 var.value，不调用 store.set()
-        # store.set() 会触发 changed → refresh_variables → changed → Canvas.update()
-        # 而 controller._evaluate 末尾已统一调用 refresh_variables，此处不再重复触发
+        # ★ 静默修改，不触发 changed 信号
         if var.value != float(val):
             var.value = float(val)
             store.version += 1
@@ -59,25 +63,15 @@ class VariableTrack(AnimationTrack):
         track.muted = params.get("muted", False)
         return track
 
+
 @register_track("glider")
 class GliderTrack(AnimationTrack):
-    """路径轨道：驱动 PointOnObject 的参数 t。
-
-    绑定 PointOnObject 对象，随时间改变 t ∈ [0,1]。
-    """
+    """路径轨道：驱动 PointOnObject 的参数 t。"""
 
     def __init__(self, obj_id: int, keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
         self.obj_id = obj_id
         self.keyframes = keyframes or []
-
-    def _find_target(self) -> Any:
-        """从文档中查找目标对象。"""
-        from geo.points import PointOnObject
-        from core.document import Document
-        # 通过全局单例获取文档（AnimationController 会传入）
-        # 这里用延迟查找
-        return None  # 由 controller 注入 target
 
     def evaluate(self, time: float) -> None:
         if self.muted or not self.enabled:
@@ -87,7 +81,6 @@ class GliderTrack(AnimationTrack):
         val = evaluate_keyframes(self.keyframes, time)
         if val is None:
             return
-        # 夹到 [0,1]
         t = max(0.0, min(1.0, val))
         if hasattr(self.target, "t"):
             self.target.t = t
@@ -98,7 +91,7 @@ class GliderTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        return f"路径: obj#{self.obj_id}"
+        return f"路径: 对象#{self.obj_id}"
 
     def dump(self) -> dict:
         return {
@@ -121,15 +114,22 @@ class GliderTrack(AnimationTrack):
 
 @register_track("property")
 class PropertyTrack(AnimationTrack):
-    """属性轨道：驱动对象的数值属性（如 TextObject.size、MediaObject.rotation）。
+    """属性轨道：驱动对象的数值属性。"""
 
-    绑定对象 + 属性名，随时间改变属性值。
-    """
     ALLOWED_ATTRS = {
-        "size", "rotation", "width", "height", "opacity", 
-        "color", "text_color", "t"
+        "size", "rotation", "width", "height", "opacity", "t"
     }
-    
+
+    # ★ 属性名中文映射
+    ATTR_NAMES_CN = {
+        "size": "大小",
+        "rotation": "旋转角度",
+        "width": "宽度",
+        "height": "高度",
+        "opacity": "透明度",
+        "t": "参数 t",
+    }
+
     def __init__(self, obj_id: int, attr_name: str,
                  keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -138,16 +138,15 @@ class PropertyTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled: return
-        if self.target is None: return
-        
-        # 校验白名单
+        if self.muted or not self.enabled:
+            return
+        if self.target is None:
+            return
         if self.attr_name not in self.ALLOWED_ATTRS:
             return
-            
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None: return
-        
+        if val is None:
+            return
         if hasattr(self.target, self.attr_name):
             setattr(self.target, self.attr_name, val)
 
@@ -157,7 +156,8 @@ class PropertyTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        return f"属性: {self.attr_name} (obj#{self.obj_id})"
+        cn_name = self.ATTR_NAMES_CN.get(self.attr_name, self.attr_name)
+        return f"属性: {cn_name} (对象#{self.obj_id})"
 
     def dump(self) -> dict:
         return {
