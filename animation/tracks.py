@@ -8,10 +8,7 @@ from .keyframe import Keyframe, evaluate_keyframes
 
 @register_track("variable")
 class VariableTrack(AnimationTrack):
-    """变量轨道：驱动 VariableStore 中的变量。
-
-    绑定变量名，随时间改变变量值。
-    """
+    """变量轨道：驱动 VariableStore 中的变量。"""
 
     def __init__(self, var_name: str, keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -19,19 +16,22 @@ class VariableTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled: return
+        if self.muted or not self.enabled:
+            return
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None: return
-        
+        if val is None:
+            return
         from core.variables import get_store
         store = get_store()
         var = store.get_var(self.var_name)
-        
-        # ★ 修复：拦截从动变量，避免静默失效
         if var is None or getattr(var, "expr", ""):
-            return 
-            
-        store.set(self.var_name, val)
+            return
+        # ★ 静默修改：直接写 var.value，不调用 store.set()
+        # store.set() 会触发 changed → refresh_variables → changed → Canvas.update()
+        # 而 controller._evaluate 末尾已统一调用 refresh_variables，此处不再重复触发
+        if var.value != float(val):
+            var.value = float(val)
+            store.version += 1
 
     def duration(self) -> float:
         if not self.keyframes:
@@ -58,7 +58,6 @@ class VariableTrack(AnimationTrack):
         track.enabled = params.get("enabled", True)
         track.muted = params.get("muted", False)
         return track
-
 
 @register_track("glider")
 class GliderTrack(AnimationTrack):
