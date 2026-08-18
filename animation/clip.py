@@ -17,10 +17,11 @@ class AnimationClip:
         self.duration: float = 5.0    # 总时长（秒）
 
     def total_duration(self) -> float:
-        """取所有轨道的最大时长。"""
+        """取所有轨道的最大时长。无有效时长时兜底返回 self.duration。"""
         if not self.tracks:
             return self.duration
-        return max(t.duration() for t in self.tracks)
+        d = max(t.duration() for t in self.tracks)
+        return d if d > 1e-6 else self.duration
 
     def add_track(self, track: AnimationTrack) -> None:
         self.tracks.append(track)
