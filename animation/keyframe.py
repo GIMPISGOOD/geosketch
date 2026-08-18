@@ -31,13 +31,34 @@ class EaseInOutInterpolator(Interpolator):
 
 
 class BezierInterpolator(Interpolator):
-    """三次贝塞尔插值（简化：固定控制点 (0.42,0,0.58,1)）。"""
+    """三次贝塞尔插值（CSS cubic-bezier(0.42, 0, 0.58, 1)）。
+    ★ 修复：原实现直接计算 x(t) 作为进度值，数学上是错误的。
+    正确做法：给定时间比例 t，用牛顿法求解 x(u)=t 得到参数 u，再返回 y(u)。
+    """
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
-        # cubic-bezier(0.42, 0, 0.58, 1)
-        u = 1.0 - t
-        s = 3 * u * u * t * 0.42 + 3 * u * t * t * 0.58 + t * t * t
-        return v0 + (v1 - v0) * s
+        if t <= 0.0:
+            return v0
+        if t >= 1.0:
+            return v1
+        # 控制点：P0=(0,0), P1=(0.42,0), P2=(0.58,1), P3=(1,1)
+        # x(u) = 3(1-u)²u·0.42 + 3(1-u)u²·0.58 + u³
+        # y(u) = 3(1-u)u² + u³
+        # 牛顿法求解 x(u) = t
+        u = t  # 初始猜测
+        for _ in range(8):
+            uu = 1.0 - u
+            x = 3.0 * uu * uu * u * 0.42 + 3.0 * uu * u * u * 0.58 + u * u * u
+            # x'(u) = 3(1-u)²(P1x-P0x) + 6(1-u)u(P2x-P1x) + 3u²(P3x-P2x)
+            #       = 1.26(1-u)² + 0.96(1-u)u + 1.26u²
+            dx = 1.26 * uu * uu + 0.96 * uu * u + 1.26 * u * u
+            if abs(dx) < 1e-12:
+                break
+            u -= (x - t) / dx
+            u = max(0.0, min(1.0, u))
+        uu = 1.0 - u
+        y = 3.0 * uu * u * u + u * u * u
+        return v0 + (v1 - v0) * y
 
 
 class StepInterpolator(Interpolator):
