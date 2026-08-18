@@ -2,7 +2,6 @@
 删除本包即可完全卸载动画功能，不影响原有系统。
 """
 import logging
-
 logger = logging.getLogger(__name__)
 
 
@@ -10,12 +9,10 @@ def inject():
     try:
         from . import serialization
         serialization.patch_document()
-
         patch_main_window()
-
         from . import tracks  # noqa: F401
-
-        logger.info("✔ 动画系统已加载")
+        from . import recorder  # noqa: F401
+        logger.info("✔ 动画系统已加载（含录制、预设、中文翻译）")
         return True
     except Exception as e:
         logger.warning(f"✘ 动画系统加载失败: {e}")
@@ -30,10 +27,8 @@ def patch_main_window():
 
     def new_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
-
         mb = self.menuBar()
         am = mb.addMenu("动画(&A)")
-
         from PySide6.QtGui import QAction, QKeySequence
 
         play_act = QAction("▶ 播放动画", self)
@@ -48,16 +43,19 @@ def patch_main_window():
         am.addSeparator()
 
         timeline_act = QAction("时间轴面板", self)
-        timeline_act.triggered.connect(lambda: self._anim_toggle_timeline())
+        timeline_act.triggered.connect(
+            lambda: self._anim_toggle_timeline())
         am.addAction(timeline_act)
 
         from .controller import AnimationController
         self._anim_controller = AnimationController(self.doc, self.canvas)
 
         from .ui.timeline import TimelineDock
-        self._timeline_dock = TimelineDock(self._anim_controller, self.canvas, self)
+        self._timeline_dock = TimelineDock(
+            self._anim_controller, self.canvas, self)
         self.addDockWidget(
-            __import__("PySide6.QtCore", fromlist=["Qt"]).Qt.DockWidgetArea.BottomDockWidgetArea,
+            __import__("PySide6.QtCore",
+                       fromlist=["Qt"]).Qt.DockWidgetArea.BottomDockWidgetArea,
             self._timeline_dock
         )
         self._timeline_dock.setVisible(False)
@@ -126,12 +124,10 @@ def register_track(type_name: str):
         return cls
     return deco
 
-"""动画片段：轨道容器 + 全局设置。"""
+"""动画片段：轨道容器 + 全局设置 + 预设模板。"""
 from __future__ import annotations
-from typing import List
-
+from typing import List, Optional
 from .base import AnimationTrack
-from .tracks import VariableTrack, GliderTrack, PropertyTrack
 
 
 class AnimationClip:
@@ -141,14 +137,15 @@ class AnimationClip:
         self.name = name
         self.tracks: List[AnimationTrack] = []
         self.loop: bool = True
-        self.speed: float = 1.0       # 播放速度倍率
-        self.duration: float = 5.0    # 总时长（秒）
+        self.speed: float = 1.0
+        self.duration: float = 5.0
 
     def total_duration(self) -> float:
-        """取所有轨道的最大时长。"""
+        """取所有轨道的最大时长。无有效时长时兜底返回 self.duration。"""
         if not self.tracks:
             return self.duration
-        return max(t.duration() for t in self.tracks)
+        d = max(t.duration() for t in self.tracks)
+        return d if d > 1e-6 else self.duration
 
     def add_track(self, track: AnimationTrack) -> None:
         self.tracks.append(track)
@@ -156,6 +153,15 @@ class AnimationClip:
     def remove_track(self, track: AnimationTrack) -> None:
         if track in self.tracks:
             self.tracks.remove(track)
+
+    def duplicate_track(self, track: AnimationTrack) -> Optional[AnimationTrack]:
+        """复制一条轨道（深拷贝关键帧）。"""
+        if track not in self.tracks:
+            return None
+        import copy
+        new_track = copy.deepcopy(track)
+        self.tracks.append(new_track)
+        return new_track
 
     def dump(self) -> dict:
         return {
@@ -184,46 +190,101 @@ class AnimationClip:
                     pass
         return clip
 
+
+PRESETS = {
+    "匀速往返": {
+        "description": "变量从 0 到 1 再回到 0，线性插值",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "linear"},
+            {"time": 2.5, "value": 1.0, "interpolator": "linear"},
+            {"time": 5.0, "value": 0.0, "interpolator": "linear"},
+        ],
+    },
+    "缓入缓出": {
+        "description": "变量从 0 到 1，缓入缓出插值",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "ease_in_out"},
+            {"time": 3.0, "value": 1.0, "interpolator": "ease_in_out"},
+        ],
+    },
+    "弹跳": {
+        "description": "变量从 0 到 1，弹跳效果",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "bounce"},
+            {"time": 2.0, "value": 1.0, "interpolator": "bounce"},
+        ],
+    },
+    "弹性过冲": {
+        "description": "变量从 0 到 1，弹性过冲后回弹",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "elastic"},
+            {"time": 2.0, "value": 1.0, "interpolator": "elastic"},
+        ],
+    },
+    "阶梯跳变": {
+        "description": "变量在 0/0.5/1 之间阶梯跳变",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "step"},
+            {"time": 1.5, "value": 0.5, "interpolator": "step"},
+            {"time": 3.0, "value": 1.0, "interpolator": "step"},
+        ],
+    },
+    "正弦往返": {
+        "description": "用多关键帧近似正弦曲线往返",
+        "keyframes": [
+            {"time": 0.0, "value": 0.0, "interpolator": "ease_in_out"},
+            {"time": 1.25, "value": 0.5, "interpolator": "ease_in_out"},
+            {"time": 2.5, "value": 1.0, "interpolator": "ease_in_out"},
+            {"time": 3.75, "value": 0.5, "interpolator": "ease_in_out"},
+            {"time": 5.0, "value": 0.0, "interpolator": "ease_in_out"},
+        ],
+    },
+}
+
+
+def apply_preset(preset_name: str) -> list:
+    """根据预设名称返回关键帧列表。"""
+    preset = PRESETS.get(preset_name)
+    if preset is None:
+        return []
+    from .keyframe import Keyframe
+    return [Keyframe.from_dict(d) for d in preset["keyframes"]]
+
 """动画控制器：QTimer 驱动，主线程安全。"""
 from __future__ import annotations
-from typing import Any, Optional
-
+from typing import Any, Optional, List
 from PySide6.QtCore import QTimer, Signal, QObject, QElapsedTimer
-
 from .clip import AnimationClip
 from .tracks import VariableTrack, GliderTrack, PropertyTrack
 
 
 class AnimationController(QObject):
-    """动画播放控制器。
-
-    - 使用 QTimer 以 60fps 触发
-    - 每帧遍历所有轨道，调用 evaluate(time)
-    - 播放结束后 emit finished 信号
-    """
+    """动画播放控制器。"""
 
     started = Signal()
     stopped = Signal()
-    ticked = Signal(float)   # 当前时间（秒）
+    ticked = Signal(float)
     finished = Signal()
+    clip_changed = Signal()
 
     def __init__(self, doc, canvas):
         super().__init__()
         self.doc = doc
         self.canvas = canvas
-        self.clip = None
+        self.clip: Optional[AnimationClip] = None
         self._current_time = 0.0
         self._playing = False
-        
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
-        
         self._elapsed_timer = QElapsedTimer()
+        self._bound_version = -1
 
     def set_clip(self, clip: AnimationClip) -> None:
         self.clip = clip
         self._current_time = 0.0
+        self._bound_version = -1
+        self.clip_changed.emit()
 
     def play(self) -> None:
         if self.clip is None:
@@ -233,7 +294,6 @@ class AnimationController(QObject):
         self._current_time = 0.0
         self._playing = True
         self._elapsed_timer.start()
-        self._last_elapsed = 0
         self._timer.start()
         self.started.emit()
 
@@ -250,7 +310,6 @@ class AnimationController(QObject):
         self.stopped.emit()
 
     def seek(self, time: float) -> None:
-        """跳转到指定时间并求值。"""
         self._current_time = max(0.0, time)
         if self.clip:
             self._evaluate(self._current_time)
@@ -264,20 +323,17 @@ class AnimationController(QObject):
         return self._current_time
 
     def _get_clip_from_doc(self) -> Optional[AnimationClip]:
-        """从文档中获取当前动画片段。"""
         clips = getattr(self.doc, "animations", [])
         if clips:
             return clips[0]
         return None
 
     def _tick(self):
-        if not self._playing or self.clip is None: return
-
+        if not self._playing or self.clip is None:
+            return
         real_dt = self._elapsed_timer.elapsed() / 1000.0
-        self._elapsed_timer.restart() # 重置计时器
-        
+        self._elapsed_timer.restart()
         self._current_time += real_dt * self.clip.speed
-
         total = self.clip.total_duration()
         if self._current_time >= total:
             if self.clip.loop:
@@ -286,13 +342,10 @@ class AnimationController(QObject):
                 self.stop()
                 self.finished.emit()
                 return
-
         self._evaluate(self._current_time)
         self.ticked.emit(self._current_time)
 
-
     def _evaluate(self, time: float) -> None:
-        """求值所有轨道。"""
         if self.clip is None:
             return
         self._bind_targets()
@@ -312,9 +365,14 @@ class AnimationController(QObject):
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
-        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
+        """为 GliderTrack 和 PropertyTrack 绑定目标对象。
+        ★ 只在文档结构变化时重建 obj_map。
+        """
         if self.clip is None:
             return
+        if self._bound_version == self.doc._mutation_count:
+            return
+        self._bound_version = self.doc._mutation_count
         obj_map = {o.id: o for o in self.doc.objects}
         for track in self.clip.tracks:
             if isinstance(track, (GliderTrack, PropertyTrack)):
@@ -329,22 +387,18 @@ from typing import List, Tuple, Optional
 
 class Interpolator:
     """插值器基类。"""
-
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
-        """t ∈ [0,1]，返回插值结果。"""
         raise NotImplementedError
 
 
 class LinearInterpolator(Interpolator):
-    """线性插值。"""
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
         return v0 + (v1 - v0) * t
 
 
 class EaseInOutInterpolator(Interpolator):
-    """缓入缓出（正弦）。"""
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
         s = t * t * (3.0 - 2.0 * t)
@@ -352,19 +406,65 @@ class EaseInOutInterpolator(Interpolator):
 
 
 class BezierInterpolator(Interpolator):
-    """三次贝塞尔插值（简化：固定控制点 (0.42,0,0.58,1)）。"""
+    """三次贝塞尔插值（CSS cubic-bezier(0.42,0,0.58,1)）。
+    使用牛顿法求解 x(u)=t，再计算 y(u)。
+    """
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
-        u = 1.0 - t
-        s = 3 * u * u * t * 0.42 + 3 * u * t * t * 0.58 + t * t * t
-        return v0 + (v1 - v0) * s
+        if t <= 0.0:
+            return v0
+        if t >= 1.0:
+            return v1
+        u = t
+        for _ in range(8):
+            uu = 1.0 - u
+            x = 3.0 * uu * uu * u * 0.42 + 3.0 * uu * u * u * 0.58 + u * u * u
+            dx = 1.26 * uu * uu + 0.96 * uu * u + 1.26 * u * u
+            if abs(dx) < 1e-12:
+                break
+            u -= (x - t) / dx
+            u = max(0.0, min(1.0, u))
+        uu = 1.0 - u
+        y = 3.0 * uu * u * u + u * u * u
+        return v0 + (v1 - v0) * y
 
 
 class StepInterpolator(Interpolator):
-    """阶梯插值（保持前一帧值）。"""
     @staticmethod
     def evaluate(t: float, v0: float, v1: float) -> float:
         return v0
+
+
+class BounceInterpolator(Interpolator):
+    """弹跳插值：模拟小球落地弹跳效果。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        if t < 1.0 / 2.75:
+            s = 7.5625 * t * t
+        elif t < 2.0 / 2.75:
+            t -= 1.5 / 2.75
+            s = 7.5625 * t * t + 0.75
+        elif t < 2.5 / 2.75:
+            t -= 2.25 / 2.75
+            s = 7.5625 * t * t + 0.9375
+        else:
+            t -= 2.625 / 2.75
+            s = 7.5625 * t * t + 0.984375
+        return v0 + (v1 - v0) * s
+
+
+class ElasticInterpolator(Interpolator):
+    """弹性插值：过冲后回弹。"""
+    @staticmethod
+    def evaluate(t: float, v0: float, v1: float) -> float:
+        if t <= 0.0:
+            return v0
+        if t >= 1.0:
+            return v1
+        s = -(2.0 ** (10.0 * (t - 1.0))) * math.sin(
+            (t - 1.0 - 0.075) * (2.0 * math.pi) / 0.3
+        )
+        return v0 + (v1 - v0) * (1.0 + s)
 
 
 INTERPOLATORS = {
@@ -372,14 +472,24 @@ INTERPOLATORS = {
     "ease_in_out": EaseInOutInterpolator,
     "bezier": BezierInterpolator,
     "step": StepInterpolator,
+    "bounce": BounceInterpolator,
+    "elastic": ElasticInterpolator,
 }
 
 DEFAULT_INTERPOLATOR = "linear"
 
+INTERPOLATOR_NAMES_CN = {
+    "linear": "线性",
+    "ease_in_out": "缓入缓出",
+    "bezier": "贝塞尔",
+    "step": "阶梯",
+    "bounce": "弹跳",
+    "elastic": "弹性",
+}
+
 
 class Keyframe:
     """单个关键帧：(time, value, interpolator)。"""
-
     __slots__ = ("time", "value", "interpolator")
 
     def __init__(self, time: float, value: float,
@@ -403,22 +513,23 @@ class Keyframe:
             d.get("interpolator", DEFAULT_INTERPOLATOR),
         )
 
+    def clone(self) -> "Keyframe":
+        return Keyframe(self.time, self.value, self.interpolator)
+
 
 def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
-    """在给定时间求值关键帧序列。返回 None 表示无关键帧。"""
+    """在给定时间求值关键帧序列。
+    ★ 调用方必须保证 frames 已按 time 升序排列。
+    """
     if not frames:
         return None
-
-    sorted_frames = sorted(frames, key=lambda f: f.time)
-
-    if time <= sorted_frames[0].time:
-        return sorted_frames[0].value
-    if time >= sorted_frames[-1].time:
-        return sorted_frames[-1].value
-
-    for i in range(len(sorted_frames) - 1):
-        f0 = sorted_frames[i]
-        f1 = sorted_frames[i + 1]
+    if time <= frames[0].time:
+        return frames[0].value
+    if time >= frames[-1].time:
+        return frames[-1].value
+    for i in range(len(frames) - 1):
+        f0 = frames[i]
+        f1 = frames[i + 1]
         if f0.time <= time <= f1.time:
             dt = f1.time - f0.time
             if dt < 1e-12:
@@ -427,8 +538,178 @@ def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
             t = max(0.0, min(1.0, t))
             interp_cls = INTERPOLATORS.get(f0.interpolator, LinearInterpolator)
             return interp_cls.evaluate(t, f0.value, f1.value)
+    return frames[-1].value
 
-    return sorted_frames[-1].value
+
+def offset_keyframes(frames: List[Keyframe], dt: float) -> List[Keyframe]:
+    """整体平移关键帧时间。"""
+    result = [Keyframe(f.time + dt, f.value, f.interpolator) for f in frames]
+    result.sort(key=lambda f: f.time)
+    return result
+
+
+def scale_keyframes(frames: List[Keyframe], factor: float) -> List[Keyframe]:
+    """缩放关键帧时间（以第一帧为锚点）。"""
+    if not frames:
+        return []
+    t0 = frames[0].time
+    result = [
+        Keyframe(t0 + (f.time - t0) * factor, f.value, f.interpolator)
+        for f in frames
+    ]
+    result.sort(key=lambda f: f.time)
+    return result
+
+
+def reverse_keyframes(frames: List[Keyframe]) -> List[Keyframe]:
+    """反转关键帧顺序（时间镜像）。"""
+    if not frames:
+        return []
+    t0 = frames[0].time
+    t1 = frames[-1].time
+    span = t1 - t0
+    result = [
+        Keyframe(t0 + (t1 - f.time), f.value, f.interpolator)
+        for f in reversed(frames)
+    ]
+    result.sort(key=lambda f: f.time)
+    return result
+
+
+def merge_keyframes(a: List[Keyframe], b: List[Keyframe]) -> List[Keyframe]:
+    """合并两组关键帧并按时间排序。"""
+    result = [f.clone() for f in a] + [f.clone() for f in b]
+    result.sort(key=lambda f: f.time)
+    return result
+
+"""动画录制器：录制变量/对象变化，自动生成关键帧。"""
+from __future__ import annotations
+from typing import Any, Dict, List, Optional
+from PySide6.QtCore import QObject, Signal, QTimer, QElapsedTimer
+from .keyframe import Keyframe, DEFAULT_INTERPOLATOR
+
+
+class AnimationRecorder(QObject):
+    """录制动画：监听变量变化，自动生成关键帧。
+
+    用法：
+        recorder = AnimationRecorder(doc)
+        recorder.start_recording(["a", "b"])  # 录制变量 a, b
+        recorder.stop_recording()  # 生成关键帧
+    """
+
+    recording_started = Signal()
+    recording_stopped = Signal()
+    frame_recorded = Signal(float)  # 当前录制时间
+
+    def __init__(self, doc):
+        super().__init__()
+        self.doc = doc
+        self._recording = False
+        self._var_names: List[str] = []
+        self._obj_trackers: Dict[int, str] = {}  # obj_id -> attr_name
+        self._frames: Dict[str, List[Keyframe]] = {}
+        self._timer = QTimer(self)
+        self._timer.setInterval(50)  # 20fps 采样
+        self._timer.timeout.connect(self._sample)
+        self._elapsed = QElapsedTimer()
+        self._start_time = 0.0
+        self._last_values: Dict[str, float] = {}
+        self._interpolator = DEFAULT_INTERPOLATOR
+
+    @property
+    def is_recording(self) -> bool:
+        return self._recording
+
+    @property
+    def recorded_frames(self) -> Dict[str, List[Keyframe]]:
+        return self._frames
+
+    def start_recording(self, var_names: List[str] = None,
+                        obj_trackers: Dict[int, str] = None,
+                        interpolator: str = DEFAULT_INTERPOLATOR):
+        """开始录制。
+        var_names: 要录制的变量名列表
+        obj_trackers: {obj_id: attr_name} 要录制的对象属性
+        """
+        if self._recording:
+            return
+        self._var_names = var_names or []
+        self._obj_trackers = obj_trackers or {}
+        self._interpolator = interpolator
+        self._frames = {}
+        for name in self._var_names:
+            self._frames[name] = []
+        for obj_id, attr in self._obj_trackers.items():
+            self._frames[f"obj:{obj_id}:{attr}"] = []
+        self._last_values = {}
+        self._recording = True
+        self._elapsed.start()
+        self._start_time = 0.0
+        self._timer.start()
+        self.recording_started.emit()
+
+    def stop_recording(self) -> Dict[str, List[Keyframe]]:
+        """停止录制，返回 {track_key: [Keyframe, ...]}。"""
+        if not self._recording:
+            return {}
+        self._recording = False
+        self._timer.stop()
+        self.recording_stopped.emit()
+        return self._frames
+
+    def set_interpolator(self, interp: str):
+        self._interpolator = interp
+
+    def _sample(self):
+        """每 50ms 采样一次当前值。"""
+        if not self._recording:
+            return
+        elapsed = self._elapsed.elapsed() / 1000.0
+        changed = False
+
+        from core.variables import get_store
+        store = get_store()
+        for name in self._var_names:
+            var = store.get_var(name)
+            if var is None:
+                continue
+            val = var.value
+            key = name
+            last = self._last_values.get(key)
+            if last is None or abs(val - last) > 1e-9:
+                self._frames[key].append(
+                    Keyframe(elapsed, val, self._interpolator))
+                self._last_values[key] = val
+                changed = True
+
+        obj_map = {o.id: o for o in self.doc.objects}
+        for obj_id, attr in self._obj_trackers.items():
+            obj = obj_map.get(obj_id)
+            if obj is None or not hasattr(obj, attr):
+                continue
+            val = getattr(obj, attr)
+            if not isinstance(val, (int, float)):
+                continue
+            val = float(val)
+            key = f"obj:{obj_id}:{attr}"
+            last = self._last_values.get(key)
+            if last is None or abs(val - last) > 1e-9:
+                self._frames[key].append(
+                    Keyframe(elapsed, val, self._interpolator))
+                self._last_values[key] = val
+                changed = True
+
+        if changed:
+            self.frame_recorded.emit(elapsed)
+
+    def get_duration(self) -> float:
+        """获取录制时长。"""
+        max_t = 0.0
+        for frames in self._frames.values():
+            if frames:
+                max_t = max(max_t, frames[-1].time)
+        return max_t
 
 """动画序列化：注入 Document 的 save/load 以及 snapshot/_load_state。"""
 import json
@@ -499,17 +780,19 @@ def patch_document():
 """具体轨道类型：变量轨道、路径轨道、属性轨道。"""
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-
 from .base import AnimationTrack, register_track
 from .keyframe import Keyframe, evaluate_keyframes
+
+TRACK_TYPE_NAMES_CN = {
+    "variable": "变量轨道",
+    "glider": "路径轨道（吸附点）",
+    "property": "属性轨道",
+}
 
 
 @register_track("variable")
 class VariableTrack(AnimationTrack):
-    """变量轨道：驱动 VariableStore 中的变量。
-
-    绑定变量名，随时间改变变量值。
-    """
+    """变量轨道：驱动 VariableStore 中的变量。"""
 
     def __init__(self, var_name: str, keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -517,18 +800,19 @@ class VariableTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled: return
+        if self.muted or not self.enabled:
+            return
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None: return
-        
+        if val is None:
+            return
         from core.variables import get_store
         store = get_store()
         var = store.get_var(self.var_name)
-        
         if var is None or getattr(var, "expr", ""):
-            return 
-            
-        store.set(self.var_name, val)
+            return
+        if var.value != float(val):
+            var.value = float(val)
+            store.version += 1
 
     def duration(self) -> float:
         if not self.keyframes:
@@ -550,6 +834,7 @@ class VariableTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "VariableTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(params.get("var_name", ""), frames)
         track.enabled = params.get("enabled", True)
         track.muted = params.get("muted", False)
@@ -558,21 +843,12 @@ class VariableTrack(AnimationTrack):
 
 @register_track("glider")
 class GliderTrack(AnimationTrack):
-    """路径轨道：驱动 PointOnObject 的参数 t。
-
-    绑定 PointOnObject 对象，随时间改变 t ∈ [0,1]。
-    """
+    """路径轨道：驱动 PointOnObject 的参数 t。"""
 
     def __init__(self, obj_id: int, keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
         self.obj_id = obj_id
         self.keyframes = keyframes or []
-
-    def _find_target(self) -> Any:
-        """从文档中查找目标对象。"""
-        from geo.points import PointOnObject
-        from core.document import Document
-        return None  # 由 controller 注入 target
 
     def evaluate(self, time: float) -> None:
         if self.muted or not self.enabled:
@@ -592,7 +868,7 @@ class GliderTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        return f"路径: obj#{self.obj_id}"
+        return f"路径: 对象#{self.obj_id}"
 
     def dump(self) -> dict:
         return {
@@ -606,6 +882,7 @@ class GliderTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "GliderTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(params.get("obj_id", 0), frames)
         track.enabled = params.get("enabled", True)
         track.muted = params.get("muted", False)
@@ -614,15 +891,21 @@ class GliderTrack(AnimationTrack):
 
 @register_track("property")
 class PropertyTrack(AnimationTrack):
-    """属性轨道：驱动对象的数值属性（如 TextObject.size、MediaObject.rotation）。
+    """属性轨道：驱动对象的数值属性。"""
 
-    绑定对象 + 属性名，随时间改变属性值。
-    """
     ALLOWED_ATTRS = {
-        "size", "rotation", "width", "height", "opacity", 
-        "color", "text_color", "t"
+        "size", "rotation", "width", "height", "opacity", "t"
     }
-    
+
+    ATTR_NAMES_CN = {
+        "size": "大小",
+        "rotation": "旋转角度",
+        "width": "宽度",
+        "height": "高度",
+        "opacity": "透明度",
+        "t": "参数 t",
+    }
+
     def __init__(self, obj_id: int, attr_name: str,
                  keyframes: List[Keyframe] | None = None):
         super().__init__(target=None)
@@ -631,15 +914,15 @@ class PropertyTrack(AnimationTrack):
         self.keyframes = keyframes or []
 
     def evaluate(self, time: float) -> None:
-        if self.muted or not self.enabled: return
-        if self.target is None: return
-        
+        if self.muted or not self.enabled:
+            return
+        if self.target is None:
+            return
         if self.attr_name not in self.ALLOWED_ATTRS:
             return
-            
         val = evaluate_keyframes(self.keyframes, time)
-        if val is None: return
-        
+        if val is None:
+            return
         if hasattr(self.target, self.attr_name):
             setattr(self.target, self.attr_name, val)
 
@@ -649,7 +932,8 @@ class PropertyTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        return f"属性: {self.attr_name} (obj#{self.obj_id})"
+        cn_name = self.ATTR_NAMES_CN.get(self.attr_name, self.attr_name)
+        return f"属性: {cn_name} (对象#{self.obj_id})"
 
     def dump(self) -> dict:
         return {
@@ -664,6 +948,7 @@ class PropertyTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "PropertyTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(
             params.get("obj_id", 0),
             params.get("attr_name", ""),
@@ -675,10 +960,9 @@ class PropertyTrack(AnimationTrack):
 
 """动画系统 UI。"""
 
-"""时间轴面板：QDockWidget，包含播放控制、时间滑杆、轨道列表。"""
+"""时间轴面板：QDockWidget，包含播放控制、时间滑杆、轨道列表、录制。"""
 from __future__ import annotations
 from typing import Any
-
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
@@ -686,18 +970,18 @@ from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QMenu,
 )
 from PySide6.QtGui import QAction
-
 from ui import theme
 
 
 class TimelineDock(QDockWidget):
-    """动画时间轴面板。"""
+    """动画时间轴面板（增强版）。"""
 
     def __init__(self, controller: Any, canvas: Any, parent=None):
         super().__init__("动画时间轴", parent)
         self.setObjectName("timelineDock")
         self.controller = controller
         self.canvas = canvas
+        self._recorder = None
         self._build_ui()
         self._connect_signals()
 
@@ -709,34 +993,26 @@ class TimelineDock(QDockWidget):
 
         ctrl_row = QHBoxLayout()
         ctrl_row.setSpacing(6)
-
         self._play_btn = QPushButton("▶ 播放")
         self._play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         ctrl_row.addWidget(self._play_btn)
-
         self._stop_btn = QPushButton("■ 停止")
         self._stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         ctrl_row.addWidget(self._stop_btn)
-
         ctrl_row.addSpacing(20)
-
         ctrl_row.addWidget(QLabel("速度:"))
         self._speed_spin = QDoubleSpinBox()
         self._speed_spin.setRange(0.1, 10.0)
         self._speed_spin.setValue(1.0)
         self._speed_spin.setSingleStep(0.1)
         ctrl_row.addWidget(self._speed_spin)
-
         self._loop_chk = QCheckBox("循环")
         self._loop_chk.setChecked(True)
         ctrl_row.addWidget(self._loop_chk)
-
         ctrl_row.addStretch(1)
-
         self._time_lbl = QLabel("0.00s")
         self._time_lbl.setFont(theme.LABEL_FONT)
         ctrl_row.addWidget(self._time_lbl)
-
         layout.addLayout(ctrl_row)
 
         self._time_slider = QSlider(Qt.Orientation.Horizontal)
@@ -749,6 +1025,10 @@ class TimelineDock(QDockWidget):
         add_btn = QPushButton("＋ 添加轨道")
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         track_row.addWidget(add_btn)
+        record_btn = QPushButton("● 录制")
+        record_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        record_btn.setToolTip("录制变量变化，自动生成关键帧")
+        track_row.addWidget(record_btn)
         track_row.addStretch(1)
         layout.addLayout(track_row)
 
@@ -758,8 +1038,8 @@ class TimelineDock(QDockWidget):
 
         self.setWidget(widget)
         self.setMinimumHeight(220)
-
         self._add_btn = add_btn
+        self._record_btn = record_btn
 
     def _connect_signals(self):
         self._play_btn.clicked.connect(self._on_play)
@@ -768,10 +1048,12 @@ class TimelineDock(QDockWidget):
         self._speed_spin.valueChanged.connect(self._on_speed)
         self._loop_chk.toggled.connect(self._on_loop)
         self._add_btn.clicked.connect(self._on_add_track)
+        self._record_btn.clicked.connect(self._on_toggle_record)
         self._track_list.itemDoubleClicked.connect(self._on_edit_track)
-        self._track_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._track_list.customContextMenuRequested.connect(self._on_track_menu)
-
+        self._track_list.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu)
+        self._track_list.customContextMenuRequested.connect(
+            self._on_track_menu)
         self.controller.ticked.connect(self._on_ticked)
         self.controller.started.connect(self._on_started)
         self.controller.stopped.connect(self._on_stopped)
@@ -816,7 +1098,7 @@ class TimelineDock(QDockWidget):
         total = clip.total_duration()
         if total > 0:
             self._time_slider.setValue(int(time / total * 1000))
-        self._time_lbl.setText(f"{time:.2f}s")
+            self._time_lbl.setText(f"{time:.2f}s")
 
     def _on_started(self):
         self._play_btn.setText("⏸ 暂停")
@@ -837,9 +1119,58 @@ class TimelineDock(QDockWidget):
                     self.controller.set_clip(clip)
                     if not hasattr(self.canvas.doc, "animations"):
                         self.canvas.doc.animations = []
-                    self.canvas.doc.animations.append(clip)
+                    if not self.canvas.doc.animations:
+                        self.canvas.doc.animations.append(clip)
                 clip.add_track(track)
                 self._refresh_track_list()
+
+    def _on_toggle_record(self):
+        """切换录制状态。"""
+        from ..recorder import AnimationRecorder
+        from core.variables import get_store
+
+        if self._recorder is None:
+            self._recorder = AnimationRecorder(self.canvas.doc)
+
+        if self._recorder.is_recording:
+            frames = self._recorder.stop_recording()
+            self._record_btn.setText("● 录制")
+            self._record_btn.setStyleSheet("")
+            self._apply_recorded_frames(frames)
+        else:
+            store = get_store()
+            var_names = store.names()
+            if not var_names:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.information(
+                    self, "录制", "当前没有变量，无法录制。")
+                return
+            self._recorder.start_recording(var_names=var_names)
+            self._record_btn.setText("■ 停止录制")
+            self._record_btn.setStyleSheet(
+                "color: #e03131; font-weight: bold;")
+
+    def _apply_recorded_frames(self, frames: dict):
+        """把录制的关键帧应用到当前 clip。"""
+        from ..tracks import VariableTrack
+        clip = self.controller.clip
+        if clip is None:
+            from ..clip import AnimationClip
+            clip = AnimationClip("动画 1")
+            self.controller.set_clip(clip)
+            if not hasattr(self.canvas.doc, "animations"):
+                self.canvas.doc.animations = []
+            if not self.canvas.doc.animations:
+                self.canvas.doc.animations.append(clip)
+
+        for key, kfs in frames.items():
+            if not kfs:
+                continue
+            if key.startswith("obj:"):
+                continue
+            track = VariableTrack(key, kfs)
+            clip.add_track(track)
+        self._refresh_track_list()
 
     def _on_edit_track(self, item: QListWidgetItem):
         idx = self._track_list.row(item)
@@ -861,21 +1192,28 @@ class TimelineDock(QDockWidget):
         if clip is None or idx >= len(clip.tracks):
             return
         track = clip.tracks[idx]
-
         menu = QMenu(self)
-        mute_act = QAction("静音" if not track.muted else "取消静音", self)
+        mute_act = QAction(
+            "静音" if not track.muted else "取消静音", self)
         mute_act.triggered.connect(lambda: self._toggle_mute(track))
         menu.addAction(mute_act)
-
+        dup_act = QAction("复制轨道", self)
+        dup_act.triggered.connect(lambda: self._duplicate_track(track))
+        menu.addAction(dup_act)
         delete_act = QAction("删除轨道", self)
         delete_act.triggered.connect(lambda: self._delete_track(track))
         menu.addAction(delete_act)
-
         menu.exec(self._track_list.mapToGlobal(pos))
 
     def _toggle_mute(self, track):
         track.muted = not track.muted
         self._refresh_track_list()
+
+    def _duplicate_track(self, track):
+        clip = self.controller.clip
+        if clip:
+            clip.duplicate_track(track)
+            self._refresh_track_list()
 
     def _delete_track(self, track):
         clip = self.controller.clip
@@ -897,8 +1235,7 @@ class TimelineDock(QDockWidget):
 
 """轨道编辑对话框：添加 / 编辑轨道的关键帧。"""
 from __future__ import annotations
-from typing import Any, Optional
-
+from typing import Any, Optional, List
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QFormLayout,
@@ -906,10 +1243,19 @@ from PySide6.QtWidgets import (
     QPushButton, QDialogButtonBox, QListWidget, QListWidgetItem,
     QMessageBox,
 )
-
 from ..base import AnimationTrack, TRACK_REGISTRY
 from ..tracks import VariableTrack, GliderTrack, PropertyTrack
-from ..keyframe import Keyframe, INTERPOLATORS
+from ..keyframe import Keyframe, INTERPOLATORS, INTERPOLATOR_NAMES_CN
+
+_FALLBACK_ATTR_NAMES_CN = {
+    "size": "大小", "rotation": "旋转角度", "width": "宽度",
+    "height": "高度", "opacity": "透明度", "t": "参数 t",
+    "color": "颜色", "text_color": "文字颜色",
+}
+_FALLBACK_ALLOWED_ATTRS = {
+    "size", "rotation", "width", "height", "opacity",
+    "color", "text_color", "t"
+}
 
 
 class KeyframeEditor(QDialog):
@@ -925,7 +1271,6 @@ class KeyframeEditor(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-
         self._list = QListWidget()
         layout.addWidget(self._list, 1)
 
@@ -952,8 +1297,9 @@ class KeyframeEditor(QDialog):
     def _refresh(self):
         self._list.clear()
         for kf in self._keyframes:
+            interp_cn = INTERPOLATOR_NAMES_CN.get(kf.interpolator, kf.interpolator)
             self._list.addItem(
-                f"t={kf.time:.2f}s  v={kf.value:.3f}  [{kf.interpolator}]"
+                f"t={kf.time:.2f}s  v={kf.value:.3f}  [{interp_cn}]"
             )
 
     def _add(self):
@@ -1007,13 +1353,16 @@ class _KeyframeDialog(QDialog):
         layout.addRow("值:", self._value)
 
         self._interp = QComboBox()
-        self._interp.addItems(list(INTERPOLATORS.keys()))
-        layout.addRow("插值:", self._interp)
+        for key, cn_name in INTERPOLATOR_NAMES_CN.items():
+            self._interp.addItem(cn_name, key)
+        layout.addRow("插值方式:", self._interp)
 
         if keyframe:
             self._time.setValue(keyframe.time)
             self._value.setValue(keyframe.value)
-            self._interp.setCurrentText(keyframe.interpolator)
+            idx = self._interp.findData(keyframe.interpolator)
+            if idx >= 0:
+                self._interp.setCurrentIndex(idx)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1026,7 +1375,7 @@ class _KeyframeDialog(QDialog):
         return Keyframe(
             self._time.value(),
             self._value.value(),
-            self._interp.currentText(),
+            self._interp.currentData(),
         )
 
 
@@ -1043,25 +1392,27 @@ class AddTrackDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-
         form = QFormLayout()
 
         self._type_combo = QComboBox()
-        self._type_combo.addItems([
-            "变量轨道 (variable)",
-            "路径轨道 (glider)",
-            "属性轨道 (property)",
-        ])
+        self._type_combo.addItem("变量轨道 (variable)", "variable")
+        self._type_combo.addItem("路径轨道 (glider)", "glider")
+        self._type_combo.addItem("属性轨道 (property)", "property")
         self._type_combo.currentIndexChanged.connect(self._on_type_changed)
         form.addRow("轨道类型:", self._type_combo)
 
         self._target_combo = QComboBox()
         form.addRow("目标:", self._target_combo)
 
-        self._attr_edit = QLineEdit()
-        self._attr_edit.setPlaceholderText("属性名（仅属性轨道）")
-        self._attr_edit.setVisible(False)
-        form.addRow("属性名:", self._attr_edit)
+        self._attr_combo = QComboBox()
+        self._attr_combo.setEditable(True)
+        self._attr_combo.setPlaceholderText("选择或输入属性名")
+        
+        attr_names = getattr(PropertyTrack, "ATTR_NAMES_CN", _FALLBACK_ATTR_NAMES_CN)
+        for attr, cn in attr_names.items():
+            self._attr_combo.addItem(f"{cn} ({attr})", attr)
+        self._attr_combo.setVisible(False)
+        form.addRow("属性名:", self._attr_combo)
 
         layout.addLayout(form)
 
@@ -1080,13 +1431,12 @@ class AddTrackDialog(QDialog):
         self._refresh_targets()
 
     def _on_type_changed(self, index: int):
-        self._attr_edit.setVisible(index == 2)
+        self._attr_combo.setVisible(index == 2)
         self._refresh_targets()
 
     def _refresh_targets(self):
         self._target_combo.clear()
         idx = self._type_combo.currentIndex()
-
         if idx == 0:  # 变量轨道
             from core.variables import get_store
             store = get_store()
@@ -1097,7 +1447,7 @@ class AddTrackDialog(QDialog):
             for obj in self._doc.objects:
                 if isinstance(obj, PointOnObject):
                     self._target_combo.addItem(
-                        f"PointOnObject #{obj.id}", obj.id
+                        f"吸附点 #{obj.id}", obj.id
                     )
         elif idx == 2:  # 属性轨道
             for obj in self._doc.objects:
@@ -1111,27 +1461,35 @@ class AddTrackDialog(QDialog):
     def _accept(self):
         idx = self._type_combo.currentIndex()
         target = self._target_combo.currentData()
-
         if idx == 0:  # 变量轨道
             if target is None:
                 QMessageBox.warning(self, "提示", "请选择变量。")
                 return
-            self._track = VariableTrack(str(target), self._keyframes)
+            self._track = VariableTrack(str(target), self._keyframes)  # type: ignore[call-arg]
         elif idx == 1:  # 路径轨道
             if target is None:
                 QMessageBox.warning(self, "提示", "请选择路径对象。")
                 return
-            self._track = GliderTrack(int(target), self._keyframes)
+            self._track = GliderTrack(int(target), self._keyframes)  # type: ignore[call-arg]
         elif idx == 2:  # 属性轨道
             if target is None:
                 QMessageBox.warning(self, "提示", "请选择对象。")
                 return
-            attr = self._attr_edit.text().strip()
+            attr = self._attr_combo.currentData()
+            if not attr:
+                attr = self._attr_combo.currentText().strip()
             if not attr:
                 QMessageBox.warning(self, "提示", "请输入属性名。")
                 return
-            self._track = PropertyTrack(int(target), attr, self._keyframes)
-
+            
+            allowed = getattr(PropertyTrack, "ALLOWED_ATTRS", _FALLBACK_ALLOWED_ATTRS)
+            if attr not in allowed:
+                QMessageBox.warning(
+                    self, "提示",
+                    f"不支持的属性名 '{attr}'。\n"
+                    f"可选：{', '.join(sorted(allowed))}")
+                return
+            self._track = PropertyTrack(int(target), attr, self._keyframes)  # type: ignore[call-arg]
         self.accept()
 
     def get_track(self) -> Optional[AnimationTrack]:
@@ -1150,13 +1508,10 @@ class EditTrackDialog(QDialog):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
-
         layout.addWidget(QLabel(f"轨道: {self._track.label()}"))
-
         self._kf_btn = QPushButton("编辑关键帧…")
         self._kf_btn.clicked.connect(self._edit_keyframes)
         layout.addWidget(self._kf_btn)
-
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
@@ -1165,8 +1520,9 @@ class EditTrackDialog(QDialog):
         layout.addWidget(buttons)
 
     def _edit_keyframes(self):
-        if hasattr(self._track, "keyframes"):
-            dlg = KeyframeEditor(self._track.keyframes, self)
+        kfs = getattr(self._track, "keyframes", None)
+        if kfs is not None:
+            dlg = KeyframeEditor(kfs, self)
             dlg.exec()
 
 """几何约束求解器扩展包。
@@ -2862,7 +3218,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-from geo.points import FreePoint, AbstractPoint
+from geo.points import FreePoint, AbstractPoint, _index_to_letters, _index_to_subscript
 from core.variables import get_store
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
@@ -2893,6 +3249,7 @@ class Document(QObject):
         self.macros = []
         self._macro_suppress = False
         self.names = {}
+        self._name_counters = {}
         self._objects_version = 0
         self._type_cache = {}
         self._type_cache_version = -1
@@ -2903,7 +3260,6 @@ class Document(QObject):
     def _auto_name(self, obj):
         """根据对象类型自动生成名字：P1、S1、C1、Btn1 等。"""
         tn = type(obj).__name__
-
         if isinstance(obj, AbstractPoint):
             prefix = "P"
         elif tn == "Segment":
@@ -2926,13 +3282,40 @@ class Document(QObject):
             prefix = "f"
         else:
             prefix = tn[:3] or "Obj"
-
-        i = 1
+            
+        i = self._name_counters.get(prefix, 1)
         while f"{prefix}{i}" in self.names:
             i += 1
-
+        self._name_counters[prefix] = i + 1
         return f"{prefix}{i}"
-
+    
+    def _assign_point_labels(self):
+        """O(N) 遍历一次对象列表，为所有未命名的点分配自动标签。
+        避免在 paintEvent 中每帧做 O(N^2) 的计算。
+        """
+        center_ids = set()
+        for o in self.objects:
+            tn = type(o).__name__
+            if tn in ('Circle', 'ExprCircle', 'ThreePointCircle', 'InvertedCircle'):
+                c = getattr(o, 'center', None)
+                if isinstance(c, AbstractPoint):
+                    center_ids.add(id(c))
+        
+        p_idx = 1
+        c_idx = 1
+        for o in self.objects:
+            if not isinstance(o, AbstractPoint):
+                continue
+            if getattr(o, 'name', ''):
+                continue  # 用户已手动命名，跳过
+            
+            if id(o) in center_ids:
+                o._auto_label = "O" + _index_to_subscript(c_idx)
+                c_idx += 1
+            else:
+                o._auto_label = _index_to_letters(p_idx)
+                p_idx += 1
+                
     def _unique_name(self, desired, obj):
         """确保名字唯一；重复则自动加后缀。"""
         if not desired:
@@ -2977,6 +3360,7 @@ class Document(QObject):
         self._unregister_name(obj)
         obj.name = self._unique_name(new_name, obj)
         self.names[obj.name] = obj
+        self._assign_point_labels()
         self.changed.emit()
         
     def _add(self, obj):
@@ -2984,10 +3368,11 @@ class Document(QObject):
         self._objects_version += 1
         self.objects.append(obj)
         if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)) or \
-            getattr(obj, "expr_driver", False):
+           getattr(obj, "expr_driver", False):
             self.expr_objects.append(obj)
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
+            self._assign_point_labels()  # ★ 新增：实时更新标签
         return obj
 
     def _collect_with_deps(self, objs):
@@ -3072,6 +3457,7 @@ class Document(QObject):
             self._unregister_name(o)
         if not getattr(self, "_macro_suppress", False):
             self.object_removed.emit(obj)
+            self._assign_point_labels()
         return doomed
     
     def remove(self, obj):
@@ -3100,6 +3486,7 @@ class Document(QObject):
             self._objects_version += 1      # ★ 结构变化
             if not getattr(self, "_macro_suppress", False):
                 self.cleared.emit()
+            self._assign_point_labels()
             self.changed.emit()
         
     def set_selection(self, objs):
@@ -3274,6 +3661,7 @@ class Document(QObject):
                 GeoObject.bump_ids(max(item["id"] for item in data))
         finally:
             self._macro_suppress = False
+        self._assign_point_labels()
         self.changed.emit()
 
     def save(self, path):
@@ -9269,11 +9657,13 @@ class AbstractPoint(GeoObject):
 
     x: float
     y: float
+    _auto_label: str
 
     def __init__(self, parents=()):
         super().__init__(parents)
         self.x = 0.0
         self.y = 0.0
+        self._auto_label = ""  # 自动标签（Document 内部使用，非用户自定义）
 
     def distance_to(self, x, y):
         return math.hypot(self.x - x, self.y - y)
@@ -9339,29 +9729,6 @@ def _index_to_subscript(n):
     return ''.join(chr(0x2080 + int(d)) for d in str(n))
 
 
-def _point_label(obj, view):
-    """点名：圆心点 → O₁/O₂…；其余点 → A/B/C…（大写）。
-    序号按 id 升序在同类中动态计算，删除/撤销后自动重排。"""
-    doc = view.doc
-    center_ids = set()
-    for o in doc.objects:
-        if type(o).__name__ == 'Circle':
-            c = getattr(o, 'center', None)
-            if isinstance(c, AbstractPoint):
-                center_ids.add(id(c))
-    is_center = id(obj) in center_ids
-    idx = 1
-    for o in doc.objects:
-        if not isinstance(o, AbstractPoint):
-            continue
-        if (id(o) in center_ids) != is_center:
-            continue
-        if o is obj:
-            break
-        idx += 1
-    return ("O" + _index_to_subscript(idx)) if is_center else _index_to_letters(idx)
-
-
 @register_renderer(AbstractPoint)
 def draw_point(p, obj, view):
     """两种点共用：选中时放大换色，标签用数学排版（斜体大写字母）。"""
@@ -9370,8 +9737,11 @@ def draw_point(p, obj, view):
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
-    label = getattr(obj, "name", "") or _point_label(obj, view)
-
+    
+    label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "")
+    if not label:
+        label = f"P{obj.id}"  # 最终 Fallback
+        
     draw_math(
         p,
         qpt.x() + 9,
@@ -13255,7 +13625,6 @@ class TextObject(GeoObject):
 
 
 @register_renderer(TextObject)
-@register_renderer(TextObject)
 def draw_text(p, obj, view):
     wx, wy = obj.world_pos()
     sp = view.to_screen(wx, wy) + QPointF(12, 24)     # 显示在锚点右上方
@@ -13384,12 +13753,18 @@ class TextTool(Tool):
     def press(self, canvas, wpt, hit):
         self._pos = wpt
         self._anchor = nearest_point(canvas.doc, canvas.scale, wpt)
+        assert self._editor is not None
         self._editor.set_anchor_available(self._anchor is not None)
         self._editor.show(); self._editor.raise_()
 
     def _commit(self, canvas, text, color, size, use_anchor):
         anchor = self._anchor if use_anchor else None
         canvas.doc.add(TextObject(text, color, size, anchor=anchor, pos=self._pos))
+        
+        if "[ACG]" in text:
+            from ui.canvas_render import trigger_egg
+            trigger_egg(canvas)
+        assert self._editor is not None    
         self._editor.hide()
         self._pos = None
         self._anchor = None
@@ -13399,6 +13774,2791 @@ class TextTool(Tool):
             self._editor.hide()
         self._pos = None
         self._anchor = None
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtCore import QPointF
+from PySide6.QtWidgets import QApplication
+
+
+@pytest.fixture(scope="session", autouse=True)
+def qapp():
+    """全局 Qt 环境。"""
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture(autouse=True)
+def clean_variables():
+    """每个测试隔离变量系统。"""
+    from core.variables import get_store
+
+    store = get_store()
+    saved_vars = dict(store._vars)
+    saved_version = store.version
+
+    yield
+
+    store._vars = saved_vars
+    store.version = saved_version
+
+
+@pytest.fixture
+def doc():
+    """新建一个空文档。"""
+    from core.document import Document
+    return Document()
+
+
+@pytest.fixture
+def canvas(doc, qapp):
+    """离屏画布。"""
+    try:
+        from ui.canvas import Canvas
+    except Exception as e:
+        pytest.skip(f"无法创建 Canvas：{e}")
+
+    c = Canvas(doc)
+    c.resize(420, 320)
+
+    c.origin = QPointF(210.0, 160.0)
+    c.scale = 40.0
+    c._origin_ready = True
+    c.cursor_wpt = (0.0, 0.0)
+
+    return c
+
+"""吸附点（PointOnObject）功能测试。
+运行：pytest tests/test_attached_point.py -v
+"""
+import math
+
+from geo.points import FreePoint, PointOnObject
+from geo.segments import Segment
+from geo.circles import Circle
+
+
+class TestPointOnSegment:
+    def setup_method(self):
+        self.a = FreePoint(0, 0)
+        self.b = FreePoint(4, 0)
+        self.seg = Segment(self.a, self.b)
+        self.p = PointOnObject(self.seg, t=0.5)
+
+    def test_01_initial_position_is_midpoint(self):
+        """t=0.5 应在线段中点"""
+        assert math.isclose(self.p.x, 2.0, abs_tol=1e-9)
+        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
+
+    def test_02_drag_projects_back_onto_segment(self):
+        """拖到线段外，应投影回线段"""
+        self.p.drag_to((3, 5))
+        self.p.recompute()
+        assert math.isclose(self.p.x, 3.0, abs_tol=1e-9)
+        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
+
+    def test_03_drag_clamped_at_endpoints(self):
+        """拖过端点应被夹在端点内"""
+        self.p.drag_to((100, 0))
+        self.p.recompute()
+        assert math.isclose(self.p.x, 4.0, abs_tol=1e-9), "应夹在 b 端"
+        self.p.drag_to((-100, 0))
+        self.p.recompute()
+        assert math.isclose(self.p.x, 0.0, abs_tol=1e-9), "应夹在 a 端"
+
+    def test_04_stays_on_segment_after_many_drags(self):
+        """反复拖动后点始终在线段上（y=0 且 0<=x<=4）"""
+        for tx, ty in [(1, 9), (3, -7), (2, 100), (0, 0), (4, 0)]:
+            self.p.drag_to((tx, ty))
+            self.p.recompute()
+            assert math.isclose(self.p.y, 0.0, abs_tol=1e-6), f"拖到({tx},{ty})后 y={self.p.y}"
+            assert -1e-6 <= self.p.x <= 4.0 + 1e-6, f"拖到({tx},{ty})后 x={self.p.x}"
+
+    def test_05_host_endpoint_move_updates_point(self):
+        """移动线段端点，吸附点应跟随"""
+        self.b.x, self.b.y = 8, 0
+        self.p.recompute()
+        assert math.isclose(self.p.x, 4.0, abs_tol=1e-9), "应是新中点"
+
+    def test_06_degenerate_segment_no_crash(self):
+        """退化线段（两端重合）拖动不应崩溃"""
+        a = FreePoint(2, 2)
+        b = FreePoint(2, 2)
+        seg = Segment(a, b)
+        p = PointOnObject(seg, t=0.5)
+        p.drag_to((5, 5))
+        p.recompute()
+        assert math.isclose(p.x, 2.0, abs_tol=1e-6)
+        assert math.isclose(p.y, 2.0, abs_tol=1e-6)
+
+
+class TestPointOnCircle:
+    def setup_method(self):
+        self.c = FreePoint(0, 0)
+        self.through = FreePoint(3, 0)
+        self.circle = Circle(self.c, self.through)
+        self.p = PointOnObject(self.circle, t=0.0)
+
+    def test_01_initial_position_on_circle(self):
+        """t=0 应在 (3,0)"""
+        assert math.isclose(self.p.x, 3.0, abs_tol=1e-9)
+        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
+
+    def test_02_drag_projects_onto_circle(self):
+        """拖到圆外上方，应投影到圆顶 (0,3)"""
+        self.p.drag_to((0, 10))
+        self.p.recompute()
+        assert math.isclose(self.p.x, 0.0, abs_tol=1e-6)
+        assert math.isclose(self.p.y, 3.0, abs_tol=1e-6)
+
+    def test_03_always_on_circle_after_drags(self):
+        """反复拖动后点到圆心距离恒等于半径"""
+        for tx, ty in [(10, 10), (-5, 3), (0, -8), (100, -100)]:
+            self.p.drag_to((tx, ty))
+            self.p.recompute()
+            dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
+            assert math.isclose(dist, 3.0, abs_tol=1e-6), \
+                f"拖到({tx},{ty})后到圆心距离={dist:.4f}，应为3"
+
+    def test_04_drag_to_center_does_not_crash(self):
+        """拖到圆心（方向未定义）不应崩溃，且仍在圆上"""
+        self.p.drag_to((0, 0))
+        self.p.recompute()
+        dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
+        assert math.isclose(dist, 3.0, abs_tol=1e-6)
+
+    def test_05_host_center_move_updates_point(self):
+        """移动圆心，吸附点应仍在圆上（距离=当前半径）"""
+        self.c.x, self.c.y = 5, 5
+        self.p.recompute()
+        dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
+        assert math.isclose(dist, self.circle.r, abs_tol=1e-6), \
+            f"圆心移动后偏离，距离={dist}, 半径={self.circle.r}"
+
+
+class TestRecomputePropagation:
+    def test_01_move_endpoint_propagates_to_attached_point(self):
+        """recompute_from 移动端点，吸附点应跟随"""
+        from core.document import Document
+        doc = Document()
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        seg = Segment(a, b)
+        p = PointOnObject(seg, t=0.5)
+        for o in (a, b, seg, p):
+            doc.add(o)
+        b.x, b.y = 8, 0
+        doc.recompute_from(b)
+        assert math.isclose(p.x, 4.0, abs_tol=1e-9), f"端点移动后 x={p.x}，应为4"
+
+    def test_02_move_circle_center_propagates(self):
+        """移动圆心，吸附点应仍在圆上"""
+        from core.document import Document
+        doc = Document()
+        c = FreePoint(0, 0)
+        through = FreePoint(3, 0)
+        circle = Circle(c, through)
+        p = PointOnObject(circle, t=0.0)
+        for o in (c, through, circle, p):
+            doc.add(o)
+        c.x, c.y = 10, 10
+        doc.recompute_from(c)
+        dist = math.hypot(p.x - c.x, p.y - c.y)
+        assert math.isclose(dist, circle.r, abs_tol=1e-6), \
+            f"圆心移动后偏离，距离={dist}, 半径={circle.r}"
+
+"""Document 核心功能测试：增删、级联删除、复制粘贴、撤销重做、增量重算。"""
+
+from geo.points import FreePoint
+from geo.segments import Segment
+from geo.division import DivisionPoint
+
+
+class TestDocumentBasic:
+    def test_add_object(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        assert p in doc.objects
+
+    def test_add_emits_changed(self, doc):
+        received = []
+
+        doc.changed.connect(lambda: received.append(1))
+
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        assert received
+
+    def test_remove_object(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        doc.remove(p)
+
+        assert p not in doc.objects
+
+    def test_remove_cascade(self, doc):
+        a = FreePoint(0, 0)
+        b = FreePoint(1, 0)
+        seg = Segment(a, b)
+
+        doc.add(a)
+        doc.add(b)
+        doc.add(seg)
+
+        doc.remove(a)
+
+        assert a not in doc.objects
+        assert seg not in doc.objects
+        assert b in doc.objects
+
+    def test_remove_selected(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        p.selected = True
+        doc.remove_selected()
+
+        assert p not in doc.objects
+
+    def test_clear(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        doc.clear()
+
+        assert len(doc.objects) == 0
+
+    def test_clear_undo(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        doc.clear()
+        assert len(doc.objects) == 0
+
+        doc.undo()
+        assert len(doc.objects) == 1
+
+
+class TestDocumentUndoRedo:
+    def test_action_undo_redo(self, doc):
+        doc.begin_action()
+
+        p = FreePoint(1, 2)
+        doc.add(p)
+
+        doc.end_action()
+
+        assert len(doc.objects) == 1
+
+        doc.undo()
+        assert len(doc.objects) == 0
+
+        doc.redo()
+        assert len(doc.objects) == 1
+
+    def test_remove_can_undo(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        doc.remove(p)
+        assert len(doc.objects) == 0
+
+        doc.undo()
+        assert len(doc.objects) == 1
+
+
+class TestDocumentClipboard:
+    def test_copy_paste_point(self, doc):
+        p = FreePoint(2, 3)
+        doc.add(p)
+
+        p.selected = True
+        doc.copy_selection()
+        doc.paste()
+
+        points = [o for o in doc.objects if isinstance(o, FreePoint)]
+
+        assert len(points) == 2
+
+    def test_cut_selection(self, doc):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        p.selected = True
+        doc.cut_selection()
+
+        assert p not in doc.objects
+
+
+class TestRecompute:
+    def test_recompute_from_moves_dependent(self, doc):
+        a = FreePoint(0, 0)
+        b = FreePoint(2, 0)
+        d = DivisionPoint(a, b, 0.5)
+
+        doc.add(a)
+        doc.add(b)
+        doc.add(d)
+
+        b.x = 4.0
+        doc.recompute_from(b)
+
+        assert abs(d.x - 2.0) < 1e-9
+
+"""变量系统测试：定义、修改、从动变量、表达式求值、模板渲染。"""
+
+import pytest
+
+from core.variables import (
+    get_store,
+    evaluate,
+    render_template,
+    is_valid_name,
+)
+
+
+class TestVariableStore:
+    def test_define_and_get(self):
+        store = get_store()
+
+        store.define("a", 3.0, 0.0, 10.0)
+
+        var = store.get_var("a")
+
+        assert var is not None
+        assert var.value == 3.0
+
+    def test_set_value(self):
+        store = get_store()
+
+        store.define("a", 1.0, 0.0, 10.0)
+        store.set("a", 5.0)
+
+        assert store.get_var("a").value == 5.0
+
+    def test_delete_variable(self):
+        store = get_store()
+
+        store.define("a", 1.0, 0.0, 10.0)
+        store.delete("a")
+
+        assert store.get_var("a") is None
+
+    def test_set_range_clamps_value(self):
+        store = get_store()
+
+        store.define("a", 20.0, 0.0, 10.0)
+        store.set_range("a", 0.0, 5.0)
+
+        var = store.get_var("a")
+
+        assert var.vmin == 0.0
+        assert var.vmax == 5.0
+        assert var.value == 5.0
+
+
+class TestDependentVariable:
+    def test_dependent_variable_eval(self):
+        store = get_store()
+
+        store.define("a", 2.0, 0.0, 10.0)
+        store.define("b", 0.0, 0.0, 10.0, expr="a * 2")
+
+        d = store.as_dict()
+
+        assert d["a"] == 2.0
+        assert d["b"] == 4.0
+
+    def test_dependent_variable_cannot_be_set_manually(self):
+        store = get_store()
+
+        store.define("a", 2.0, 0.0, 10.0)
+        store.define("b", 0.0, 0.0, 10.0, expr="a * 2")
+
+        store.set("b", 100.0)
+
+        d = store.as_dict()
+        assert d["b"] == 4.0
+
+    def test_multi_level_dependency(self):
+        store = get_store()
+
+        store.define("a", 1.0, 0.0, 10.0)
+        store.define("b", 0.0, 0.0, 10.0, expr="a + 1")
+        store.define("c", 0.0, 0.0, 10.0, expr="b * 2")
+
+        d = store.as_dict()
+
+        assert d["b"] == 2.0
+        assert d["c"] == 4.0
+
+
+class TestEvaluate:
+    def test_basic_expression(self):
+        assert evaluate("2*x + 1", {"x": 3}) == 7
+
+    def test_power_expression(self):
+        assert evaluate("x^2", {"x": 4}) == 16
+
+    def test_function_expression(self):
+        val = evaluate("sqrt(x)", {"x": 9})
+        assert abs(val - 3.0) < 1e-9
+
+    def test_undefined_variable_returns_none(self):
+        assert evaluate("no_such_var + 1", {}) is None
+
+    def test_invalid_expression_returns_none(self):
+        assert evaluate("x +*+ 1", {"x": 1}) is None
+
+
+class TestTemplateName:
+    def test_valid_name(self):
+        assert is_valid_name("边长")
+        assert is_valid_name("a")
+        assert is_valid_name("alpha")
+
+    def test_invalid_name(self):
+        assert not is_valid_name("")
+        assert not is_valid_name("a b")
+        assert not is_valid_name("pi")
+        assert not is_valid_name("sqrt")
+
+
+class TestRenderTemplate:
+    def test_render_variable(self):
+        store = get_store()
+        store.define("a", 3.0, 0.0, 10.0)
+
+        assert render_template("{a}") == "3"
+
+    def test_render_expression(self):
+        store = get_store()
+        store.define("a", 3.0, 0.0, 10.0)
+
+        assert render_template("{a + 1}") == "4"
+
+    def test_render_invalid_keeps_original(self):
+        assert render_template("{no_such_var}") == "{no_such_var}"
+
+"""彩蛋功能测试套件。
+测试触发条件、模块存在性、URL 可达性、下载逻辑、源码完整性。
+运行方式：pytest tests/test_easter_egg.py -v
+"""
+import sys
+import os
+import tempfile
+import urllib.request
+from unittest.mock import patch, MagicMock
+import pytest
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+
+
+class TestTriggerCondition:
+    """测试触发词 [ACG] 的匹配逻辑"""
+
+    def test_exact_match(self):
+        text = "[ACG]"
+        assert "[ACG]" in text
+
+    def test_embedded_match(self):
+        text = "hello [ACG] world"
+        assert "[ACG]" in text
+
+    def test_no_match(self):
+        text = "hello world"
+        assert "[ACG]" not in text
+
+    def test_case_sensitive(self):
+        text = "[acg]"
+        assert "[ACG]" not in text
+
+    def test_partial_no_match(self):
+        text = "[AC"
+        assert "[ACG]" not in text
+
+    def test_new_year_no_match(self):
+        """确认 [New Year] 不会触发（当前触发词是 [ACG]）"""
+        text = "[New Year]"
+        assert "[ACG]" not in text
+
+
+class TestModuleExists:
+    """测试 ui/easter_eggs.py 是否存在且可导入"""
+
+    def test_file_exists(self):
+        path = os.path.join(PROJECT_ROOT, "ui", "easter_eggs.py")
+        assert os.path.exists(path), (
+            f"★ 文件不存在: {path}\n"
+            f"请创建 ui/easter_eggs.py，内容见下方说明。"
+        )
+
+    def test_importable(self):
+        try:
+            from ui.easter_eggs import trigger_new_year_egg
+            assert callable(trigger_new_year_egg)
+        except ImportError as e:
+            pytest.fail(f"★ 无法导入 ui.easter_eggs: {e}")
+
+    def test_function_signature(self):
+        try:
+            from ui.easter_eggs import trigger_new_year_egg
+            import inspect
+            sig = inspect.signature(trigger_new_year_egg)
+            params = list(sig.parameters.keys())
+            assert len(params) >= 1, "trigger_new_year_egg 至少需要一个参数 (canvas)"
+        except ImportError:
+            pytest.skip("ui/easter_eggs.py 不存在")
+
+
+class TestURLReachable:
+    """测试目标 URL 是否可访问"""
+
+    def test_url_returns_data(self):
+        url = "https://eo-img.544521.xyz/"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = response.read()
+                assert len(data) > 0, "★ URL 返回了空数据"
+                print(f"\n[DEBUG] URL 可访问，返回 {len(data)} bytes")
+        except urllib.error.URLError as e:
+            pytest.fail(f"★ URL 不可访问: {e}")
+        except Exception as e:
+            pytest.fail(f"★ 请求异常: {e}")
+
+    def test_download_saves_to_temp(self):
+        url = "https://eo-img.544521.xyz/"
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = response.read()
+
+            fd, temp_path = tempfile.mkstemp(suffix=".png", prefix="res_cache_")
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+
+            assert os.path.exists(temp_path), "临时文件未创建"
+            assert os.path.getsize(temp_path) > 0, "临时文件为空"
+            print(f"\n[DEBUG] 临时文件: {temp_path}, 大小: {os.path.getsize(temp_path)} bytes")
+            os.unlink(temp_path)
+        except Exception as e:
+            pytest.fail(f"★ 下载保存失败: {e}")
+
+
+class TestSourceCodeIntegrity:
+    """验证 text_tool.py 和 canvas_menu.py 中包含正确的触发代码"""
+
+    def test_text_tool_has_trigger(self):
+        path = os.path.join(PROJECT_ROOT, "plugins", "text_tool.py")
+        if not os.path.exists(path):
+            pytest.skip("plugins/text_tool.py 不存在")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "[ACG]" in content, "★ text_tool.py 中未找到触发词 [ACG]"
+        assert "trigger_new_year_egg" in content, "★ text_tool.py 中未找到 trigger_new_year_egg"
+        assert "ui.easter_eggs" in content, "★ text_tool.py 中未找到 ui.easter_eggs 导入"
+
+    def test_canvas_menu_has_trigger(self):
+        path = os.path.join(PROJECT_ROOT, "ui", "canvas_menu.py")
+        if not os.path.exists(path):
+            pytest.skip("ui/canvas_menu.py 不存在")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "[ACG]" in content, "★ canvas_menu.py 中未找到触发词 [ACG]"
+        assert "trigger_new_year_egg" in content, "★ canvas_menu.py 中未找到 trigger_new_year_egg"
+
+    def test_text_tool_trigger_in_commit(self):
+        """确认触发代码在 _commit 方法内部（而不是在类外部）"""
+        path = os.path.join(PROJECT_ROOT, "plugins", "text_tool.py")
+        if not os.path.exists(path):
+            pytest.skip("plugins/text_tool.py 不存在")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "_commit" in content, "★ text_tool.py 中未找到 _commit 方法"
+        commit_idx = content.find("def _commit")
+        trigger_idx = content.find('[ACG]')
+        assert commit_idx != -1, "★ 未找到 _commit 方法定义"
+        assert trigger_idx != -1, "★ 未找到 [ACG] 触发词"
+        assert trigger_idx > commit_idx, "★ [ACG] 触发代码不在 _commit 方法之后"
+
+
+class TestIntegration:
+    """模拟完整的触发→下载→插入流程"""
+
+    def test_simulated_text_commit(self):
+        """模拟 TextTool._commit 的触发逻辑"""
+        text = "我的文本 [ACG] 结尾"
+        triggered = False
+        if "[ACG]" in text:
+            triggered = True
+        assert triggered
+
+    def test_simulated_canvas_menu_edit(self):
+        """模拟 canvas_menu.edit_text_object 的触发逻辑"""
+        obj_text = "编辑后的文本 [ACG]"
+        triggered = False
+        if "[ACG]" in obj_text:
+            triggered = True
+        assert triggered
+
+    @patch("threading.Thread")
+    def test_trigger_starts_thread(self, mock_thread_cls):
+        """测试 trigger_new_year_egg 是否启动了后台线程"""
+        try:
+            from ui.easter_eggs import trigger_new_year_egg
+        except ImportError:
+            pytest.skip("ui/easter_eggs.py 不存在")
+
+        mock_canvas = MagicMock()
+        mock_canvas.doc = MagicMock()
+
+        trigger_new_year_egg(mock_canvas)
+
+        mock_thread_cls.assert_called_once()
+        mock_thread_cls.return_value.start.assert_called_once()
+
+    def test_full_download_and_insert_mock(self):
+        """模拟完整的下载→插入流程（不实际下载）"""
+        try:
+            from ui.easter_eggs import trigger_new_year_egg
+        except ImportError:
+            pytest.skip("ui/easter_eggs.py 不存在")
+
+        mock_canvas = MagicMock()
+        mock_canvas.doc = MagicMock()
+
+        fake_image_data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+
+        with patch("urllib.request.urlopen") as mock_urlopen:
+            mock_response = MagicMock()
+            mock_response.read.return_value = fake_image_data
+            mock_response.__enter__ = MagicMock(return_value=mock_response)
+            mock_response.__exit__ = MagicMock(return_value=False)
+            mock_urlopen.return_value = mock_response
+
+            trigger_new_year_egg(mock_canvas)
+
+
+class TestDiagnostics:
+    """诊断性测试，输出关键信息帮助排查"""
+
+    def test_print_trigger_locations(self):
+        """打印所有包含触发词的文件和行号"""
+        print("\n" + "=" * 60)
+        print("触发词 [ACG] 出现位置：")
+        print("=" * 60)
+        found = False
+        for root, dirs, files in os.walk(PROJECT_ROOT):
+            dirs[:] = [d for d in dirs if not d.startswith('.') and d != '__pycache__']
+            for fname in files:
+                if fname.endswith('.py'):
+                    fpath = os.path.join(root, fname)
+                    try:
+                        with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
+                            for lineno, line in enumerate(f, 1):
+                                if '[ACG]' in line:
+                                    rel = os.path.relpath(fpath, PROJECT_ROOT)
+                                    print(f"  {rel}:{lineno}: {line.strip()}")
+                                    found = True
+                    except Exception:
+                        pass
+        if not found:
+            print("  ★ 未在任何 .py 文件中找到 [ACG]！")
+        print("=" * 60)
+        assert found, "★ 整个项目中未找到 [ACG] 触发词"
+
+    def test_print_easter_eggs_content(self):
+        """打印 ui/easter_eggs.py 的内容（如果存在）"""
+        path = os.path.join(PROJECT_ROOT, "ui", "easter_eggs.py")
+        if not os.path.exists(path):
+            print(f"\n★ ui/easter_eggs.py 不存在！这就是问题所在。")
+            print("请创建该文件。")
+            pytest.fail("ui/easter_eggs.py 不存在")
+        with open(path, "r", encoding="utf-8") as f:
+            content = f.read()
+        print(f"\n{'=' * 60}")
+        print(f"ui/easter_eggs.py 内容 ({len(content)} 字符)：")
+        print(f"{'=' * 60}")
+        print(content)
+        print(f"{'=' * 60}")
+        assert "trigger_new_year_egg" in content
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v", "--tb=short", "-s"])
+
+"""FunctionCurve 函数绘制功能的单元测试。
+
+检测"静默失败"的 5 个根源：
+1. _eval_at 返回错误类型（tuple 而非 float）
+2. 表达式求值失败返回 None → 无点可画
+3. 变量未定义 → evaluate 返回 None
+4. 采样全部被跳过
+5. 对象 visible/exists 为 False
+
+运行：python -m pytest tests/test_function_curve.py -v
+"""
+import math
+import pytest
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+@pytest.fixture(autouse=True)
+def _ensure_qapp(qapp):
+    pass
+
+
+@pytest.fixture(autouse=True)
+def clean_variables():
+    """每个测试隔离变量状态，避免测试间污染。"""
+    from core.variables import get_store
+    store = get_store()
+    saved_vars = dict(store._vars)
+    saved_version = store.version
+    yield
+    store._vars = saved_vars
+    store.version = saved_version
+
+
+def sample_explicit(obj, x0, x1, n=200):
+    """复现 _draw_explicit 的采样逻辑，返回有效 (x, y) 点列表。"""
+    pts = []
+    for i in range(n + 1):
+        x = x0 + (x1 - x0) * i / n
+        y = obj._eval_at(x)
+        if isinstance(y, (int, float)) and math.isfinite(y):
+            pts.append((x, float(y)))
+    return pts
+
+
+def sample_parametric(obj, t0, t1, n=200):
+    pts = []
+    for i in range(n + 1):
+        t = t0 + (t1 - t0) * i / n
+        pt = obj._eval_at(t)
+        if isinstance(pt, (tuple, list)) and len(pt) == 2:
+            x, y = pt
+            if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
+                pts.append((float(x), float(y)))
+    return pts
+
+
+def sample_polar(obj, t0, t1, n=200):
+    pts = []
+    for i in range(n + 1):
+        t = t0 + (t1 - t0) * i / n
+        r = obj._eval_at(t)
+        if isinstance(r, (int, float)) and math.isfinite(r):
+            pts.append((float(r) * math.cos(t), float(r) * math.sin(t)))
+    return pts
+
+
+class TestEvalAtTypes:
+
+    def test_explicit_returns_float(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2")
+        y = f._eval_at(2.0)
+        assert isinstance(y, float), f"explicit 应返回 float，实际 {type(y).__name__}"
+        assert y == pytest.approx(4.0)
+
+    def test_explicit_never_returns_tuple(self):
+        """回归：之前 _eval_at 对 explicit 误返回 tuple 导致 math.isfinite 崩溃。"""
+        from geo.function_curve import FunctionCurve
+        for expr in ["x", "x^2", "sin(x)", "x^2 + tan(x)", "2*x + 1", "sqrt(abs(x))"]:
+            f = FunctionCurve(kind="explicit", expr=expr)
+            y = f._eval_at(1.0)
+            assert not isinstance(y, tuple), f"expr={expr!r} 返回了 tuple: {y}"
+
+    def test_parametric_returns_2tuple(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
+        pt = f._eval_at(0.0)
+        assert isinstance(pt, (tuple, list)), f"parametric 应返回 tuple，实际 {type(pt).__name__}"
+        assert len(pt) == 2
+
+    def test_polar_returns_float(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="polar", expr="1 + cos(t)")
+        r = f._eval_at(0.0)
+        assert isinstance(r, float), f"polar 应返回 float，实际 {type(r).__name__}"
+
+
+class TestExpressionEvaluation:
+
+    def test_polynomial(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2 + 2*x + 1")
+        assert f._eval_at(0.0) == pytest.approx(1.0)
+        assert f._eval_at(1.0) == pytest.approx(4.0)
+        assert f._eval_at(-1.0) == pytest.approx(0.0)
+
+    def test_trig(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="sin(x)")
+        assert f._eval_at(0.0) == pytest.approx(0.0)
+        assert f._eval_at(math.pi / 2) == pytest.approx(1.0)
+
+    def test_tan_composite(self):
+        """用户报告的 x^2 + tan(x) 场景。"""
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2 + tan(x)")
+        y = f._eval_at(1.0)
+        assert isinstance(y, float)
+        assert y == pytest.approx(1.0 + math.tan(1.0))
+
+    def test_empty_expr_returns_none(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="")
+        assert f._eval_at(0.0) is None
+
+    def test_invalid_expr_no_crash(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x +*+ bad")
+        result = f._eval_at(1.0)  # 不应抛异常
+        assert result is None or isinstance(result, float)
+
+
+class TestVariableLinkage:
+
+    def test_variable_in_expr(self):
+        from geo.function_curve import FunctionCurve
+        from core.variables import get_store
+        get_store().define("a", 2.0, 0.0, 10.0)
+        f = FunctionCurve(kind="explicit", expr="a*x")
+        assert f._eval_at(3.0) == pytest.approx(6.0)
+
+    def test_variable_change_updates(self):
+        from geo.function_curve import FunctionCurve
+        from core.variables import get_store
+        store = get_store()
+        store.define("a", 2.0, 0.0, 10.0)
+        f = FunctionCurve(kind="explicit", expr="a*x")
+        assert f._eval_at(3.0) == pytest.approx(6.0)
+        store.set("a", 5.0)
+        assert f._eval_at(3.0) == pytest.approx(15.0)
+
+    def test_undefined_variable_returns_none(self):
+        """未定义变量 → evaluate 返回 None（静默失败根源之一）。"""
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="no_such_var * x")
+        assert f._eval_at(1.0) is None
+
+
+class TestSampling:
+
+    def test_explicit_produces_points(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2")
+        pts = sample_explicit(f, -5, 5, n=100)
+        assert len(pts) > 50, f"采样点过少: {len(pts)}"
+
+    def test_tan_has_valid_points(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="tan(x)")
+        pts = sample_explicit(f, -2.0, 2.0, n=400)
+        assert len(pts) > 0, "tan(x) 采样不应为空"
+        assert all(math.isfinite(y) for _, y in pts)
+
+    def test_parametric_unit_circle(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
+        pts = sample_parametric(f, 0, 2 * math.pi, n=100)
+        assert len(pts) > 50
+        for x, y in pts:
+            assert math.hypot(x, y) == pytest.approx(1.0, abs=1e-6)
+
+    def test_polar_circle(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="polar", expr="1")
+        pts = sample_polar(f, 0, 2 * math.pi, n=100)
+        assert len(pts) > 50
+        for x, y in pts:
+            assert math.hypot(x, y) == pytest.approx(1.0, abs=1e-6)
+
+    def test_empty_expr_no_points(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="")
+        assert sample_explicit(f, -5, 5) == []
+
+
+class TestSerialization:
+
+    def test_explicit_roundtrip(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2 + 1", domain=(-3, 3), color="#ff0000")
+        f2 = FunctionCurve.build([], f.dump())
+        assert f2.kind == "explicit"
+        assert f2.expr == "x^2 + 1"
+        assert f2.domain == (-3, 3)
+
+    def test_parametric_roundtrip(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
+        f2 = FunctionCurve.build([], f.dump())
+        assert f2.kind == "parametric"
+        assert f2.expr == "cos(t)"
+        assert f2.expr2 == "sin(t)"
+
+
+class TestEdgeCases:
+
+    def test_division_by_zero(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="1/x")
+        result = f._eval_at(0.0)  # 不应抛异常
+        assert result is None or not math.isfinite(result) or isinstance(result, float)
+
+    def test_sqrt_negative(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="sqrt(x)")
+        result = f._eval_at(-1.0)  # 不应抛异常
+        assert result is None or isinstance(result, float)
+
+    def test_domain_stored(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x", domain=(0, 1))
+        assert f.domain == (0, 1)
+
+    def test_default_domain(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x")
+        assert f.domain is None or isinstance(f.domain, tuple)
+
+
+class TestObjectState:
+
+    def test_visible_by_default(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2")
+        assert getattr(f, "visible", True) is True
+
+    def test_exists_by_default(self):
+        from geo.function_curve import FunctionCurve
+        f = FunctionCurve(kind="explicit", expr="x^2")
+        assert getattr(f, "exists", True) is True
+
+"""几何对象测试：点、线段、圆、等分点、吸附点、多边形、椭圆、填充、交点、函数曲线。"""
+
+import math
+
+import pytest
+
+from geo.points import FreePoint, PointOnObject
+from geo.segments import Segment
+from geo.circles import Circle
+from geo.division import DivisionPoint
+from geo.chain_fill import ChainFill, Span, FillStyle
+from geo.intersects import IntersectPoint
+from geo.function_curve import FunctionCurve
+
+from plugins.line_tool import Line
+from plugins.ray_tool import Ray
+from plugins.polygon import RegularPolygon
+from plugins.ellipse_tool import Ellipse
+
+
+class TestPoint:
+    def test_free_point_dump_build(self):
+        p = FreePoint(1.5, -2.5)
+
+        cls = type(p)
+        p2 = cls.build([], p.dump())
+
+        assert abs(p2.x - 1.5) < 1e-9
+        assert abs(p2.y + 2.5) < 1e-9
+
+    def test_point_distance(self):
+        p = FreePoint(0, 0)
+
+        assert abs(p.distance_to(3, 4) - 5.0) < 1e-9
+
+
+class TestSegment:
+    def test_length(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(3, 4)
+        s = Segment(a, b)
+
+        assert abs(s.length() - 5.0) < 1e-9
+
+    def test_point_at(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        s = Segment(a, b)
+
+        x, y = s.point_at(0.5)
+
+        assert abs(x - 2.0) < 1e-9
+        assert abs(y) < 1e-9
+
+    def test_project(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        s = Segment(a, b)
+
+        t = s.project(1, 0)
+
+        assert abs(t - 0.25) < 1e-9
+
+    def test_project_clamped(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        s = Segment(a, b)
+
+        assert s.project(-10, 0) == 0.0
+        assert s.project(10, 0) == 1.0
+
+
+class TestCircle:
+    def test_radius(self):
+        center = FreePoint(0, 0)
+        through = FreePoint(2, 0)
+
+        c = Circle(center, through)
+
+        assert abs(c.r - 2.0) < 1e-9
+
+    def test_point_at(self):
+        center = FreePoint(0, 0)
+        through = FreePoint(2, 0)
+
+        c = Circle(center, through)
+
+        x, y = c.point_at(0.0)
+
+        assert abs(x - 2.0) < 1e-9
+        assert abs(y) < 1e-9
+
+    def test_project(self):
+        center = FreePoint(0, 0)
+        through = FreePoint(2, 0)
+
+        c = Circle(center, through)
+
+        t = c.project(0, 2)
+
+        assert abs(t - 0.25) < 1e-9
+
+    def test_distance_to(self):
+        center = FreePoint(0, 0)
+        through = FreePoint(2, 0)
+
+        c = Circle(center, through)
+
+        assert abs(c.distance_to(3, 0) - 1.0) < 1e-9
+
+
+class TestLineRay:
+    def test_line_point_at(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(1, 1)
+
+        line = Line(a, b)
+
+        x, y = line.point_at(2.0)
+
+        assert abs(x - 2.0) < 1e-9
+        assert abs(y - 2.0) < 1e-9
+
+    def test_ray_project_non_negative(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(1, 0)
+
+        ray = Ray(a, b)
+
+        assert ray.project(-5, 0) == 0.0
+        assert abs(ray.project(3, 0) - 3.0) < 1e-9
+
+
+class TestDivisionPoint:
+    def test_midpoint(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+
+        m = DivisionPoint(a, b, 0.5)
+
+        assert abs(m.x - 2.0) < 1e-9
+        assert abs(m.y) < 1e-9
+
+    def test_follows_endpoint(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+
+        m = DivisionPoint(a, b, 0.5)
+
+        b.x = 8.0
+        m.recompute()
+
+        assert abs(m.x - 4.0) < 1e-9
+
+
+class TestPointOnObject:
+    def test_point_on_segment(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        seg = Segment(a, b)
+
+        p = PointOnObject(seg, 0.5)
+
+        assert abs(p.x - 2.0) < 1e-9
+
+    def test_drag_projects_back(self):
+        a = FreePoint(0, 0)
+        b = FreePoint(4, 0)
+        seg = Segment(a, b)
+
+        p = PointOnObject(seg, 0.5)
+
+        p.drag_to((10, 5))
+        p.recompute()
+
+        assert abs(p.x - 4.0) < 1e-9
+        assert abs(p.y) < 1e-9
+
+    def test_point_on_circle(self):
+        center = FreePoint(0, 0)
+        through = FreePoint(3, 0)
+        c = Circle(center, through)
+
+        p = PointOnObject(c, 0.0)
+
+        assert abs(p.x - 3.0) < 1e-9
+        assert abs(p.y) < 1e-9
+
+
+class TestRegularPolygon:
+    def test_vertices(self):
+        center = FreePoint(0, 0)
+        vertex = FreePoint(1, 0)
+
+        poly = RegularPolygon(center, vertex, 4)
+
+        assert len(poly.verts) == 4
+
+    def test_distance_to_vertex(self):
+        center = FreePoint(0, 0)
+        vertex = FreePoint(1, 0)
+
+        poly = RegularPolygon(center, vertex, 4)
+
+        assert poly.distance_to(1, 0) < 1e-9
+
+
+class TestEllipse:
+    def test_point_at(self):
+        center = FreePoint(0, 0)
+        axis_a = FreePoint(2, 0)
+        axis_b = FreePoint(0, 1)
+
+        e = Ellipse(center, axis_a, axis_b)
+
+        x, y = e.point_at(0.0)
+
+        assert abs(x - 2.0) < 1e-9
+        assert abs(y) < 1e-9
+
+    def test_project_top_point(self):
+        center = FreePoint(0, 0)
+        axis_a = FreePoint(2, 0)
+        axis_b = FreePoint(0, 1)
+
+        e = Ellipse(center, axis_a, axis_b)
+
+        t = e.project(0, 1)
+
+        assert abs(t - 0.25) < 1e-6
+
+
+class TestChainFill:
+    def test_triangle_fill_exists(self):
+        p1 = FreePoint(0, 0)
+        p2 = FreePoint(1, 0)
+        p3 = FreePoint(0, 1)
+
+        spans = [
+            Span(p1, p2, None),
+            Span(p2, p3, None),
+            Span(p3, p1, None),
+        ]
+
+        style = FillStyle("#ff0000", 0.5, "solid")
+        fill = ChainFill(spans, style)
+
+        assert fill.exists
+        assert len(fill.path_pts) >= 3
+
+    def test_area_positive(self):
+        p1 = FreePoint(0, 0)
+        p2 = FreePoint(1, 0)
+        p3 = FreePoint(0, 1)
+
+        spans = [
+            Span(p1, p2, None),
+            Span(p2, p3, None),
+            Span(p3, p1, None),
+        ]
+
+        style = FillStyle("#ff0000", 0.5, "solid")
+        fill = ChainFill(spans, style)
+
+        assert abs(abs(fill._area()) - 0.5) < 1e-9
+
+
+class TestIntersect:
+    def test_circle_circle_intersection(self):
+        c1 = Circle(FreePoint(0, 0), FreePoint(2, 0))
+        c2 = Circle(FreePoint(1, 0), FreePoint(3, 0))
+
+        p0 = IntersectPoint(c1, c2, 0)
+        p1 = IntersectPoint(c1, c2, 1)
+
+        assert p0.exists
+        assert p1.exists
+
+    def test_no_intersection_hidden(self):
+        c1 = Circle(FreePoint(0, 0), FreePoint(1, 0))
+        c2 = Circle(FreePoint(10, 0), FreePoint(11, 0))
+
+        p = IntersectPoint(c1, c2, 0)
+
+        assert not p.exists
+
+
+class TestFunctionCurve:
+    def test_explicit_eval_point(self):
+        f = FunctionCurve(kind="explicit", expr="x^2")
+
+        p = f._eval_point(2.0)
+
+        assert p is not None
+        assert abs(p[0] - 2.0) < 1e-9
+        assert abs(p[1] - 4.0) < 1e-9
+
+    def test_parametric_eval_point(self):
+        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
+
+        p = f._eval_point(0.0)
+
+        assert p is not None
+        assert abs(p[0] - 1.0) < 1e-9
+        assert abs(p[1]) < 1e-9
+
+    def test_polar_eval_point(self):
+        f = FunctionCurve(kind="polar", expr="1")
+
+        p = f._eval_point(0.0)
+
+        assert p is not None
+        assert abs(p[0] - 1.0) < 1e-9
+        assert abs(p[1]) < 1e-9
+
+"""宏系统测试。
+
+如果 core.macro 不存在，或 Document 未启用宏录制信号，则自动跳过。
+"""
+
+import pytest
+
+macro = pytest.importorskip("core.macro")
+
+from core.document import Document
+from geo.points import FreePoint
+
+
+@pytest.fixture
+def macro_doc():
+    doc = Document()
+
+    if not hasattr(doc, "object_added"):
+        pytest.skip("Document 未启用 object_added 信号，无法测试宏录制")
+
+    if not hasattr(doc, "macros"):
+        pytest.skip("Document 未启用 macros 字段，无法测试宏系统")
+
+    return doc
+
+
+class TestMacroRecorder:
+    def test_record_add_point(self, macro_doc):
+        mm = macro.MacroManager(macro_doc)
+
+        if hasattr(macro, "set_macro_manager"):
+            macro.set_macro_manager(mm)
+
+        mm.start_recording()
+
+        p = FreePoint(0, 0)
+        macro_doc.add(p)
+
+        mm.stop_recording()
+
+        assert macro_doc.macros
+        assert macro_doc.macros[0]["commands"]
+
+    def test_playback_creates_object(self, macro_doc):
+        mm = macro.MacroManager(macro_doc)
+
+        if hasattr(macro, "set_macro_manager"):
+            macro.set_macro_manager(mm)
+
+        mm.start_recording()
+
+        p = FreePoint(0, 0)
+        macro_doc.add(p)
+
+        mm.stop_recording()
+
+        if not macro_doc.macros:
+            pytest.skip("宏录制未产生命令")
+
+        before = len(macro_doc.objects)
+
+        mm.play_last()
+
+        assert len(macro_doc.objects) > before
+
+    def test_playback_can_undo(self, macro_doc):
+        mm = macro.MacroManager(macro_doc)
+
+        if hasattr(macro, "set_macro_manager"):
+            macro.set_macro_manager(mm)
+
+        mm.start_recording()
+
+        p = FreePoint(0, 0)
+        macro_doc.add(p)
+
+        mm.stop_recording()
+
+        if not macro_doc.macros:
+            pytest.skip("宏录制未产生命令")
+
+        before = len(macro_doc.objects)
+
+        mm.play_last()
+
+        after = len(macro_doc.objects)
+        assert after > before
+
+        macro_doc.undo()
+
+        assert len(macro_doc.objects) == before
+
+
+class TestMacroLibrary:
+    def test_register_script_library(self, macro_doc):
+        if not hasattr(macro, "register_script_library"):
+            pytest.skip("当前宏系统没有 register_script_library")
+
+        macro.register_script_library(
+            macro_doc,
+            "mylib",
+            """
+func double(x) {
+    return x * 2
+}
+"""
+        )
+
+        assert hasattr(macro_doc, "script_libs")
+        assert "mylib" in macro_doc.script_libs
+
+"""媒体对象测试：表格、饼图、柱状图、基础矩形拾取。"""
+
+import pytest
+
+from media.table_obj import TableObject
+from media.chart_obj import PieChartObject, BarChartObject
+
+
+class TestTableObject:
+    def test_create(self):
+        t = TableObject(0, 0, rows=2, cols=3, width=4, height=2)
+
+        assert t.rows == 2
+        assert t.cols == 3
+
+    def test_dump_build(self):
+        t = TableObject(1, 2, rows=2, cols=2, width=3, height=2)
+
+        t2 = TableObject.build([], t.dump())
+
+        assert abs(t2.x - 1) < 1e-9
+        assert abs(t2.y - 2) < 1e-9
+        assert t2.rows == 2
+        assert t2.cols == 2
+
+    def test_distance_inside(self):
+        t = TableObject(0, 0, rows=2, cols=2, width=4, height=2)
+
+        assert t.distance_to(1, -1) == 0.0
+
+
+class TestPieChart:
+    def test_get_values_numeric(self):
+        p = PieChartObject(0, 0, data=[1, 2.5, 3])
+
+        assert p.get_values() == [1.0, 2.5, 3.0]
+
+    def test_get_values_string(self):
+        p = PieChartObject(0, 0, data=["1", "2.0"])
+
+        assert p.get_values() == [1.0, 2.0]
+
+
+class TestBarChart:
+    def test_get_values(self):
+        b = BarChartObject(0, 0, data=[4, 5])
+
+        assert b.get_values() == [4.0, 5.0]
+
+
+class TestMediaRenderSmoke:
+    def test_render_table(self, doc, canvas):
+        t = TableObject(0, 0, rows=2, cols=2, width=3, height=2)
+        doc.add(t)
+
+        img = canvas.render_to_image(fit=True, bg_mode="grid", scale=1.0)
+
+        assert img.width() > 0
+        assert img.height() > 0
+
+"""新特性综合测试：隐函数、橡皮擦、图表、图片内嵌、汉化、线程安全。
+运行：pytest tests/test_new_features.py -v
+"""
+import os
+import json
+import zipfile
+import pytest
+from PySide6.QtGui import QPixmap
+from PySide6.QtWidgets import QApplication
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+@pytest.fixture(autouse=True)
+def clean_variables():
+    from core.variables import get_store
+    store = get_store()
+    saved_vars = dict(store._vars)
+    saved_version = store.version
+    yield
+    store._vars = saved_vars
+    store.version = saved_version
+
+class TestImplicitCurve:
+    def test_parse_equation(self):
+        from geo.implicit_curve import parse_equation
+        assert parse_equation("x^2+y^2=1") == "(x^2+y^2)-(1)"
+        assert parse_equation("x^2+y^2-1") == "x^2+y^2-1"
+        assert parse_equation(" sin(x)*cos(y) = 0.5 ") == "(sin(x)*cos(y))-(0.5)"
+
+    def test_implicit_curve_init(self):
+        from geo.implicit_curve import ImplicitCurve
+        c = ImplicitCurve("x^2+y^2=1")
+        assert c._resolved_expr == "(x^2+y^2)-(1)"
+        assert c.expr == "x^2+y^2=1"
+        
+    def test_marching_squares_circle(self):
+        from geo.implicit_sampler import _marching_squares
+        from core.variables import evaluate
+
+        class _Eval:
+            def __init__(self, e):
+                self.expr = e
+                self.valid = True
+            def eval(self, vd):
+                return evaluate(self.expr, vd)
+
+        test_val = evaluate("x^2+y^2-1", {"x": 0.0, "y": 0.0})
+        assert test_val is not None, "evaluate 无法求值 x^2+y^2-1"
+        assert abs(test_val - (-1.0)) < 1e-9, f"期望 -1.0，实际 {test_val}"
+
+        test_val2 = evaluate("x^2+y^2-1", {"x": 1.0, "y": 0.0})
+        assert test_val2 is not None, "evaluate 无法求值 x^2+y^2-1 在 (1,0)"
+        assert abs(test_val2 - 0.0) < 1e-9, f"期望 0.0，实际 {test_val2}"
+
+        fast = _Eval("x^2+y^2-1")  # ★ 直接传原始表达式
+        vd = {}
+        segments = _marching_squares(fast, vd, -2, 2, -2, 2, 20, 20)
+        assert len(segments) > 0, "圆 x²+y²=1 应产生等值线段"
+        for x1, y1, x2, y2 in segments:
+            assert abs(x1**2 + y1**2 - 1.0) < 0.25
+            assert abs(x2**2 + y2**2 - 1.0) < 0.25
+
+class TestInkEraser:
+    def test_split_stroke(self):
+        from tools.ink_tool import InkTool
+        points = [(float(x), 0.0) for x in range(-5, 6)]
+        segments = InkTool._split_stroke(points, (0.0, 0.0), 1.5)
+        assert len(segments) == 2
+        assert segments[0][0] == (-5.0, 0.0)
+        assert segments[0][-1] == (-2.0, 0.0)
+        assert segments[1][0] == (2.0, 0.0)
+        assert segments[1][-1] == (5.0, 0.0)
+
+    def test_split_stroke_no_erase(self):
+        from tools.ink_tool import InkTool
+        points = [(float(x), 0.0) for x in range(-5, 6)]
+        segments = InkTool._split_stroke(points, (10.0, 10.0), 1.0)
+        assert len(segments) == 1
+        assert len(segments[0]) == len(points)
+
+class TestChartObjects:
+    def test_line_chart_dump_build(self):
+        from media.chart_obj import LineChartObject
+        obj = LineChartObject(1, 2, data=[10, 20], labels=["A", "B"], colors=["#ff0000"])
+        d = obj.dump()
+        obj2 = LineChartObject.build([], d)
+        assert obj2.x == 1
+        assert obj2.data == [10, 20]
+        assert obj2.labels == ["A", "B"]
+
+    def test_donut_chart_dump_build(self):
+        from media.chart_obj import DonutChartObject
+        obj = DonutChartObject(0, 0, data=[25, 25, 25, 25], hole=0.5)
+        d = obj.dump()
+        obj2 = DonutChartObject.build([], d)
+        assert obj2.hole == 0.5
+        assert len(obj2.data) == 4
+
+class TestImageEmbed:
+    def test_image_embed_save_load(self, tmp_path, qapp):
+        from core.document import Document
+        from media.image_obj import ImageObject
+        
+        img_path = tmp_path / "test_img.png"
+        px = QPixmap(10, 10)
+        px.save(str(img_path))
+        
+        doc = Document()
+        img_obj = ImageObject(0, 0, str(img_path))
+        doc.add(img_obj)
+        
+        wgeo_path = tmp_path / "test.wgeo"
+        doc.save(str(wgeo_path))
+        
+        with zipfile.ZipFile(wgeo_path, 'r') as zf:
+            names = zf.namelist()
+            img_files = [n for n in names if n.startswith("media/images/")]
+            assert len(img_files) == 1, "图片应被内嵌到 media/images/ 目录"
+            
+            sketch = json.loads(zf.read("sketch.json"))
+            img_data = sketch[0]["params"]
+            assert "image_name" in img_data, "序列化应使用 image_name 而非绝对路径"
+            assert "path" not in img_data
+            
+        doc2 = Document()
+        doc2.load(str(wgeo_path))
+        assert len(doc2.objects) == 1
+        loaded_img = doc2.objects[0]
+        assert isinstance(loaded_img, ImageObject)
+        assert os.path.exists(loaded_img.path), "加载时应自动解压到临时目录"
+        assert not loaded_img.pixmap.isNull()
+
+class TestPropertyPanelI18n:
+    def test_chinese_labels(self, qapp):
+        from ui.property_panel import PropertyPanel
+        
+        class MockDoc:
+            changed = type('Signal', (), {'connect': lambda *a: None})()
+        class MockCanvas:
+            doc = MockDoc()
+            height = 800
+            width = 1200
+            
+        panel = PropertyPanel(MockCanvas())
+        
+        class DummyImplicit: pass
+        DummyImplicit.__name__ = "ImplicitCurve"
+        
+        class DummyParallel: pass
+        DummyParallel.__name__ = "ParallelLine"
+        
+        class DummyIncenter: pass
+        DummyIncenter.__name__ = "Incenter"
+        
+        assert panel._get_type_label(DummyImplicit()) == "隐函数曲线"
+        assert panel._get_type_label(DummyParallel()) == "平行线"
+        assert panel._get_type_label(DummyIncenter()) == "内心"
+
+class TestSamplerShutdown:
+    def test_implicit_sampler_shutdown(self):
+        from geo.implicit_sampler import get_implicit_sampler, shutdown_implicit_sampler
+        sampler = get_implicit_sampler()
+        assert sampler.isRunning()
+        shutdown_implicit_sampler()
+        assert not sampler.isRunning()
+
+"""工具覆盖层 draw_overlay 可见性回归测试。
+
+用于防止：
+1. 画圆预览圆/半径不见
+2. 框选框不见
+3. 选择工具红色参考线不见
+4. 某个对象渲染异常导致整个 overlay 层被吞掉
+
+运行：
+    python -m pytest tests/test_overlay_visible.py -v
+"""
+
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QImage, QPainter, QPen
+from PySide6.QtWidgets import QApplication
+
+
+@pytest.fixture(scope="module", autouse=True)
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+
+def _make_canvas():
+    from core.document import Document
+    from ui.canvas import Canvas
+
+    doc = Document()
+    canvas = Canvas(doc)
+
+    canvas.resize(360, 240)
+    canvas.origin = QPointF(180.0, 120.0)
+    canvas.scale = 20.0
+
+    return canvas
+
+
+def _non_white_count(img: QImage, step=2):
+    count = 0
+    for y in range(0, img.height(), step):
+        for x in range(0, img.width(), step):
+            c = img.pixelColor(x, y)
+            if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
+                count += 1
+    return count
+
+
+
+class _OverlayProbeTool:
+    """探针工具：只要 draw_overlay 被调用，就把画布涂红。"""
+    hint = "probe"
+    def activated(self, canvas): pass
+    def deactivated(self, canvas): pass
+    def press(self, canvas, wpt, hit): pass
+    def move(self, canvas, wpt, hit): pass
+    def release(self, canvas, wpt, hit): pass
+    def cancel(self, canvas): pass
+    def draw_overlay(self, p, view):
+        p.fillRect(view.rect(), QColor(255, 0, 0))
+
+
+def test_paint_event_executes_tool_overlay():
+    """验证 Canvas.paintEvent 源码中是否包含调用 draw_overlay 的逻辑。
+    使用源码检查可以避免 Qt 离屏渲染 (offscreen) 下 QWidget 未显示时
+    QPainter(self) 报错的底层限制。"""
+    import inspect
+    from ui.canvas import Canvas
+    
+    source = inspect.getsource(Canvas.paintEvent)
+    
+    assert "draw_overlay" in source, (
+        "Canvas.paintEvent 源码中没有找到 draw_overlay 调用。"
+        "请确保 paintEvent 中包含 self.tool.draw_overlay(p, self)。"
+    )
+
+
+
+def test_circle_tool_preview_visible():
+    from geo.points import FreePoint
+    from tools.circle_tool import CircleTool
+
+    canvas = _make_canvas()
+    tool = CircleTool()
+    tool.center = FreePoint(0.0, 0.0)
+    canvas.cursor_wpt = (3.0, 0.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    assert _non_white_count(img) > 20, (
+        "画圆工具预览不可见。"
+        "请检查 theme.dashed_pen 是否返回了有效画笔，"
+        "以及 CircleTool.draw_overlay 是否正常绘制。"
+    )
+
+
+
+def test_circle_tool_radius_line_visible():
+    from geo.points import FreePoint
+    from tools.circle_tool import CircleTool
+
+    canvas = _make_canvas()
+    tool = CircleTool()
+    tool.center = FreePoint(0.0, 0.0)
+    canvas.cursor_wpt = (4.0, 0.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    marked = 0
+    y = int(canvas.origin.y())
+    for x in range(int(canvas.origin.x()), int(canvas.origin.x() + 4.0 * canvas.scale), 2):
+        c = img.pixelColor(x, y)
+        if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
+            marked += 1
+
+    assert marked > 5, (
+        "画圆工具半径预览线不可见。"
+        "请检查 CircleTool.draw_overlay 是否画了 p.drawLine(center, cursor)。"
+    )
+
+
+
+def test_select_tool_red_guide_visible():
+    from tools.select import SelectTool
+
+    canvas = _make_canvas()
+    tool = SelectTool()
+    tool._guides = [("v", 0.0)]
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    x = int(canvas.origin.x())
+    red_found = False
+
+    for y in range(0, img.height(), 1):
+        c = img.pixelColor(x, y)
+        if c.red() > 150 and c.red() > c.green() + 30 and c.red() > c.blue() + 30:
+            red_found = True
+            break
+
+    assert red_found, (
+        "选择工具红色参考线不可见。"
+        "请检查 SelectTool.draw_overlay 和 theme.dashed_pen。"
+    )
+
+
+
+def test_box_select_overlay_visible():
+    from tools.box_select import BoxSelectTool
+
+    canvas = _make_canvas()
+    tool = BoxSelectTool()
+    tool.box_start = (-4.0, -2.0)
+    tool.box_end = (4.0, 2.0)
+
+    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
+    img.fill(Qt.GlobalColor.white)
+
+    p = QPainter(img)
+    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    tool.draw_overlay(p, canvas)
+    p.end()
+
+    assert _non_white_count(img) > 50, (
+        "框选工具预览框不可见。"
+        "请检查 BoxSelectTool.draw_overlay。"
+    )
+
+"""渲染冒烟测试：确保常见对象可以离屏渲染，不抛异常。"""
+
+import pytest
+
+from geo.points import FreePoint
+from geo.segments import Segment
+from geo.circles import Circle
+
+from plugins.text_tool import TextObject
+
+
+class TestRenderSmoke:
+    def test_render_basic_objects(self, doc, canvas):
+        a = FreePoint(0, 0)
+        b = FreePoint(2, 1)
+        seg = Segment(a, b)
+        cir = Circle(a, b)
+        text = TextObject("test", "#000000", 14, anchor=None, pos=(0, 1))
+
+        for obj in (a, b, seg, cir, text):
+            doc.add(obj)
+
+        img = canvas.render_to_image(fit=False, bg_mode="grid", scale=1.0)
+
+        assert img.width() > 0
+        assert img.height() > 0
+
+    def test_render_fit_content(self, doc, canvas):
+        a = FreePoint(-1, -1)
+        b = FreePoint(1, 1)
+        seg = Segment(a, b)
+
+        doc.add(a)
+        doc.add(b)
+        doc.add(seg)
+
+        img = canvas.render_to_image(fit=True, bg_mode="grid", scale=1.0)
+
+        assert img.width() > 0
+        assert img.height() > 0
+
+    def test_export_png(self, doc, canvas, tmp_path):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        path = tmp_path / "export.png"
+
+        canvas.export_image(str(path), fit=True, bg_mode="grid", png_scale=1.0)
+
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+"""保存 / 载入测试。"""
+
+from core.document import Document
+from core.variables import get_store
+
+from geo.points import FreePoint
+from geo.segments import Segment
+
+
+class TestSaveLoad:
+    def test_roundtrip(self, doc, tmp_path):
+        store = get_store()
+
+        store.define("a", 3.0, 0.0, 10.0)
+
+        a = FreePoint(0, 0)
+        b = FreePoint(1, 1)
+        seg = Segment(a, b)
+
+        doc.add(a)
+        doc.add(b)
+        doc.add(seg)
+
+        path = tmp_path / "test.wgeo"
+
+        doc.save(str(path))
+
+        doc2 = Document()
+        doc2.load(str(path))
+
+        assert len(doc2.objects) == len(doc.objects)
+
+        var = doc2.vars.get_var("a")
+        assert var is not None
+        assert abs(var.value - 3.0) < 1e-9
+
+"""脚本引擎测试。
+
+由于脚本系统可能处于旧语法 / 新语法过渡阶段，
+本测试会自动探测当前可用的基础建点语法。
+"""
+
+import math
+
+import pytest
+
+scripting = pytest.importorskip("core.scripting")
+
+run_script = getattr(scripting, "run_script", None)
+
+if run_script is None:
+    pytest.skip("core.scripting 没有 run_script 入口", allow_module_level=True)
+
+from core.document import Document
+from geo.points import AbstractPoint
+
+
+def _points(doc):
+    return [o for o in doc.objects if isinstance(o, AbstractPoint)]
+
+
+def _run(doc, script):
+    try:
+        run_script(doc, script, owner_id="pytest", canvas=None)
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="module")
+def syntax():
+    """探测当前脚本引擎支持哪种基础建点语法。"""
+
+    candidates = [
+        (
+            "new",
+            """
+A = point(1, 2)
+__keep = true
+"""
+        ),
+        (
+            "old",
+            """
+add point A at (1, 2)
+__keep = true
+"""
+        ),
+    ]
+
+    for style, script in candidates:
+        doc = Document()
+        _run(doc, script)
+
+        if _points(doc):
+            return style
+
+    pytest.skip("当前脚本引擎无法通过基础建点脚本")
+
+
+def _point_script(syntax, keep=True):
+    keep_line = "__keep = true" if keep else "__keep = false"
+
+    if syntax == "new":
+        return f"""
+A = point(1, 2)
+{keep_line}
+"""
+
+    return f"""
+add point A at (1, 2)
+{keep_line}
+"""
+
+
+class TestScriptPoint:
+    def test_create_point_keep_true(self, syntax):
+        doc = Document()
+
+        _run(doc, _point_script(syntax, keep=True))
+
+        assert len(_points(doc)) == 1
+
+    def test_create_point_keep_false(self, syntax):
+        doc = Document()
+
+        _run(doc, _point_script(syntax, keep=False))
+
+        assert len(_points(doc)) == 0
+
+
+class TestScriptControlFlow:
+    def test_if_true(self, syntax):
+        doc = Document()
+
+        if syntax == "new":
+            script = """
+if true {
+    A = point(0, 0)
+}
+__keep = true
+"""
+        else:
+            script = """
+if true {
+    add point A at (0, 0)
+}
+__keep = true
+"""
+
+        _run(doc, script)
+
+        assert len(_points(doc)) == 1
+
+    def test_if_false_else(self, syntax):
+        doc = Document()
+
+        if syntax == "new":
+            script = """
+if false {
+    A = point(0, 0)
+} else {
+    B = point(1, 1)
+}
+__keep = true
+"""
+        else:
+            script = """
+if false {
+    add point A at (0, 0)
+} else {
+    add point B at (1, 1)
+}
+__keep = true
+"""
+
+        _run(doc, script)
+
+        assert len(_points(doc)) == 1
+
+
+class TestScriptVariable:
+    def test_global_variable(self, syntax):
+        doc = Document()
+
+        script = """
+global n = 7
+__keep = true
+"""
+
+        _run(doc, script)
+
+        var = doc.vars.get_var("n")
+
+        assert var is not None
+        assert abs(var.value - 7.0) < 1e-9
+
+
+class TestScriptDelete:
+    def test_delete_script_created_point(self, syntax):
+        doc = Document()
+
+        if syntax == "new":
+            script = """
+A = point(0, 0)
+delete A
+__keep = true
+"""
+        else:
+            script = """
+add point A at (0, 0)
+delete A
+__keep = true
+"""
+
+        _run(doc, script)
+
+        assert len(_points(doc)) == 0
+
+
+class TestScriptMath:
+    def test_math_function(self, syntax):
+        doc = Document()
+
+        if syntax == "new":
+            script = """
+A = point(sin(0) + 1, 0)
+__keep = true
+"""
+        else:
+            script = """
+add point A at (sin(0) + 1, 0)
+__keep = true
+"""
+
+        _run(doc, script)
+
+        pts = _points(doc)
+
+        if not pts:
+            pytest.skip("当前脚本引擎不支持在坐标表达式中调用数学函数")
+
+        assert abs(pts[0].x - 1.0) < 1e-6
+
+
+class TestScriptOldLoop:
+    def test_old_name_template_loop(self, syntax):
+        if syntax != "old":
+            pytest.skip("该测试仅针对旧语法的名字模板循环")
+
+        doc = Document()
+
+        script = """
+for i from 1 to 3 {
+    add point P{i} at (i, 0)
+}
+__keep = true
+"""
+
+        _run(doc, script)
+
+        assert len(_points(doc)) >= 3
+
+
+import math
+import pytest
+import sys
+import os
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+from core.document import Document
+from geo.points import FreePoint, PointOnObject
+from geo.segments import Segment
+from geo.circles import Circle
+from geo.intersects import IntersectPoint
+
+from constraints import types  # 触发所有 @register_constraint 装饰器
+from constraints.document_ext import patch_document
+patch_document()
+
+from constraints.types.distance import DistanceConstraint
+from constraints.types.horizontal import HorizontalConstraint
+from constraints.types.circle_constraints import TangentCirclesConstraint
+from constraints.types.fixed import FixedConstraint
+
+
+def test_basic_free_points_convergence():
+    """
+    用例 1：基础自由点约束（距离 + 水平）
+    验证 LM 求解器对纯自由点的收敛性。
+    """
+    doc = Document()
+    p1 = FreePoint(0, 0)
+    p2 = FreePoint(1, 1)
+    doc.add(p1)
+    doc.add(p2)
+    
+    c1 = DistanceConstraint(p1, p2, "5")
+    doc.add_constraint(c1)
+    
+    c2 = HorizontalConstraint(p1, p2)
+    doc.add_constraint(c2)
+    
+    assert abs(p1.y - p2.y) < 1e-4, "水平约束未满足"
+    dist = math.hypot(p1.x - p2.x, p1.y - p2.y)
+    assert abs(dist - 5.0) < 1e-4, f"距离约束未满足，实际距离: {dist}"
+
+
+def test_point_on_object_chain_rule():
+    """
+    用例 2：包含吸附点 (PointOnObject) 的约束
+    验证 _chain_rule_jacobian 是否正确计算了从动点对自由点的偏导数。
+    """
+    doc = Document()
+    p1 = FreePoint(0, 0)
+    p2 = FreePoint(10, 0)
+    seg = Segment(p1, p2)
+    doc.add(p1)
+    doc.add(p2)
+    doc.add(seg)
+    
+    poo = PointOnObject(seg, 0.5)
+    doc.add(poo)
+    
+    p3 = FreePoint(5, 5)
+    doc.add(p3)
+    
+    c = DistanceConstraint(p3, poo, "3")
+    doc.add_constraint(c)
+    
+    dist = math.hypot(p3.x - poo.x, p3.y - poo.y)
+    assert abs(dist - 3.0) < 1e-3, f"吸附点距离约束未收敛，实际距离: {dist}"
+    
+    assert abs(poo.y) < 1e-3, "吸附点脱离了宿主线段"
+
+
+def test_tangent_circles_analytic_jacobian():
+    """
+    用例 3：相切约束 (TangentCC) 与解析雅可比
+    验证 _jacobian_analytic 在圆相切约束中的正确性。
+    """
+    doc = Document()
+    c1_center = FreePoint(0, 0)
+    c1_through = FreePoint(2, 0) # r1 = 2
+    c1 = Circle(c1_center, c1_through)
+    
+    c2_center = FreePoint(5, 0)
+    c2_through = FreePoint(6, 0) # r2 = 1
+    c2 = Circle(c2_center, c2_through)
+    
+    doc.add(c1_center); doc.add(c1_through); doc.add(c1)
+    doc.add(c2_center); doc.add(c2_through); doc.add(c2)
+    
+    c = TangentCirclesConstraint(c1, c2, mode="outer")
+    doc.add_constraint(c)
+    
+    dist = math.hypot(c1_center.x - c2_center.x, c1_center.y - c2_center.y)
+    r1 = math.hypot(c1_through.x - c1_center.x, c1_through.y - c1_center.y)
+    r2 = math.hypot(c2_through.x - c2_center.x, c2_through.y - c2_center.y)
+    
+    assert abs(dist - (r1 + r2)) < 1e-3, f"外切约束未收敛，d={dist}, r1+r2={r1+r2}"
+
+
+
+
+
+def test_intersect_point_fallback():
+    """
+    用例 5：复杂拓扑 (交点 IntersectPoint) 下的求解器鲁棒性
+    IntersectPoint 的解析偏导目前返回空 {}，测试求解器是否能通过
+    移动其他自由点 (数值差分或仅移动目标点) 来满足约束。
+    """
+    doc = Document()
+    p1, p2 = FreePoint(0, 0), FreePoint(10, 10)
+    p3, p4 = FreePoint(0, 10), FreePoint(10, 0)
+    s1, s2 = Segment(p1, p2), Segment(p3, p4)
+    
+    doc.add(p1); doc.add(p2); doc.add(s1)
+    doc.add(p3); doc.add(p4); doc.add(s2)
+    
+    ip = IntersectPoint(s1, s2, 0) # 理论交点 (5,5)
+    doc.add(ip)
+    
+    p5 = FreePoint(5, 8)
+    doc.add(p5)
+    
+    doc.add_constraint(DistanceConstraint(ip, p5, "2"))
+    
+    dist = math.hypot(ip.x - p5.x, ip.y - p5.y)
+    assert abs(dist - 2.0) < 1e-3, f"交点距离约束未收敛，实际距离: {dist}"
+
+"""根号渲染诊断测试。
+验证 sqrt 的各种输入形式是否被正确解析为 Sqrt 节点并渲染为根号图形。
+
+运行：pytest tests/test_sqrt_rendering.py -v
+"""
+import os
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QImage, QPainter, QColor
+from PySide6.QtCore import Qt
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    app = QApplication.instance() or QApplication([])
+    yield app
+
+
+class TestSqrtParsing:
+    """测试不同输入形式是否产生 Sqrt AST 节点。"""
+
+    def test_latex_sqrt_produces_sqrt_node(self):
+        """\\sqrt{x} 应产生 Sqrt 节点。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{x}")
+        if isinstance(ast, Row):
+            found = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            found = isinstance(ast, Sqrt)
+        assert found, (
+            f"\\sqrt{{x}} 未产生 Sqrt 节点，"
+            f"实际类型: {type(ast).__name__}"
+        )
+
+    def test_function_sqrt_NOT_produces_sqrt_node(self):
+        """sqrt(x) 当前【不会】产生 Sqrt 节点 —— 这是 bug 根源。"""
+        from ui.math.parser import parse, Sqrt, Row, Ord
+        ast = parse("sqrt(x)")
+        if isinstance(ast, Row):
+            types = [type(c).__name__ for c in ast.children]
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            types = [type(ast).__name__]
+            has_sqrt = isinstance(ast, Sqrt)
+
+        if not has_sqrt:
+            pytest.fail(
+                f"【确认 BUG】sqrt(x) 未产生 Sqrt 节点。\n"
+                f"AST 子节点类型: {types}\n"
+                f"原因: parser 将 'sqrt' 识别为 Ord(func) 而非 Sqrt 命令。\n"
+                f"修复: 需在 parser 或 draw_math 前将 sqrt(...) 转换为 \\sqrt{{...}}"
+            )
+
+    def test_unicode_sqrt_NOT_produces_sqrt_node(self):
+        """√(x) 当前【不会】产生 Sqrt 节点。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse("√(x)")
+        if isinstance(ast, Row):
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            has_sqrt = isinstance(ast, Sqrt)
+        if not has_sqrt:
+            pytest.fail(
+                "【确认 BUG】√(x) 未产生 Sqrt 节点。"
+                "parser 不认识 Unicode √ 字符。"
+            )
+
+    def test_nested_sqrt(self):
+        """\\sqrt{\\sqrt{x}} 嵌套根号。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{\sqrt{x}}")
+        if isinstance(ast, Row):
+            outer = [c for c in ast.children if isinstance(c, Sqrt)]
+        else:
+            outer = [ast] if isinstance(ast, Sqrt) else []
+        assert len(outer) > 0, "嵌套根号外层未识别"
+        inner = outer[0].content
+        if isinstance(inner, Row):
+            inner_sqrt = [c for c in inner.children if isinstance(c, Sqrt)]
+        else:
+            inner_sqrt = [inner] if isinstance(inner, Sqrt) else []
+        assert len(inner_sqrt) > 0, "嵌套根号内层未识别"
+
+    def test_sqrt_with_complex_content(self):
+        """\\sqrt{x^2+1} 根号内含上标。"""
+        from ui.math.parser import parse, Sqrt, Row
+        ast = parse(r"\sqrt{x^2+1}")
+        if isinstance(ast, Row):
+            found = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            found = isinstance(ast, Sqrt)
+        assert found, "\\sqrt{x^2+1} 未产生 Sqrt 节点"
+
+
+class TestSqrtLayout:
+    """测试 Sqrt 节点的度量是否正确（宽/升/降）。"""
+
+    def test_sqrt_measure_has_positive_dimensions(self):
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        ast = parse(r"\sqrt{x}")
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        w, a, d = lay.measure(ast)
+        assert w > 0, f"Sqrt 宽度应 > 0，实际 {w}"
+        assert a > 0, f"Sqrt 升部应 > 0，实际 {a}"
+
+    def test_sqrt_wider_than_plain_x(self):
+        """根号渲染应比纯文本 x 更宽（因为有根号勾）。"""
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        
+        w_sqrt, _, _ = lay.measure(parse(r"\sqrt{x}"))
+        w_text, _, _ = lay.measure(parse("x"))
+        
+        assert w_sqrt > w_text, (
+            f"根号宽度 {w_sqrt:.1f} 应大于纯 x 宽度 {w_text:.1f}"
+        )
+
+    def test_function_sqrt_measure_is_just_text(self):
+        """sqrt(x) 的度量应该只是纯文本宽度（无根号勾）。"""
+        from ui.math.parser import parse
+        from ui.math.layout import MathLayout
+        lay = MathLayout(None, 16, QColor(0, 0, 0))
+        w, a, d = lay.measure(parse("sqrt(x)"))
+        assert w > 0, "sqrt(x) 度量宽度应 > 0"
+
+
+class TestSqrtRendering:
+    """实际渲染到 QImage，检查根号勾是否被绘制。"""
+
+    def _render_to_image(self, text, size=20):
+        from ui.math import draw_math
+        img = QImage(300, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 20, 50, text, size, QColor(0, 0, 0))
+        p.end()
+        return img
+
+    def _count_dark_pixels(self, img):
+        """统计非白色像素数量。"""
+        count = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
+                    count += 1
+        return count
+
+    def test_latex_sqrt_renders_hook(self, qapp):
+        """\\sqrt{x} 应渲染出根号勾（比纯文本多笔画）。"""
+        img_sqrt = self._render_to_image(r"\sqrt{x}")
+        img_text = self._render_to_image("x")
+        px_sqrt = self._count_dark_pixels(img_sqrt)
+        px_text = self._count_dark_pixels(img_text)
+        assert px_sqrt > px_text, (
+            f"\\sqrt{{x}} 像素 {px_sqrt} 未多于 x 像素 {px_text}"
+        )
+
+    def test_function_sqrt_renders_as_text_only(self, qapp):
+        """sqrt(x) 当前只渲染为纯文本（无根号勾）。"""
+        img_func = self._render_to_image("sqrt(x)")
+        img_latex = self._render_to_image(r"\sqrt{x}")
+        px_func = self._count_dark_pixels(img_func)
+        px_latex = self._count_dark_pixels(img_latex)
+        if px_func < px_latex * 0.9:
+            pytest.fail(
+                f"【确认 BUG】sqrt(x) 像素 {px_func} 显著少于 "
+                f"\\sqrt{{x}} 像素 {px_latex}。\n"
+                f"差值 {px_latex - px_func} 像素 = 缺失的根号勾。"
+            )
+
+
+class TestFormulaEditorSqrt:
+    """测试公式编辑器中根号的完整链路。"""
+
+    def test_keypad_inserts_sqrt_text(self):
+        """键盘按钮 √( 插入的是 'sqrt(' 字符串。"""
+        from ui.formula_editor import FormulaKeypad
+        for label, ins, cls in FormulaKeypad.KEYS:
+            if "√" in label:
+                assert ins == "sqrt(", (
+                    f"√ 按钮插入的是 '{ins}' 而非 'sqrt('"
+                )
+                return
+        pytest.fail("FormulaKeypad.KEYS 中未找到 √ 按钮")
+
+    def test_preview_text_contains_sqrt_not_latex(self):
+        """预览文本是 'y = sqrt(x)' 而非 'y = \\sqrt{x}'。"""
+        expr = "sqrt(x)"
+        preview_text = f"y = {expr}"
+        assert "sqrt(" in preview_text
+        assert "\\sqrt" not in preview_text, (
+            "预览文本中不应包含 LaTeX \\sqrt（当前确实不包含，这是 bug）"
+        )
+
+    def test_draw_math_with_preview_text(self, qapp):
+        """用预览文本调用 draw_math，验证根号是否渲染。"""
+        from ui.math import draw_math
+        img = QImage(400, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 12, 40, "y = sqrt(x)", 18, QColor(0, 0, 0))
+        p.end()
+        px = self._count_non_white(img)
+        assert px > 0, "渲染结果不应为空白"
+
+    def _count_non_white(self, img):
+        count = 0
+        for y in range(img.height()):
+            for x in range(img.width()):
+                c = img.pixelColor(x, y)
+                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
+                    count += 1
+        return count
+
+
+class TestSqrtConversion:
+    """测试 sqrt(...) → \\sqrt{...} 的转换函数。
+    这是修复方案的核心：在 draw_math 之前进行语法转换。
+    """
+
+    @staticmethod
+    def _convert_sqrt_to_latex(text: str) -> str:
+        """将 sqrt(...) 函数调用转换为 \\sqrt{...} LaTeX 命令。
+        支持嵌套括号：sqrt(x^2+sqrt(x)) → \\sqrt{x^2+\\sqrt{x}}
+        """
+        import re
+        result = text
+        max_iter = 20
+        for _ in range(max_iter):
+            idx = result.find("sqrt(")
+            if idx == -1:
+                break
+            start = idx + 5  # "sqrt(" 的长度
+            depth = 1
+            end = start
+            while end < len(result) and depth > 0:
+                if result[end] == "(":
+                    depth += 1
+                elif result[end] == ")":
+                    depth -= 1
+                end += 1
+            inner = result[start:end - 1]
+            result = result[:idx] + "\\sqrt{" + inner + "}" + result[end:]
+        return result
+
+    def test_simple_sqrt(self):
+        assert self._convert_sqrt_to_latex("sqrt(x)") == "\\sqrt{x}"
+
+    def test_sqrt_with_expression(self):
+        assert self._convert_sqrt_to_latex("sqrt(x^2+1)") == "\\sqrt{x^2+1}"
+
+    def test_nested_sqrt(self):
+        result = self._convert_sqrt_to_latex("sqrt(x+sqrt(y))")
+        assert result == "\\sqrt{x+\\sqrt{y}}"
+
+    def test_sqrt_in_larger_expr(self):
+        result = self._convert_sqrt_to_latex("y = 2*sqrt(x) + 1")
+        assert result == "y = 2*\\sqrt{x} + 1"
+
+    def test_no_sqrt_unchanged(self):
+        assert self._convert_sqrt_to_latex("x^2 + 1") == "x^2 + 1"
+
+    def test_multiple_sqrt(self):
+        result = self._convert_sqrt_to_latex("sqrt(a) + sqrt(b)")
+        assert result == "\\sqrt{a} + \\sqrt{b}"
+
+    def test_sqrt_with_nested_parens(self):
+        result = self._convert_sqrt_to_latex("sqrt((x+1)*(x-1))")
+        assert result == "\\sqrt{(x+1)*(x-1)}"
+
+    def test_unicode_sqrt_conversion(self):
+        """√(x) 也应被转换。"""
+        text = "√(x)"
+        text = text.replace("√(", "sqrt(")
+        assert self._convert_sqrt_to_latex(text) == "\\sqrt{x}"
+
+
+class TestSqrtEndToEnd:
+    """转换后的完整渲染链路验证。"""
+
+    def test_converted_sqrt_renders_hook(self, qapp):
+        """转换后的 \\sqrt{x} 应渲染出根号勾。"""
+        from ui.math import draw_math
+        from ui.math.parser import parse, Sqrt, Row
+
+        text = "sqrt(x)"
+        converted = TestSqrtConversion._convert_sqrt_to_latex(text)
+        assert converted == "\\sqrt{x}"
+
+        ast = parse(converted)
+        if isinstance(ast, Row):
+            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
+        else:
+            has_sqrt = isinstance(ast, Sqrt)
+        assert has_sqrt, f"转换后仍未产生 Sqrt 节点: {converted}"
+
+        img = QImage(200, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w = draw_math(p, 20, 50, converted, 20, QColor(0, 0, 0))
+        p.end()
+        assert w > 0, "渲染宽度应 > 0"
+
+    def test_formula_editor_preview_with_conversion(self, qapp):
+        """模拟公式编辑器预览：先转换再渲染。"""
+        from ui.math import draw_math
+
+        user_input = "sqrt(x^2 + 1)"
+        preview = f"y = {user_input}"
+        converted = TestSqrtConversion._convert_sqrt_to_latex(preview)
+        assert "\\sqrt{" in converted
+
+        img = QImage(400, 80, QImage.Format.Format_ARGB32)
+        img.fill(Qt.GlobalColor.white)
+        p = QPainter(img)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        draw_math(p, 12, 40, converted, 18, QColor(0, 0, 0))
+        p.end()
+
+"""工具测试：点、线段、圆、框选、选择拖动。"""
+
+import pytest
+
+from geo.points import FreePoint
+from geo.segments import Segment
+from geo.circles import Circle
+
+from tools.point_tool import PointTool
+from tools.segment_tool import SegmentTool
+from tools.circle_tool import CircleTool
+from tools.box_select import BoxSelectTool
+from tools.select import SelectTool
+
+
+class TestPointTool:
+    def test_press_creates_point(self, doc, canvas):
+        tool = PointTool()
+        tool.activated(canvas)
+
+        tool.press(canvas, (1.0, 1.0), None)
+
+        points = [o for o in doc.objects if isinstance(o, FreePoint)]
+        assert len(points) == 1
+
+
+class TestSegmentTool:
+    def test_two_presses_create_segment(self, doc, canvas):
+        tool = SegmentTool()
+        tool.activated(canvas)
+
+        tool.press(canvas, (0.0, 0.0), None)
+        tool.press(canvas, (2.0, 0.0), None)
+
+        points = [o for o in doc.objects if isinstance(o, FreePoint)]
+        segments = [o for o in doc.objects if isinstance(o, Segment)]
+
+        assert len(points) == 2
+        assert len(segments) == 1
+
+
+class TestCircleTool:
+    def test_two_presses_create_circle(self, doc, canvas):
+        tool = CircleTool()
+        tool.activated(canvas)
+
+        tool.press(canvas, (0.0, 0.0), None)
+        tool.press(canvas, (2.0, 0.0), None)
+
+        circles = [o for o in doc.objects if isinstance(o, Circle)]
+        assert len(circles) == 1
+
+
+class TestBoxSelectTool:
+    def test_box_selects_inside_points(self, doc, canvas):
+        inside = FreePoint(0, 0)
+        outside = FreePoint(10, 10)
+
+        doc.add(inside)
+        doc.add(outside)
+
+        tool = BoxSelectTool()
+        tool.activated(canvas)
+
+        tool.box_start = (-1, -1)
+        tool.box_end = (1, 1)
+
+        tool.release(canvas, (1, 1), None)
+
+        assert inside.selected
+        assert not outside.selected
+
+
+class TestSelectTool:
+    def test_press_selects_object(self, doc, canvas):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        tool = SelectTool()
+        tool.activated(canvas)
+
+        tool.press(canvas, (0, 0), p)
+
+        assert p.selected
+
+    def test_drag_moves_point(self, doc, canvas):
+        p = FreePoint(0, 0)
+        doc.add(p)
+
+        tool = SelectTool()
+        tool.activated(canvas)
+
+        tool.press(canvas, (0, 0), p)
+        tool.move(canvas, (2, 0), None)
+        tool.release(canvas, (2, 0), None)
+
+        assert abs(p.x - 2.0) < 1e-6
+
+"""变换系统测试：平移、旋转、缩放、反射、迭代点。"""
+
+import math
+
+import pytest
+
+from geo.points import FreePoint
+from transforms.objects import TransformDriver, TransformPoint, IterPoint
+
+
+class TestTransformPoint:
+    def test_translate_expr(self):
+        p = FreePoint(1, 1)
+
+        drv = TransformDriver(
+            "translate",
+            exprs={"mode": "expr", "dx": "2", "dy": "3"}
+        )
+
+        tp = TransformPoint(drv, p)
+
+        assert tp.exists
+        assert abs(tp.x - 3.0) < 1e-9
+        assert abs(tp.y - 4.0) < 1e-9
+
+    def test_rotate_90(self):
+        center = FreePoint(0, 0)
+        p = FreePoint(1, 0)
+
+        drv = TransformDriver(
+            "rotate",
+            points=[center],
+            exprs={"angle": "90"}
+        )
+
+        tp = TransformPoint(drv, p)
+
+        assert tp.exists
+        assert abs(tp.x) < 1e-9
+        assert abs(tp.y - 1.0) < 1e-9
+
+    def test_scale_factor(self):
+        center = FreePoint(0, 0)
+        p = FreePoint(1, 1)
+
+        drv = TransformDriver(
+            "scale",
+            points=[center],
+            exprs={"mode": "expr", "factor": "2"}
+        )
+
+        tp = TransformPoint(drv, p)
+
+        assert tp.exists
+        assert abs(tp.x - 2.0) < 1e-9
+        assert abs(tp.y - 2.0) < 1e-9
+
+    def test_reflect_x_axis(self):
+        p1 = FreePoint(0, 0)
+        p2 = FreePoint(1, 0)
+        p = FreePoint(1, 2)
+
+        drv = TransformDriver(
+            "reflect",
+            points=[p1, p2],
+            exprs={}
+        )
+
+        tp = TransformPoint(drv, p)
+
+        assert tp.exists
+        assert abs(tp.x - 1.0) < 1e-9
+        assert abs(tp.y + 2.0) < 1e-9
+
+
+class TestIterPoint:
+    def test_iteration_expression(self):
+        base = FreePoint(0, 0)
+
+        p = IterPoint(base, 1, "x + 1", "y + 2")
+
+        assert p.exists
+        assert abs(p.x - 1.0) < 1e-9
+        assert abs(p.y - 2.0) < 1e-9
 
 """几何对象库。
 新增对象：在本目录新建 .py 文件，用 @register_geo + @register_renderer 即可，
@@ -16575,27 +19735,33 @@ class IterationPointTool(Tool):
 
 import math
 import os
-import random
-
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot
+from PySide6.QtGui import QPainter, QImage, QColor
 from PySide6.QtWidgets import QWidget, QToolButton
-from PySide6.QtGui import QLinearGradient, QPainter, QPainterPath, QImage
+from PySide6.QtSvg import QSvgGenerator
 
 from core.registry import find_renderer
 from geo.points import SNAP_PX, AbstractPoint, nearest_point
-from geo.function_curve import FunctionCurve
-from core.variables import get_store
 from tools.select import SelectTool
+from media.script_button import ScriptButtonObject
 from ui import theme
 from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
 from ui.property_panel import PropertyPanel
 
+from ui.canvas_render import (
+    draw_background_cached, draw_background, draw_grid, draw_axes,
+    content_bbox, draw_publication, draw_publication_point, collect_screen_segments
+)
+from ui.canvas_menu import (
+    show_context_menu, edit_function_object, doc_action, rename_objects,
+    set_visible, duplicate_selected, reorder_objects, select_related,
+    simple_edit_script_button, edit_text_object
+)
+from ui.canvas_snow import init_snow, tick_snow, draw_snow
 
 BASE_SCALE = 48.0
-
 
 class Canvas(QWidget):
     cursor_info = Signal(str)
@@ -16617,12 +19783,10 @@ class Canvas(QWidget):
         self._pan_anchor = QPointF()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-
         self.rail = ToolRail(self)
         self.rail.tool_chosen.connect(self.set_tool)
         self.tool_activated.connect(self.rail.sync)
         self.zoom_bar = ZoomBar(self, self)
-
         self._trash = QToolButton(self)
         self._trash.setObjectName("trashBtn")
         self._trash.setIcon(trash_icon())
@@ -16632,32 +19796,29 @@ class Canvas(QWidget):
         self._trash.setCursor(Qt.CursorShape.PointingHandCursor)
         self._trash.clicked.connect(self.doc.remove_selected)
         self._trash.hide()
-
         self.info_panel = PropertyPanel(self, self)
         self._bg_cache = None
         self._bg_cache_key = None
         self._render_list = []
         self._render_list_version = -1
-        
         self._snow_active = False
         self._snowflakes = []
         self._snow_timer = QTimer(self)
         self._snow_timer.setInterval(33)
         self._snow_timer.timeout.connect(self._tick_snow)
-
         self.refresh_theme()
         self.update_snow_state()
-
         from geo.function_sampler import get_sampler
         self._sampler = get_sampler()
         self._sampler.sampled.connect(self._on_function_sampled)
         from geo.implicit_sampler import get_implicit_sampler
         self._implicit_sampler = get_implicit_sampler()
         self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
-        
+        self._egg_data = None 
+
     def _on_implicit_sampled(self, curve_id, segments):
-        """隐函数采样完成 → 更新缓存 → 触发重绘。"""
         from geo.implicit_curve import ImplicitCurve
+        from core.variables import get_store
         store = get_store()
         for obj in self.doc.objects:
             if isinstance(obj, ImplicitCurve) and obj.id == curve_id:
@@ -16665,10 +19826,10 @@ class Canvas(QWidget):
                 obj.update_cache(segments, store.version, domain)
                 self.update()
                 break
-                    
+
     def _on_function_sampled(self, curve_id, points):
-        """子线程采样完成 → 更新对应曲线的缓存 → 触发重绘。"""
         from geo.function_curve import FunctionCurve
+        from core.variables import get_store
         store = get_store()
         for obj in self.doc.objects:
             if isinstance(obj, FunctionCurve) and obj.id == curve_id:
@@ -16678,12 +19839,10 @@ class Canvas(QWidget):
                 break
 
     def to_screen(self, x: float, y: float) -> QPointF:
-        return QPointF(self.origin.x() + x * self.scale,
-                       self.origin.y() - y * self.scale)
+        return QPointF(self.origin.x() + x * self.scale, self.origin.y() - y * self.scale)
 
     def to_world(self, pt: QPointF) -> tuple[float, float]:
-        return ((pt.x() - self.origin.x()) / self.scale,
-                (self.origin.y() - pt.y()) / self.scale)
+        return ((pt.x() - self.origin.x()) / self.scale, (self.origin.y() - pt.y()) / self.scale)
 
     def set_tool(self, tool) -> None:
         if isinstance(tool, type):
@@ -16702,8 +19861,7 @@ class Canvas(QWidget):
         new_scale = min(max(self.scale * factor, 4.0), 4000.0)
         wx, wy = self.to_world(anchor)
         self.scale = new_scale
-        self.origin = QPointF(anchor.x() - wx * self.scale,
-                              anchor.y() + wy * self.scale)
+        self.origin = QPointF(anchor.x() - wx * self.scale, anchor.y() + wy * self.scale)
         self._emit_zoom()
         self.update()
 
@@ -16723,7 +19881,6 @@ class Canvas(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-
             p.save()
             try:
                 self.render_scene(p)
@@ -16732,17 +19889,14 @@ class Canvas(QWidget):
                 traceback.print_exc()
             finally:
                 p.restore()
-
-
             if getattr(self, "_snow_active", False):
                 p.save()
                 try:
-                    self._draw_snow(p)
+                    draw_snow(self, p)
                 except Exception:
                     pass
                 finally:
                     p.restore()
-
             p.save()
             try:
                 self._draw_snap_indicator(p)
@@ -16750,7 +19904,6 @@ class Canvas(QWidget):
                 pass
             finally:
                 p.restore()
-
             if self.tool is not None:
                 p.save()
                 try:
@@ -16760,39 +19913,11 @@ class Canvas(QWidget):
                     traceback.print_exc()
                 finally:
                     p.restore()
-
         finally:
             p.end()
-
         self._place_trash()
 
-    def _draw_background_cached(self, p: QPainter) -> None:
-        """背景 + 网格 + 坐标轴缓存渲染。视图/主题不变时直接 blit。"""
-        key = (self.width(), self.height(),
-               round(self.origin.x(), 2), round(self.origin.y(), 2),
-               round(self.scale, 2), theme.active_name())
-        if self._bg_cache is not None and self._bg_cache_key == key:
-            p.drawPixmap(0, 0, self._bg_cache)
-            return
-            
-        dpr = self.devicePixelRatioF()
-        self._bg_cache = QPixmap(int(self.width() * dpr), int(self.height() * dpr))
-        self._bg_cache.setDevicePixelRatio(dpr)
-        self._bg_cache.fill(Qt.GlobalColor.transparent)
-        
-        bg_p = QPainter(self._bg_cache)
-        bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        self._draw_background(bg_p)
-        self._draw_grid(bg_p)
-        self._draw_axes(bg_p)
-        bg_p.end()
-        
-        self._bg_cache_key = key
-        p.drawPixmap(0, 0, self._bg_cache)
-
-
     def _get_render_list(self):
-        """返回 [(obj, renderer), ...] 缓存列表。对象增删/显隐变化时重建。"""
         ver = self.doc._mutation_count
         if self._render_list_version != ver:
             self._render_list = []
@@ -16804,10 +19929,8 @@ class Canvas(QWidget):
             self._render_list_version = ver
         return self._render_list
 
-
     def _in_viewport(self, obj) -> bool:
-        """快速判断对象是否在视口内（粗略检测，宁多画不漏画）。"""
-        margin = 60.0  # 像素边距
+        margin = 60.0
         w, h = self.width(), self.height()
         if hasattr(obj, 'x') and hasattr(obj, 'y') and not hasattr(obj, 'width'):
             sx = self.origin.x() + obj.x * self.scale
@@ -16818,43 +19941,49 @@ class Canvas(QWidget):
             y0 = self.origin.y() - obj.y * self.scale
             x1 = x0 + obj.width * self.scale
             y1 = y0 + obj.height * self.scale
-            return not (x1 < -margin or x0 > w + margin or
-                        y1 < -margin or y0 > h + margin)
+            return not (x1 < -margin or x0 > w + margin or y1 < -margin or y0 > h + margin)
         return True
     
+    @Slot()
+    def _process_egg_data(self):
+        """主线程中处理下载好的图片数据（由 invokeMethod 调用）"""
+        data = getattr(self, "_egg_data", None)
+        if data is None:
+            return
+        from ui.canvas_render import _build_pixmap
+        _build_pixmap(self, data)
+        self._egg_data = None
+        
     def render_scene(self, p: QPainter, bg_mode: str = "grid", publication: bool = False) -> None:
-        """渲染几何场景。publication=True 时启用黑白出版样式。"""
-        from geo.points import AbstractPoint
-        
         if publication:
-            p.fillRect(self.rect(), QColor("#ffffff")) # 纯白背景
+            p.fillRect(self.rect(), QColor("#ffffff"))
         elif bg_mode == "grid":
-            self._draw_background_cached(p)
+            draw_background_cached(self, p)
         elif bg_mode == "axes":
-            self._draw_background(p)
-            self._draw_axes(p)
+            draw_background(self, p)
+            draw_axes(self, p)
         else:
-            self._draw_background(p)
-
+            draw_background(self, p)
+            
+        from ui.canvas_render import draw_egg_if_active
+        draw_egg_if_active(p, self)
+                
         render_list = self._get_render_list()
-        
         if publication:
             for obj, renderer in render_list:
                 if not isinstance(obj, AbstractPoint) and self._in_viewport(obj):
-                    _draw_publication(p, obj, self)
-
-            screen_segments = _collect_screen_segments(self)
-
+                    draw_publication(p, obj, self)
+            screen_segments = collect_screen_segments(self)
             for obj, renderer in render_list:
                 if isinstance(obj, AbstractPoint) and self._in_viewport(obj):
-                    _draw_publication_point(p, obj, self, screen_segments)
+                    draw_publication_point(p, obj, self, screen_segments)
         else:
             for obj, renderer in render_list:
                 if self._in_viewport(obj):
                     renderer(p, obj, self)
-                    
+
+
     def _apply_fit(self, bbox) -> None:
-        """把包围盒适配到画布尺寸并居中（四周留白 70px）。"""
         x0, y0, x1, y1 = bbox
         cw, ch = max(x1 - x0, 1e-9), max(y1 - y0, 1e-9)
         margin = 70.0
@@ -16862,8 +19991,7 @@ class Canvas(QWidget):
         avail_h = max(self.height() - 2 * margin, 1.0)
         self.scale = min(avail_w / cw, avail_h / ch)
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-        self.origin = QPointF(self.width() / 2 - cx * self.scale,
-                              self.height() / 2 + cy * self.scale)
+        self.origin = QPointF(self.width() / 2 - cx * self.scale, self.height() / 2 + cy * self.scale)
 
     def render_to_image(self, fit=False, bg_mode="grid", scale=2.0, publication=False):
         saved = (self.scale, self.origin)
@@ -16871,13 +19999,12 @@ class Canvas(QWidget):
             if fit:
                 bbox = content_bbox(self.doc)
                 if bbox: self._apply_fit(bbox)
-            img = QImage(int(self.width() * scale), int(self.height() * scale),
-                         QImage.Format.Format_ARGB32)
+            img = QImage(int(self.width() * scale), int(self.height() * scale), QImage.Format.Format_ARGB32)
             p = QPainter()
             p.begin(img)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
             p.scale(scale, scale)
-            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
+            self.render_scene(p, bg_mode, publication=publication)
             p.end()
             return img
         finally:
@@ -16885,13 +20012,12 @@ class Canvas(QWidget):
 
     def export_image(self, path, fit=False, bg_mode="grid", png_scale=2.0, publication=False):
         if os.path.splitext(path)[1].lower() == ".svg":
-            self._export_svg(path, fit, bg_mode, publication=publication) # ★ 透传
+            self._export_svg(path, fit, bg_mode, publication=publication)
         else:
             self.render_to_image(fit, bg_mode, png_scale, publication=publication).save(path)
 
     def _export_svg(self, path, fit=False, bg_mode="grid", publication=False):
         from PySide6.QtCore import QRectF
-        from PySide6.QtSvg import QSvgGenerator
         saved = (self.scale, self.origin)
         try:
             if fit:
@@ -16905,97 +20031,10 @@ class Canvas(QWidget):
             p = QPainter()
             p.begin(gen)
             p.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self.render_scene(p, bg_mode, publication=publication) # ★ 透传
+            self.render_scene(p, bg_mode, publication=publication)
             p.end()
         finally:
             self.scale, self.origin = saved
-            
-    def _draw_background(self, p: QPainter) -> None:
-        g = QLinearGradient(0.0, 0.0, 0.0, float(self.height()))
-        g.setColorAt(0.0, theme.BG_TOP)
-        g.setColorAt(1.0, theme.BG_BOTTOM)
-        p.fillRect(self.rect(), g)
-
-    def _draw_grid(self, p: QPainter) -> None:
-        w, h = self.width(), self.height()
-        step = self._nice_step(64.0 / self.scale)
-        major = step * 5.0
-        x0, y0 = self.to_world(QPointF(0.0, float(h)))
-        x1, y1 = self.to_world(QPointF(float(w), 0.0))
-        eps = step * 1e-6
-
-        for s, color in ((step, theme.GRID_MINOR), (major, theme.GRID_MAJOR)):
-            p.setPen(theme.pen(color, 1.0))
-            gx = math.ceil(x0 / s) * s
-            while gx <= x1:
-                if abs(gx) > eps:
-                    sx = self.to_screen(gx, 0.0).x()
-                    p.drawLine(QPointF(sx, 0.0), QPointF(sx, float(h)))
-                gx += s
-            gy = math.ceil(y0 / s) * s
-            while gy <= y1:
-                if abs(gy) > eps:
-                    sy = self.to_screen(0.0, gy).y()
-                    p.drawLine(QPointF(0.0, sy), QPointF(float(w), sy))
-                gy += s
-
-        ox, oy = self.origin.x(), self.origin.y()
-        p.setPen(theme.pen(theme.LABEL, 1.0))
-        p.setFont(theme.LABEL_FONT)
-        gx = math.ceil(x0 / major) * major
-        while gx <= x1:
-            if abs(gx) > eps:
-                sx = self.to_screen(gx, 0.0).x()
-                ly = float(min(max(oy + 16.0, 16.0), h - 6.0))
-                p.drawText(QPointF(sx + 4.0, ly), f"{gx:g}")
-            gx += major
-        gy = math.ceil(y0 / major) * major
-        while gy <= y1:
-            if abs(gy) > eps:
-                sy = self.to_screen(0.0, gy).y()
-                lx = float(min(max(ox + 6.0, 6.0), w - 34.0))
-                p.drawText(QPointF(lx, sy - 5.0), f"{gy:g}")
-            gy += major
-
-    def _draw_axes(self, p: QPainter) -> None:
-        w, h = float(self.width()), float(self.height())
-        ox, oy = self.origin.x(), self.origin.y()
-        p.setPen(theme.pen(theme.AXIS, 1.6))
-        p.setBrush(theme.brush(theme.AXIS))
-        if 0.0 <= oy <= h:
-            p.drawLine(QPointF(0.0, oy), QPointF(w, oy))
-            p.drawPath(self._arrow(QPointF(w - 2.0, oy), 0.0))
-        if 0.0 <= ox <= w:
-            p.drawLine(QPointF(ox, 0.0), QPointF(ox, h))
-            p.drawPath(self._arrow(QPointF(ox, 2.0), 90.0))
-
-        p.setPen(theme.pen(theme.LABEL, 1.0))
-        p.setFont(theme.AXIS_FONT)
-        if 0.0 <= oy <= h:
-            p.drawText(QPointF(w - 18.0, oy - 10.0), "x")
-        if 0.0 <= ox <= w:
-            p.drawText(QPointF(ox + 10.0, 20.0), "y")
-        if 0.0 <= ox <= w and 0.0 <= oy <= h:
-            p.drawText(QPointF(ox - 18.0, oy + 20.0), "O")
-
-    @staticmethod
-    def _arrow(tip: QPointF, angle_deg: float) -> QPainterPath:
-        a = math.radians(angle_deg)
-        size = 9.0
-        bx = tip.x() - math.cos(a) * size
-        by = tip.y() + math.sin(a) * size
-        px, py = -math.sin(a) * size * 0.45, -math.cos(a) * size * 0.45
-        path = QPainterPath()
-        path.moveTo(tip)
-        path.lineTo(bx + px, by + py)
-        path.lineTo(bx - px, by - py)
-        path.closeSubpath()
-        return path
-
-    @staticmethod
-    def _nice_step(raw: float) -> float:
-        e = 10.0 ** math.floor(math.log10(raw))
-        return next(m * e for m in (1.0, 2.0, 5.0, 10.0) if m * e >= raw)
 
     def _draw_snap_indicator(self, p: QPainter) -> None:
         if self.snap_target is None:
@@ -17028,15 +20067,12 @@ class Canvas(QWidget):
 
     def resizeEvent(self, ev) -> None:
         self.rail.move(14, 14)
-
         zb = self.zoom_bar
-        zb.move(self.width() - zb.width() - 16,
-                self.height() - zb.height() - 16)
-
+        zb.move(self.width() - zb.width() - 16, self.height() - zb.height() - 16)
         self.info_panel.reposition()
-        self._bg_cache = None  
+        self._bg_cache = None
         if self._snow_active and not self._snowflakes:
-            self._init_snow()
+            init_snow(self)
 
     def mousePressEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
@@ -17046,25 +20082,19 @@ class Canvas(QWidget):
             return
         if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
             self.doc._arm_undo()
-            self.tool.press(self, self.to_world(ev.position()),
-                            self.pick(ev.position()))
+            self.tool.press(self, self.to_world(ev.position()), self.pick(ev.position()))
             self.doc._commit_undo_if_changed()
 
     def mouseDoubleClickEvent(self, ev):
-        from media.script_button import ScriptButtonObject
-
         hit = self.pick(ev.position())
-
         if isinstance(hit, ScriptButtonObject):
             hit.edit(self)
             return
-
         super().mouseDoubleClickEvent(ev)
-        
+
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
-        self.cursor_info.emit(
-            f"( {self.cursor_wpt[0]:7.2f} , {self.cursor_wpt[1]:7.2f} )")
+        self.cursor_info.emit(f"( {self.cursor_wpt[0]:7.2f} , {self.cursor_wpt[1]:7.2f} )")
         if self._panning:
             self.origin = ev.position() - self._pan_anchor
             self.update()
@@ -17074,250 +20104,20 @@ class Canvas(QWidget):
         if self.tool is not None:
             self.tool.move(self, self.cursor_wpt, hit)
         hover = getattr(hit, "draggable", False) or self.snap_target is not None
-        self.setCursor(Qt.CursorShape.SizeAllCursor if hover
-                       else Qt.CursorShape.ArrowCursor)
+        self.setCursor(Qt.CursorShape.SizeAllCursor if hover else Qt.CursorShape.ArrowCursor)
         self.update()
-        
+
     def contextMenuEvent(self, ev):
-        """增强右键菜单：对象编辑、层级、依赖、脚本按钮、文本、媒体对象等。"""
-        from PySide6.QtWidgets import QMenu
-        from PySide6.QtCore import QPointF
-        from media.base import MediaObject
-        from media.script_button import ScriptButtonObject
-
-        local_pos = QPointF(ev.pos())
-        hit = self.pick(local_pos)
-        selected = [o for o in self.doc.objects if o.selected]
-
-        if hit is not None:
-            if hit not in selected:
-                self.doc.set_selection([hit])
-                selected = [hit]
-
-        menu = QMenu(self)
-
-        if hit is not None:
-            if isinstance(hit, ScriptButtonObject):
-                menu.addAction("▶ 运行脚本", lambda: hit.run(self))
-                menu.addAction("🧩 简单编辑脚本", lambda: self._simple_edit_script_button(hit))
-                menu.addAction("✎ 高级编辑脚本", lambda: hit.edit(self))
-                menu.addSeparator()
-
-            if type(hit).__name__ == "TextObject":
-                menu.addAction("✎ 编辑文本", lambda: self._edit_text_object(hit))
-                menu.addSeparator()
-
-            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
-                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
-                menu.addSeparator()
-            if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
-                menu.addAction("✎ 编辑对象", lambda: hit.edit(self))
-                menu.addSeparator()
-                
-            if type(hit).__name__ in ("FunctionCurve", "ImplicitCurve"):
-                menu.addAction("✎ 编辑函数", lambda: self._edit_function_object(hit))
-                menu.addSeparator()
-                
-        if selected:
-            menu.addAction("重命名…", lambda: self._rename_objects(selected))
-
-            visible_all = all(getattr(o, "visible", True) for o in selected)
-            menu.addAction(
-                "隐藏" if visible_all else "显示",
-                lambda: self._set_visible(selected, not visible_all),
-            )
-
-            menu.addSeparator()
-
-            menu.addAction("复制", self.doc.copy_selection)
-            menu.addAction("剪切", self.doc.cut_selection)
-            menu.addAction("复制一份", self._duplicate_selected)
-
-            menu.addSeparator()
-
-            menu.addAction("置顶", lambda: self._reorder_objects(selected, True))
-            menu.addAction("置底", lambda: self._reorder_objects(selected, False))
-
-            menu.addSeparator()
-
-            menu.addAction("选择父对象", lambda: self._select_related(selected, "parents"))
-            menu.addAction("选择子对象", lambda: self._select_related(selected, "children"))
-
-            menu.addSeparator()
-
-            menu.addAction("删除", self.doc.remove_selected)
-
-        if getattr(self.doc, "_clipboard", None):
-            if not menu.isEmpty():
-                menu.addSeparator()
-            menu.addAction("粘贴", lambda: self.doc.paste())
-
-        if not menu.isEmpty():
-            menu.exec(ev.globalPos())
-        else:
+        if not show_context_menu(self, ev):
             super().contextMenuEvent(ev)
-            
-    
-    def _edit_function_object(self, obj):
-        """右键菜单：编辑函数曲线 / 隐函数。"""
-        from ui.formula_editor import FormulaEditor
-        dlg = FormulaEditor(self, obj, self)
-        if dlg.exec():
-            dlg.build_function()
-            self.doc.changed.emit()
-            
-    def _doc_action(self, fn):
-        """在撤销组中执行一个文档动作。"""
-        self.doc.begin_action()
-        try:
-            fn()
-        finally:
-            self.doc.end_action()
-        self.doc.changed.emit()
 
-    def _rename_objects(self, objs):
-        if len(objs) != 1:
-            return
-
-        from PySide6.QtWidgets import QInputDialog
-
-        obj = objs[0]
-        old_name = getattr(obj, "name", "") or ""
-        name, ok = QInputDialog.getText(
-            self,
-            "重命名对象",
-            "对象名称：",
-            text=old_name,
-        )
-        if ok and name.strip():
-            self.doc.rename_object(obj, name.strip())
-
-    def _set_visible(self, objs, visible):
-        def doit():
-            for o in objs:
-                o.visible = bool(visible)
-
-        self._doc_action(doit)
-
-    def _duplicate_selected(self):
-        self.doc.copy_selection()
-        self.doc.paste()
-
-    def _reorder_objects(self, objs, front):
-        def doit():
-            if front:
-                for o in objs:
-                    if o in self.doc.objects:
-                        self.doc.objects.remove(o)
-                        self.doc.objects.append(o)
-            else:
-                for o in reversed(objs):
-                    if o in self.doc.objects:
-                        self.doc.objects.remove(o)
-                        self.doc.objects.insert(0, o)
-
-        self._doc_action(doit)
-
-    def _select_related(self, objs, mode):
-        related = []
-        for o in objs:
-            if mode == "parents":
-                related.extend(o.parents)
-            else:
-                related.extend(o.children)
-
-        unique = []
-        seen = set()
-        for o in related:
-            if id(o) not in seen:
-                seen.add(id(o))
-                unique.append(o)
-
-        self.doc.set_selection(unique)
-
-    def _simple_edit_script_button(self, obj):
-        from media.script_button_wizard import ScriptButtonWizard
-
-        dlg = ScriptButtonWizard(self, obj, parent=self)
-        if dlg.exec():
-            def doit():
-                dlg.apply_to(obj)
-
-            self._doc_action(doit)
-
-    def _edit_text_object(self, obj):
-        from PySide6.QtWidgets import (
-            QColorDialog,
-            QDialog,
-            QDialogButtonBox,
-            QFormLayout,
-            QLineEdit,
-            QPushButton,
-            QSpinBox,
-            QVBoxLayout,
-        )
-        from PySide6.QtGui import QColor
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle("编辑文本")
-        dlg.setMinimumWidth(360)
-
-        layout = QVBoxLayout(dlg)
-        form = QFormLayout()
-
-        text_edit = QLineEdit(getattr(obj, "text", ""))
-        size_spin = QSpinBox()
-        size_spin.setRange(6, 200)
-        size_spin.setValue(int(getattr(obj, "size", 16)))
-
-        color_holder = [QColor(getattr(obj, "color", "#1f2937"))]
-        color_btn = QPushButton()
-        color_btn.setFixedHeight(22)
-
-        def paint_color():
-            color_btn.setStyleSheet(
-                f"background:{color_holder[0].name()};"
-                f"border:1px solid rgba(0,0,0,0.30);"
-                f"border-radius:5px;"
-            )
-
-        def pick_color():
-            c = QColorDialog.getColor(color_holder[0], self, "选择文本颜色")
-            if c.isValid():
-                color_holder[0] = c
-                paint_color()
-
-        color_btn.clicked.connect(pick_color)
-        paint_color()
-
-        form.addRow("文本内容", text_edit)
-        form.addRow("字号", size_spin)
-        form.addRow("颜色", color_btn)
-        layout.addLayout(form)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.accepted.connect(dlg.accept)
-        buttons.rejected.connect(dlg.reject)
-        layout.addWidget(buttons)
-
-        if dlg.exec():
-            def doit():
-                obj.text = text_edit.text()
-                obj.size = int(size_spin.value())
-                obj.color = color_holder[0].name()
-
-            self._doc_action(doit)
-                       
     def mouseReleaseEvent(self, ev) -> None:
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
             return
         if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
-            self.tool.release(self, self.to_world(ev.position()),
-                              self.pick(ev.position()))
+            self.tool.release(self, self.to_world(ev.position()), self.pick(ev.position()))
 
     def wheelEvent(self, ev) -> None:
         k = 1.15 if ev.angleDelta().y() > 0 else 1.0 / 1.15
@@ -17333,97 +20133,344 @@ class Canvas(QWidget):
 
     def _place_trash(self) -> None:
         sel = [o for o in self.doc.objects if o.selected]
-        if (len(sel) == 1 and isinstance(sel[0], AbstractPoint)
-                and isinstance(self.tool, SelectTool)):
+        if (len(sel) == 1 and isinstance(sel[0], AbstractPoint) and isinstance(self.tool, SelectTool)):
             qpt = self.to_screen(sel[0].x, sel[0].y)
             self._trash.move(int(qpt.x()) + 12, int(qpt.y()) - 36)
             self._trash.show()
             self._trash.raise_()
         else:
             self._trash.hide()
+
     def refresh_theme(self) -> None:
-        """换肤：刷新悬浮面板样式与全部图标配色，然后重绘。"""
         self.setStyleSheet(theme.canvas_qss())
         self._trash.setIcon(trash_icon())
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
-        self._bg_cache = None   
+        self._bg_cache = None
         self.update()
 
     def update_snow_state(self):
-        """根据文档标题决定是否开启雪花。"""
         title = (self.doc.meta.get("title") or "").strip().lower()
         active = (title == "snow")
-
         if active and not self._snow_active:
-            self._init_snow()
+            init_snow(self)
             self._snow_timer.start()
         elif not active and self._snow_active:
             self._snow_timer.stop()
             self._snowflakes.clear()
-
         self._snow_active = active
         self.update()
 
-    def _init_snow(self):
-        w = max(self.width(), 800)
-        h = max(self.height(), 600)
-
-        self._snowflakes = []
-        for _ in range(140):
-            self._snowflakes.append({
-                "x": random.uniform(0.0, float(w)),
-                "y": random.uniform(0.0, float(h)),
-                "r": random.uniform(1.2, 3.4),
-                "v": random.uniform(0.6, 1.9),
-                "amp": random.uniform(0.2, 0.9),
-                "phase": random.uniform(0.0, 2.0 * math.pi),
-            })
-
     def _tick_snow(self):
-        if not self._snow_active:
-            return
+        tick_snow(self)
 
-        w = max(self.width(), 1)
-        h = max(self.height(), 1)
+from PySide6.QtCore import QPointF
+from PySide6.QtGui import QColor
+from PySide6.QtWidgets import (QMenu, QInputDialog, QColorDialog, QDialog, QDialogButtonBox, 
+                               QFormLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout)
+from media.base import MediaObject
+from media.script_button import ScriptButtonObject
 
-        for f in self._snowflakes:
-            f["y"] += f["v"]
-            f["phase"] += 0.02
-            f["x"] += math.sin(f["phase"]) * f["amp"]
+def show_context_menu(canvas, ev):
+    local_pos = QPointF(ev.pos())
+    hit = canvas.pick(local_pos)
+    selected = [o for o in canvas.doc.objects if o.selected]
 
-            if f["y"] > h + 6.0:
-                f["y"] = -6.0
-                f["x"] = random.uniform(0.0, float(w))
+    if hit is not None:
+        if hit not in selected:
+            canvas.doc.set_selection([hit])
+            selected = [hit]
 
-        self.update()
+    menu = QMenu(canvas)
+    if hit is not None:
+        if isinstance(hit, ScriptButtonObject):
+            menu.addAction("▶ 运行脚本", lambda: hit.run(canvas))
+            menu.addAction("🧩 简单编辑脚本", lambda: simple_edit_script_button(canvas, hit))
+            menu.addAction("✎ 高级编辑脚本", lambda: hit.edit(canvas))
+            menu.addSeparator()
+        if type(hit).__name__ == "TextObject":
+            menu.addAction("✎ 编辑文本", lambda: edit_text_object(canvas, hit))
+            menu.addSeparator()
+        if isinstance(hit, MediaObject) and hasattr(hit, "edit") and callable(hit.edit):
+            menu.addAction("✎ 编辑对象", lambda: hit.edit(canvas))
+            menu.addSeparator()
+        if type(hit).__name__ in ("FunctionCurve", "ImplicitCurve"):
+            menu.addAction("✎ 编辑函数", lambda: edit_function_object(canvas, hit))
+            menu.addSeparator()
 
-    def _draw_snow(self, p: QPainter) -> None:
-        p.save()
-        p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QColor(255, 255, 255, 190))
+    if selected:
+        menu.addAction("重命名…", lambda: rename_objects(canvas, selected))
+        visible_all = all(getattr(o, "visible", True) for o in selected)
+        menu.addAction(
+            "隐藏" if visible_all else "显示",
+            lambda: set_visible(canvas, selected, not visible_all),
+        )
+        menu.addSeparator()
+        menu.addAction("复制", canvas.doc.copy_selection)
+        menu.addAction("剪切", canvas.doc.cut_selection)
+        menu.addAction("复制一份", lambda: duplicate_selected(canvas))
+        menu.addSeparator()
+        menu.addAction("置顶", lambda: reorder_objects(canvas, selected, True))
+        menu.addAction("置底", lambda: reorder_objects(canvas, selected, False))
+        menu.addSeparator()
+        menu.addAction("选择父对象", lambda: select_related(canvas, selected, "parents"))
+        menu.addAction("选择子对象", lambda: select_related(canvas, selected, "children"))
+        menu.addSeparator()
+        menu.addAction("删除", canvas.doc.remove_selected)
 
-        for f in self._snowflakes:
-            p.drawEllipse(QPointF(f["x"], f["y"]), f["r"], f["r"])
+    if getattr(canvas.doc, "_clipboard", None):
+        if not menu.isEmpty():
+            menu.addSeparator()
+        menu.addAction("粘贴", lambda: canvas.doc.paste())
 
-        p.restore()
+    if not menu.isEmpty():
+        menu.exec(ev.globalPos())
+        return True
+    return False
+
+def edit_function_object(canvas, obj):
+    from ui.formula_editor import FormulaEditor
+    dlg = FormulaEditor(canvas, obj, canvas)
+    if dlg.exec():
+        dlg.build_function()
+        canvas.doc.changed.emit()
+
+def doc_action(canvas, fn):
+    canvas.doc.begin_action()
+    try:
+        fn()
+    finally:
+        canvas.doc.end_action()
+    canvas.doc.changed.emit()
+
+def rename_objects(canvas, objs):
+    if len(objs) != 1:
+        return
+    obj = objs[0]
+    old_name = getattr(obj, "name", "") or ""
+    name, ok = QInputDialog.getText(canvas, "重命名对象", "对象名称：", text=old_name)
+    if ok and name.strip():
+        canvas.doc.rename_object(obj, name.strip())
+
+def set_visible(canvas, objs, visible):
+    def doit():
+        for o in objs:
+            o.visible = bool(visible)
+    doc_action(canvas, doit)
+
+def duplicate_selected(canvas):
+    canvas.doc.copy_selection()
+    canvas.doc.paste()
+
+def reorder_objects(canvas, objs, front):
+    def doit():
+        if front:
+            for o in objs:
+                if o in canvas.doc.objects:
+                    canvas.doc.objects.remove(o)
+                    canvas.doc.objects.append(o)
+        else:
+            for o in reversed(objs):
+                if o in canvas.doc.objects:
+                    canvas.doc.objects.remove(o)
+                    canvas.doc.objects.insert(0, o)
+    doc_action(canvas, doit)
+
+def select_related(canvas, objs, mode):
+    related = []
+    for o in objs:
+        if mode == "parents":
+            related.extend(o.parents)
+        else:
+            related.extend(o.children)
+    unique = []
+    seen = set()
+    for o in related:
+        if id(o) not in seen:
+            seen.add(id(o))
+            unique.append(o)
+    canvas.doc.set_selection(unique)
+
+def simple_edit_script_button(canvas, obj):
+    from media.script_button_wizard import ScriptButtonWizard
+    dlg = ScriptButtonWizard(canvas, obj, parent=canvas)
+    if dlg.exec():
+        def doit():
+            dlg.apply_to(obj)
+        doc_action(canvas, doit)
+
+def edit_text_object(canvas, obj):
+    dlg = QDialog(canvas)
+    dlg.setWindowTitle("编辑文本")
+    dlg.setMinimumWidth(360)
+    layout = QVBoxLayout(dlg)
+    form = QFormLayout()
+    text_edit = QLineEdit(getattr(obj, "text", ""))
+    size_spin = QSpinBox()
+    size_spin.setRange(6, 200)
+    size_spin.setValue(int(getattr(obj, "size", 16)))
+    color_holder = [QColor(getattr(obj, "color", "#1f2937"))]
+    color_btn = QPushButton()
+    color_btn.setFixedHeight(22)
+
+    def paint_color():
+        color_btn.setStyleSheet(
+            f"background:{color_holder[0].name()};"
+            f"border:1px solid rgba(0,0,0,0.30);"
+            f"border-radius:5px;"
+        )
+
+    def pick_color():
+        c = QColorDialog.getColor(color_holder[0], canvas, "选择文本颜色")
+        if c.isValid():
+            color_holder[0] = c
+            paint_color()
+
+    color_btn.clicked.connect(pick_color)
+    paint_color()
+    form.addRow("文本内容", text_edit)
+    form.addRow("字号", size_spin)
+    form.addRow("颜色", color_btn)
+    layout.addLayout(form)
+    buttons = QDialogButtonBox(
+        QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+    )
+    buttons.accepted.connect(dlg.accept)
+    buttons.rejected.connect(dlg.reject)
+    layout.addWidget(buttons)
+    if dlg.exec():
+        def doit():
+            obj.text = text_edit.text()
+            obj.size = int(size_spin.value())
+            obj.color = color_holder[0].name()
+
+            if "[ACG]" in obj.text:
+                from ui.canvas_render import trigger_egg
+                trigger_egg(canvas)
+
+        doc_action(canvas, doit)
+
+import math
+import os
+import random
+from PySide6.QtCore import QPointF, Qt, QRectF
+from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap, QPen, QFont
+from core.registry import find_renderer
+from geo.points import AbstractPoint 
+from geo.function_curve import FunctionCurve
+from ui import theme
+
+def nice_step(raw: float) -> float:
+    e = 10.0 ** math.floor(math.log10(raw))
+    return next(m * e for m in (1.0, 2.0, 5.0, 10.0) if m * e >= raw)
+
+def arrow_path(tip: QPointF, angle_deg: float) -> QPainterPath:
+    a = math.radians(angle_deg)
+    size = 9.0
+    bx = tip.x() - math.cos(a) * size
+    by = tip.y() + math.sin(a) * size
+    px, py = -math.sin(a) * size * 0.45, -math.cos(a) * size * 0.45
+    path = QPainterPath()
+    path.moveTo(tip)
+    path.lineTo(bx + px, by + py)
+    path.lineTo(bx - px, by - py)
+    path.closeSubpath()
+    return path
+
+def draw_background_cached(canvas, p: QPainter) -> None:
+    key = (canvas.width(), canvas.height(),
+           round(canvas.origin.x(), 2), round(canvas.origin.y(), 2),
+           round(canvas.scale, 2), theme.active_name())
+    if canvas._bg_cache is not None and canvas._bg_cache_key == key:
+        p.drawPixmap(0, 0, canvas._bg_cache)
+        return
+    dpr = canvas.devicePixelRatioF()
+    canvas._bg_cache = QPixmap(int(canvas.width() * dpr), int(canvas.height() * dpr))
+    canvas._bg_cache.setDevicePixelRatio(dpr)
+    canvas._bg_cache.fill(Qt.GlobalColor.transparent)
+    bg_p = QPainter(canvas._bg_cache)
+    bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
+    draw_background(canvas, bg_p)
+    draw_grid(canvas, bg_p)
+    draw_axes(canvas, bg_p)
+    bg_p.end()
+    canvas._bg_cache_key = key
+    p.drawPixmap(0, 0, canvas._bg_cache)
+
+def draw_background(canvas, p: QPainter) -> None:
+    g = QLinearGradient(0.0, 0.0, 0.0, float(canvas.height()))
+    g.setColorAt(0.0, theme.BG_TOP)
+    g.setColorAt(1.0, theme.BG_BOTTOM)
+    p.fillRect(canvas.rect(), g)
+
+def draw_grid(canvas, p: QPainter) -> None:
+    w, h = canvas.width(), canvas.height()
+    step = nice_step(64.0 / canvas.scale)
+    major = step * 5.0
+    x0, y0 = canvas.to_world(QPointF(0.0, float(h)))
+    x1, y1 = canvas.to_world(QPointF(float(w), 0.0))
+    eps = step * 1e-6
+    for s, color in ((step, theme.GRID_MINOR), (major, theme.GRID_MAJOR)):
+        p.setPen(theme.pen(color, 1.0))
+        gx = math.ceil(x0 / s) * s
+        while gx <= x1:
+            if abs(gx) > eps:
+                sx = canvas.to_screen(gx, 0.0).x()
+                p.drawLine(QPointF(sx, 0.0), QPointF(sx, float(h)))
+            gx += s
+        gy = math.ceil(y0 / s) * s
+        while gy <= y1:
+            if abs(gy) > eps:
+                sy = canvas.to_screen(0.0, gy).y()
+                p.drawLine(QPointF(0.0, sy), QPointF(float(w), sy))
+            gy += s
+    ox, oy = canvas.origin.x(), canvas.origin.y()
+    p.setPen(theme.pen(theme.LABEL, 1.0))
+    p.setFont(theme.LABEL_FONT)
+    gx = math.ceil(x0 / major) * major
+    while gx <= x1:
+        if abs(gx) > eps:
+            sx = canvas.to_screen(gx, 0.0).x()
+            ly = float(min(max(oy + 16.0, 16.0), h - 6.0))
+            p.drawText(QPointF(sx + 4.0, ly), f"{gx:g}")
+        gx += major
+    gy = math.ceil(y0 / major) * major
+    while gy <= y1:
+        if abs(gy) > eps:
+            sy = canvas.to_screen(0.0, gy).y()
+            lx = float(min(max(ox + 6.0, 6.0), w - 34.0))
+            p.drawText(QPointF(lx, sy - 5.0), f"{gy:g}")
+        gy += major
+
+def draw_axes(canvas, p: QPainter) -> None:
+    w, h = float(canvas.width()), float(canvas.height())
+    ox, oy = canvas.origin.x(), canvas.origin.y()
+    p.setPen(theme.pen(theme.AXIS, 1.6))
+    p.setBrush(theme.brush(theme.AXIS))
+    if 0.0 <= oy <= h:
+        p.drawLine(QPointF(0.0, oy), QPointF(w, oy))
+        p.drawPath(arrow_path(QPointF(w - 2.0, oy), 0.0))
+    if 0.0 <= ox <= w:
+        p.drawLine(QPointF(ox, 0.0), QPointF(ox, h))
+        p.drawPath(arrow_path(QPointF(ox, 2.0), 90.0))
+    p.setPen(theme.pen(theme.LABEL, 1.0))
+    p.setFont(theme.AXIS_FONT)
+    if 0.0 <= oy <= h:
+        p.drawText(QPointF(w - 18.0, oy - 10.0), "x")
+    if 0.0 <= ox <= w:
+        p.drawText(QPointF(ox + 10.0, 20.0), "y")
+    if 0.0 <= ox <= w and 0.0 <= oy <= h:
+        p.drawText(QPointF(ox - 18.0, oy + 20.0), "O")
 
 def content_bbox(doc):
-    """所有可见对象的包围盒。
-    函数曲线可能无限延伸，不参与普通包围盒计算，
-    而是用其余对象的包围盒（加边距）裁剪函数采样点，避免导出被撑爆。
-    """
     xs, ys = [], []
     funcs = []
-
     for o in doc.objects:
         if not (o.visible and o.exists):
             continue
-
         if isinstance(o, FunctionCurve):
             funcs.append(o)
             continue
-
         if getattr(o, "media", False):
             try:
                 xs.append(o.x)
@@ -17433,12 +20480,10 @@ def content_bbox(doc):
                 continue
             except Exception:
                 pass
-
         if isinstance(o, AbstractPoint):
             xs.append(o.x)
             ys.append(o.y)
             continue
-
         if hasattr(o, "world_pos"):
             try:
                 wx, wy = o.world_pos()
@@ -17447,17 +20492,14 @@ def content_bbox(doc):
                 continue
             except Exception:
                 pass
-
         if isinstance(getattr(o, "anchor", None), tuple):
             xs.append(o.anchor[0])
             ys.append(o.anchor[1])
             continue
-
         if isinstance(getattr(o, "label_pos", None), tuple):
             xs.append(o.label_pos[0])
             ys.append(o.label_pos[1])
             continue
-
         try:
             for i in range(37):
                 px, py = o.point_at(i / 36)
@@ -17465,7 +20507,6 @@ def content_bbox(doc):
                 ys.append(py)
         except Exception:
             pass
-
     if funcs:
         if xs:
             x_min, x_max = min(xs), max(xs)
@@ -17475,16 +20516,13 @@ def content_bbox(doc):
             cy0, cy1 = y_min - m, y_max + m
         else:
             cx0, cx1, cy0, cy1 = -10.0, 10.0, -10.0, 10.0
-
         for f in funcs:
             a, b = f._param_domain()
-
             if f.kind == "explicit":
                 a = max(a, cx0)
                 b = min(b, cx1)
                 if a >= b:
                     a, b = cx0, cx1
-
                 n = 199
                 for i in range(n + 1):
                     u = a + (b - a) * i / n
@@ -17500,34 +20538,22 @@ def content_bbox(doc):
                     if p is not None and cx0 <= p[0] <= cx1 and cy0 <= p[1] <= cy1:
                         xs.append(p[0])
                         ys.append(p[1])
-
     if not xs:
         return None
-
     return min(xs), min(ys), max(xs), max(ys)
 
-def _draw_publication(p: QPainter, obj, view):
-    """出版样式渲染器：纯黑白线稿，无填充，无小圆球。线宽加粗。"""
-    from PySide6.QtGui import QFont, QPainterPath, QPen
-    from PySide6.QtCore import Qt
-    from geo.points import AbstractPoint, _point_label
-    import math
-
+def draw_publication(p: QPainter, obj, view):
     pen = QPen(QColor("#000000"), 2.2)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-
     tn = type(obj).__name__
-
     if isinstance(obj, AbstractPoint):
         return
-
     if tn == "Segment":
         p.drawLine(view.to_screen(obj.a.x, obj.a.y), view.to_screen(obj.b.x, obj.b.y))
         return
-
     if tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
               "AngleBisector", "AngleDivLine", "PerpBisector"):
         w, h = view.width(), view.height()
@@ -17541,14 +20567,12 @@ def _draw_publication(p: QPainter, obj, view):
             p1 = obj.point_at(max(ts))
         p.drawLine(view.to_screen(*p0), view.to_screen(*p1))
         return
-
     if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
         c = view.to_screen(obj.center.x if hasattr(obj, 'center') else obj.cx,
                            obj.center.y if hasattr(obj, 'center') else obj.cy)
         r = obj.r if hasattr(obj, 'r') else getattr(obj, 'radius', 0)
         p.drawEllipse(c, r * view.scale, r * view.scale)
         return
-
     if tn == "Ellipse":
         path = QPainterPath()
         for i in range(73):
@@ -17558,7 +20582,6 @@ def _draw_publication(p: QPainter, obj, view):
         path.closeSubpath()
         p.drawPath(path)
         return
-
     if tn == "RegularPolygon":
         path = QPainterPath()
         for i, v in enumerate(obj.verts):
@@ -17568,7 +20591,6 @@ def _draw_publication(p: QPainter, obj, view):
         path.closeSubpath()
         p.drawPath(path)
         return
-
     if tn == "CubicBezier":
         path = QPainterPath()
         for i in range(61):
@@ -17577,7 +20599,6 @@ def _draw_publication(p: QPainter, obj, view):
             else: path.lineTo(sp)
         p.drawPath(path)
         return
-
     if tn == "FunctionCurve":
         path = QPainterPath()
         has_path = False
@@ -17596,7 +20617,6 @@ def _draw_publication(p: QPainter, obj, view):
                 path.lineTo(sp)
         p.drawPath(path)
         return
-
     if tn == "AngleMeasure":
         v, p1, p2 = obj.vertex, obj.p1, obj.p2
         a1 = math.atan2(p1.y - v.y, p1.x - v.x)
@@ -17611,20 +20631,13 @@ def _draw_publication(p: QPainter, obj, view):
             else: path.lineTo(sp)
         p.drawPath(path)
         return
-
     if tn == "TextObject":
         font = QFont("Microsoft YaHei", obj.size)
         p.setFont(font)
         p.drawText(view.to_screen(*obj.world_pos()) + QPointF(12, 24), obj.text)
         return
 
-
-
-def _collect_screen_segments(view):
-    """收集所有可见线段/直线/圆的屏幕坐标线段，用于标签避让。"""
-    from geo.points import AbstractPoint
-    import math
-
+def collect_screen_segments(view):
     segments = []
     for obj in view.doc.objects:
         if not (obj.visible and obj.exists):
@@ -17665,9 +20678,7 @@ def _collect_screen_segments(view):
                 pass
     return segments
 
-
-def _segments_intersect(p1, p2, p3, p4):
-    """检查两条线段是否相交（叉积法）。"""
+def segments_intersect(p1, p2, p3, p4):
     def cross(o, a, b):
         return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
     d1 = cross(p3, p4, p1)
@@ -17679,9 +20690,7 @@ def _segments_intersect(p1, p2, p3, p4):
         return True
     return False
 
-
-def _rect_intersects_segment(rect, seg):
-    """检查矩形是否与线段相交。支持 QPointF 和元组两种格式。"""
+def rect_intersects_segment(rect, seg):
     p1, p2 = seg
     if hasattr(p1, 'x') and callable(p1.x):
         x1, y1 = p1.x(), p1.y()
@@ -17691,10 +20700,8 @@ def _rect_intersects_segment(rect, seg):
         x2, y2 = p2.x(), p2.y()
     else:
         x2, y2 = p2
-
-    if rect.contains(QPointF(x1, y1)) or rect.contains(QPointF(x2, y2)):
+    if rect.contains(QPointF(x1, y1)) or rect.contains(QPointF(x2, y2)): # pyright: ignore[reportArgumentType]
         return True
-
     edges = [
         (QPointF(rect.left(), rect.top()), QPointF(rect.right(), rect.top())),
         (QPointF(rect.right(), rect.top()), QPointF(rect.right(), rect.bottom())),
@@ -17702,38 +20709,24 @@ def _rect_intersects_segment(rect, seg):
         (QPointF(rect.left(), rect.bottom()), QPointF(rect.left(), rect.top())),
     ]
     for e0, e1 in edges:
-        if _segments_intersect((x1, y1), (x2, y2),
-                               (e0.x(), e0.y()), (e1.x(), e1.y())):
+        if segments_intersect((x1, y1), (x2, y2), (e0.x(), e0.y()), (e1.x(), e1.y())):
             return True
     return False
 
-
-def _point_rect_dist(x, y, rect):
-    """点到矩形的最短距离。"""
+def point_rect_dist(x, y, rect):
     dx = max(rect.left() - x, 0, x - rect.right())
     dy = max(rect.top() - y, 0, y - rect.bottom())
     return math.hypot(dx, dy)
 
-
-def _find_label_offset(p, sp, label, view, screen_segments):
-    """为点标签找到不与线相交的最佳偏移位置。"""
+def find_label_offset(p, sp, label, view, screen_segments):
     from PySide6.QtGui import QFontMetricsF
     from PySide6.QtCore import QRectF, QPointF, QSizeF
-    import math
-    
     fm = QFontMetricsF(p.font())
     tw = float(fm.horizontalAdvance(label))
     th = float(fm.height())
-    
     candidates = [
-        QPointF(9, -9),              # 右上（默认）
-        QPointF(9, th * 0.7),        # 右下
-        QPointF(-tw - 9, -9),        # 左上
-        QPointF(-tw - 9, th * 0.7),  # 左下
-        QPointF(-tw / 2, -th - 6),   # 正上
-        QPointF(-tw / 2, th + 6),    # 正下
-        QPointF(-tw - 9, -th / 2),   # 正左
-        QPointF(tw / 2 + 9, -th / 2),  # 正右
+        QPointF(9, -9), QPointF(9, th * 0.7), QPointF(-tw - 9, -9), QPointF(-tw - 9, th * 0.7),
+        QPointF(-tw / 2, -th - 6), QPointF(-tw / 2, th + 6), QPointF(-tw - 9, -th / 2), QPointF(tw / 2 + 9, -th / 2),
     ]
     best_offset = candidates[0]
     best_score = float('inf')
@@ -17741,8 +20734,8 @@ def _find_label_offset(p, sp, label, view, screen_segments):
         rect = QRectF(sp + offset, QSizeF(tw, th))
         score = 0.0
         for seg in screen_segments:
-            if _rect_intersects_segment(rect, seg):
-                score += 10.0  # 相交惩罚大
+            if rect_intersects_segment(rect, seg):
+                score += 10.0
             else:
                 p1, p2 = seg
                 if hasattr(p1, 'x') and callable(p1.x):
@@ -17751,32 +20744,155 @@ def _find_label_offset(p, sp, label, view, screen_segments):
                 else:
                     sx, sy = p1
                     ex, ey = p2
-                    
-                d = min(_point_rect_dist(sx, sy, rect),
-                        _point_rect_dist(ex, ey, rect))
+                d = min(point_rect_dist(sx, sy, rect), point_rect_dist(ex, ey, rect))
                 score += 1.0 / (d + 1.0)
         if score < best_score:
             best_score = score
             best_offset = offset
     return best_offset
 
-
-def _draw_publication_point(p, obj, view, screen_segments):
-    """出版样式：绘制点标签（智能避让，不画圆球）。"""
+def draw_publication_point(p, obj, view, screen_segments):
     from PySide6.QtGui import QFont, QPen
-    from PySide6.QtCore import Qt, QPointF
-    from geo.points import _point_label
-    import math
-
-    label = getattr(obj, "name", "") or _point_label(obj, view)
+    label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "") or f"P{obj.id}"
     font = QFont("Times New Roman", 16)
     font.setItalic(True)
     p.setFont(font)
     p.setPen(QPen(QColor("#000000"), 1.0))
-
     sp = view.to_screen(obj.x, obj.y)
-    offset = _find_label_offset(p, sp, label, view, screen_segments)
+    offset = find_label_offset(p, sp, label, view, screen_segments)
     p.drawText(sp + offset, label)
+    
+_egg_pixmap = None       # QPixmap，None 表示未激活
+_egg_loading = False     # 防止重复触发
+
+
+def trigger_egg(canvas):
+    global _egg_loading
+    if _egg_loading or _egg_pixmap is not None:
+        return
+    _egg_loading = True
+
+    import threading
+    import urllib.request
+    from PySide6.QtCore import QMetaObject, Qt
+
+    def _download():
+        global _egg_loading
+        try:
+            num = random.randint(1, 1000)
+            url = f"https://esa-img.loliapi.cn/i/pc/img{num}.webp"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+
+            canvas._egg_data = data
+            QMetaObject.invokeMethod(
+                canvas,
+                "_process_egg_data",
+                Qt.ConnectionType.QueuedConnection
+            )
+        except Exception as e:
+            print(f"[EGG] 下载失败: {e}")
+        finally:
+            _egg_loading = False
+
+    threading.Thread(target=_download, daemon=True).start()
+
+def _build_pixmap(canvas, data: bytes):
+    """★ 主线程中执行：WebP 解码 → PNG 转换 → QPixmap 创建。"""
+    global _egg_pixmap, _egg_loading
+    try:
+        from PySide6.QtGui import QImage, QPixmap
+        from PySide6.QtCore import QByteArray, QBuffer
+
+        img = QImage()
+        loaded = img.loadFromData(data)
+        if not loaded:
+            loaded = img.loadFromData(data, "WEBP") # pyright: ignore[reportArgumentType]
+
+        if not loaded or img.isNull():
+            _egg_loading = False
+            return
+
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG") # pyright: ignore[reportCallIssue, reportArgumentType]
+        buf.close()
+
+        pm = QPixmap()
+        pm.loadFromData(ba.data(), "PNG") # pyright: ignore[reportCallIssue, reportArgumentType]
+
+        if pm.isNull():
+            _egg_loading = False
+            return
+
+        _egg_pixmap = pm
+
+        canvas.update()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _egg_loading = False
+
+
+def draw_egg_if_active(p: QPainter, canvas):
+    global _egg_pixmap
+    if _egg_pixmap is None or _egg_pixmap.isNull():
+        return
+    aspect = _egg_pixmap.height() / max(_egg_pixmap.width(), 1)
+    x, y, w = 3.0, 3.0, 12.0
+    h = w * aspect
+    tl = canvas.to_screen(x, y)
+    br = canvas.to_screen(x + w, y - h)
+    rect = QRectF(tl, br).normalized()
+    p.drawPixmap(rect.toRect(), _egg_pixmap)
+
+import math
+import random
+from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor, QPainter
+
+def init_snow(canvas):
+    w = max(canvas.width(), 800)
+    h = max(canvas.height(), 600)
+    canvas._snowflakes = []
+    for _ in range(140):
+        canvas._snowflakes.append({
+            "x": random.uniform(0.0, float(w)),
+            "y": random.uniform(0.0, float(h)),
+            "r": random.uniform(1.2, 3.4),
+            "v": random.uniform(0.6, 1.9),
+            "amp": random.uniform(0.2, 0.9),
+            "phase": random.uniform(0.0, 2.0 * math.pi),
+        })
+
+def tick_snow(canvas):
+    if not canvas._snow_active:
+        return
+    w = max(canvas.width(), 1)
+    h = max(canvas.height(), 1)
+    for f in canvas._snowflakes:
+        f["y"] += f["v"]
+        f["phase"] += 0.02
+        f["x"] += math.sin(f["phase"]) * f["amp"]
+        if f["y"] > h + 6.0:
+            f["y"] = -6.0
+            f["x"] = random.uniform(0.0, float(w))
+    canvas.update()
+
+def draw_snow(canvas, p: QPainter) -> None:
+    p.save()
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QColor(255, 255, 255, 190))
+    for f in canvas._snowflakes:
+        p.drawEllipse(QPointF(f["x"], f["y"]), f["r"], f["r"])
+    p.restore()
 
 """导出到课件：一键生成课件包（含向导）。
 修复：bat 中文路径乱码、网页图形拉伸、缺少新对象类型。

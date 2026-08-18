@@ -213,13 +213,58 @@ class AddTrackDialog(QDialog):
             from geo.points import PointOnObject
             for obj in self._doc.objects:
                 if isinstance(obj, PointOnObject):
-                    self._target_combo.addItem(
-                        f"吸附点 #{obj.id}", obj.id
-                    )
+                    label = self._get_display_name(obj)
+                    self._target_combo.addItem(label, obj.id)
         elif idx == 2:  # 属性轨道
             for obj in self._doc.objects:
-                tn = type(obj).__name__
-                self._target_combo.addItem(f"{tn} #{obj.id}", obj.id)
+                label = self._get_display_name(obj)
+                self._target_combo.addItem(label, obj.id)
+
+    def _get_display_name(self, obj):
+        """获取对象在画布上的显示名称。"""
+        from geo.points import AbstractPoint
+
+        # 优先使用用户自定义名称
+        name = getattr(obj, "name", "")
+        if name:
+            return name
+
+        # 对于点对象，计算画布自动标签
+        if isinstance(obj, AbstractPoint):
+            return self._compute_point_label(obj)
+
+        # 对于其他对象，使用类型名
+        tn = type(obj).__name__
+        return f"{tn} #{obj.id}"
+
+    def _compute_point_label(self, obj):
+        """计算点的画布标签（与 draw_point 渲染器逻辑一致）。"""
+        from geo.points import AbstractPoint, _index_to_letters, _index_to_subscript
+
+        # 尝试使用缓存的 _auto_label
+        auto_label = getattr(obj, "_auto_label", "")
+        if auto_label:
+            return auto_label
+
+        # 动态计算（与 _point_label 逻辑一致，但不依赖 view）
+        doc = self._doc
+        center_ids = set()
+        for o in doc.objects:
+            if type(o).__name__ == 'Circle':
+                c = getattr(o, 'center', None)
+                if isinstance(c, AbstractPoint):
+                    center_ids.add(id(c))
+        is_center = id(obj) in center_ids
+        idx = 1
+        for o in doc.objects:
+            if not isinstance(o, AbstractPoint):
+                continue
+            if (id(o) in center_ids) != is_center:
+                continue
+            if o is obj:
+                break
+            idx += 1
+        return ("O" + _index_to_subscript(idx)) if is_center else _index_to_letters(idx)
 
     def _edit_keyframes(self):
         dlg = KeyframeEditor(self._keyframes, self)

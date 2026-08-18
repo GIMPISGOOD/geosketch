@@ -438,7 +438,6 @@ def trigger_egg(canvas):
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = resp.read()
-            print(f"[EGG] 后台下载完成，{len(data)} bytes")
 
             # 将数据暂存到 canvas 对象
             canvas._egg_data = data

@@ -91,7 +91,14 @@ class GliderTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        return f"路径: 对象#{self.obj_id}"
+        if self.target is not None:
+            name = getattr(self.target, "name", "")
+            if name:
+                return f"路径: {name}"
+            auto_label = getattr(self.target, "_auto_label", "")
+            if auto_label:
+                return f"路径: {auto_label}"
+        return f"路径: obj#{self.obj_id}"
 
     def dump(self) -> dict:
         return {
@@ -156,8 +163,12 @@ class PropertyTrack(AnimationTrack):
         return max(f.time for f in self.keyframes)
 
     def label(self) -> str:
-        cn_name = self.ATTR_NAMES_CN.get(self.attr_name, self.attr_name)
-        return f"属性: {cn_name} (对象#{self.obj_id})"
+        obj_name = None
+        if self.target is not None:
+            obj_name = getattr(self.target, "name", "") or getattr(self.target, "_auto_label", "")
+        if obj_name:
+            return f"属性: {self.attr_name} ({obj_name})"
+        return f"属性: {self.attr_name} (obj#{self.obj_id})"
 
     def dump(self) -> dict:
         return {
