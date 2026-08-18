@@ -6,7 +6,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-from geo.points import FreePoint, AbstractPoint
+from geo.points import FreePoint, AbstractPoint, _index_to_letters, _index_to_subscript
 from core.variables import get_store
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
@@ -37,6 +37,7 @@ class Document(QObject):
         self.macros = []
         self._macro_suppress = False
         self.names = {}
+        self._name_counters = {}
         self._objects_version = 0
         self._type_cache = {}
         self._type_cache_version = -1
@@ -49,7 +50,6 @@ class Document(QObject):
     def _auto_name(self, obj):
         """根据对象类型自动生成名字：P1、S1、C1、Btn1 等。"""
         tn = type(obj).__name__
-
         if isinstance(obj, AbstractPoint):
             prefix = "P"
         elif tn == "Segment":
@@ -72,13 +72,41 @@ class Document(QObject):
             prefix = "f"
         else:
             prefix = tn[:3] or "Obj"
-
-        i = 1
+            
+        # ★ 优化：使用计数器，避免每次从头遍历 self.names
+        i = self._name_counters.get(prefix, 1)
         while f"{prefix}{i}" in self.names:
             i += 1
-
+        self._name_counters[prefix] = i + 1
         return f"{prefix}{i}"
-
+    
+    def _assign_point_labels(self):
+        """O(N) 遍历一次对象列表，为所有未命名的点分配自动标签。
+        避免在 paintEvent 中每帧做 O(N^2) 的计算。
+        """
+        center_ids = set()
+        for o in self.objects:
+            tn = type(o).__name__
+            if tn in ('Circle', 'ExprCircle', 'ThreePointCircle', 'InvertedCircle'):
+                c = getattr(o, 'center', None)
+                if isinstance(c, AbstractPoint):
+                    center_ids.add(id(c))
+        
+        p_idx = 1
+        c_idx = 1
+        for o in self.objects:
+            if not isinstance(o, AbstractPoint):
+                continue
+            if getattr(o, 'name', ''):
+                continue  # 用户已手动命名，跳过
+            
+            if id(o) in center_ids:
+                o._auto_label = "O" + _index_to_subscript(c_idx)
+                c_idx += 1
+            else:
+                o._auto_label = _index_to_letters(p_idx)
+                p_idx += 1
+                
     def _unique_name(self, desired, obj):
         """确保名字唯一；重复则自动加后缀。"""
         if not desired:
@@ -129,6 +157,7 @@ class Document(QObject):
         self._unregister_name(obj)
         obj.name = self._unique_name(new_name, obj)
         self.names[obj.name] = obj
+        self._assign_point_labels()
         self.changed.emit()
         
     # ================= 增删 =================
@@ -136,12 +165,12 @@ class Document(QObject):
         self._mutation_count += 1
         self._objects_version += 1
         self.objects.append(obj)
-    # ★ 修复：expr_driver 对象（TransformDriver, IterPoint 等）也参与变量联动
         if isinstance(obj, (ExprSegment, ExprAngle, ExprCircle, ExprPoint)) or \
-            getattr(obj, "expr_driver", False):
+           getattr(obj, "expr_driver", False):
             self.expr_objects.append(obj)
         if not getattr(self, "_macro_suppress", False):
             self.object_added.emit(obj)
+            self._assign_point_labels()  # ★ 新增：实时更新标签
         return obj
 
     def _collect_with_deps(self, objs):
@@ -226,6 +255,7 @@ class Document(QObject):
             self._unregister_name(o)
         if not getattr(self, "_macro_suppress", False):
             self.object_removed.emit(obj)
+            self._assign_point_labels()
         return doomed
     
     def remove(self, obj):
@@ -255,6 +285,7 @@ class Document(QObject):
             # ★ 宏录制：通知清空
             if not getattr(self, "_macro_suppress", False):
                 self.cleared.emit()
+            self._assign_point_labels()
             self.changed.emit()
         
     # ================= 选择 =================
@@ -440,6 +471,7 @@ class Document(QObject):
                 GeoObject.bump_ids(max(item["id"] for item in data))
         finally:
             self._macro_suppress = False
+        self._assign_point_labels()
         self.changed.emit()
 
     def save(self, path):

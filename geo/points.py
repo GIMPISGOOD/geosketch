@@ -27,6 +27,7 @@ class AbstractPoint(GeoObject):
         super().__init__(parents)
         self.x = 0.0
         self.y = 0.0
+        self._auto_label = ""  # 自动标签（Document 内部使用，非用户自定义）
 
     def distance_to(self, x, y):
         return math.hypot(self.x - x, self.y - y)
@@ -93,29 +94,6 @@ def _index_to_subscript(n):
     return ''.join(chr(0x2080 + int(d)) for d in str(n))
 
 
-def _point_label(obj, view):
-    """点名：圆心点 → O₁/O₂…；其余点 → A/B/C…（大写）。
-    序号按 id 升序在同类中动态计算，删除/撤销后自动重排。"""
-    doc = view.doc
-    center_ids = set()
-    for o in doc.objects:
-        if type(o).__name__ == 'Circle':
-            c = getattr(o, 'center', None)
-            if isinstance(c, AbstractPoint):
-                center_ids.add(id(c))
-    is_center = id(obj) in center_ids
-    idx = 1
-    for o in doc.objects:
-        if not isinstance(o, AbstractPoint):
-            continue
-        if (id(o) in center_ids) != is_center:
-            continue
-        if o is obj:
-            break
-        idx += 1
-    return ("O" + _index_to_subscript(idx)) if is_center else _index_to_letters(idx)
-
-
 # ───────────────────────────── 渲染 ─────────────────────────────
 @register_renderer(AbstractPoint)
 def draw_point(p, obj, view):
@@ -125,9 +103,12 @@ def draw_point(p, obj, view):
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
-    # ★ 优先使用对象名；没有名字时回退到旧规则
-    label = getattr(obj, "name", "") or _point_label(obj, view)
-
+    
+    # ★ 优化：优先使用用户自定义名称，其次使用 Document 缓存的 _auto_label
+    label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "")
+    if not label:
+        label = f"P{obj.id}"  # 最终 Fallback
+        
     draw_math(
         p,
         qpt.x() + 9,
