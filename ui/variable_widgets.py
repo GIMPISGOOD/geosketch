@@ -179,39 +179,44 @@ class VariableSliderPanel(QWidget):
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
 
-        # ★ 从动变量：不显示滑杆，只显示表达式和当前值
+        is_bound = bool(var.binding)
+
         if getattr(var, "expr", ""):
             lbl = QLabel(f"{name} = {var.expr} = {var.value:.2f}")
             lbl.setFont(theme.LABEL_FONT)
             lbl.setToolTip("从动变量：由表达式自动计算，不能手动拖动")
-
             h.addWidget(lbl, 1)
-
+        elif is_bound:
+            metric_cn = {
+                "length": "长度", "radius": "半径", "area": "面积",
+                "perimeter": "周长", "degrees": "角度",
+            }.get(var.binding.get("metric"), "度量")
+            lbl = QLabel(f"{name} ({metric_cn}) = {var.value:.2f}")
+            lbl.setFont(theme.LABEL_FONT)
+            lbl.setToolTip("度量绑定变量：由几何对象决定，不能手动拖动")
+            h.addWidget(lbl, 1)
         else:
             lbl = QLabel(f"{name} = {var.value:.2f}")
             lbl.setFont(theme.LABEL_FONT)
             lbl.setMinimumWidth(90)
+            h.addWidget(lbl)
+
+            # ★ 基于步长离散化滑杆
+            step = var.step if var.step > 1e-9 else (var.vmax - var.vmin) / 1000.0
+            steps = int(round((var.vmax - var.vmin) / step))
+            if steps < 1:
+                steps = 1
 
             slider = QSlider(Qt.Orientation.Horizontal)
-            slider.setRange(0, 1000)
-
-            span = (var.vmax - var.vmin) or 1.0
-            slider.setValue(int((var.value - var.vmin) / span * 1000))
+            slider.setRange(0, steps)
+            slider.setValue(int(round((var.value - var.vmin) / step)))
             slider.setMinimumWidth(110)
-
             slider.valueChanged.connect(
-                lambda v, n=name, l=lbl, a=var.vmin, b=var.vmax:
-                    self._on_slide(n, v, l, a, b)
+                lambda v, n=name, l=lbl, vmin=var.vmin, st=step:
+                self._on_slide(n, v, l, vmin, st)
             )
-            # ★ 宏录制：滑杆释放时记录变量值
-            slider.sliderReleased.connect(
-                lambda n=name: self._macro_record_var(n)
-            )
-            
-            # ★ 拖动结束后刷新一次，从动变量的值会跟着更新
+            slider.sliderReleased.connect(lambda n=name: self._macro_record_var(n))
             slider.sliderReleased.connect(self.refresh)
-
-            h.addWidget(lbl)
             h.addWidget(slider, 1)
 
         rm = QPushButton("×")
@@ -221,13 +226,12 @@ class VariableSliderPanel(QWidget):
             f"border:none;color:{theme.SELECTED.name()};font-weight:700;"
         )
         rm.clicked.connect(lambda _=False, n=name: self._delete(n))
-
         h.addWidget(rm)
-
         return w
-    def _on_slide(self, name, v, lbl, vmin, vmax):
+    
+    def _on_slide(self, name, v, lbl, vmin, step):
         self._dragging = True
-        val = vmin + (vmax - vmin) * v / 1000
+        val = vmin + v * step
         lbl.setText(f"{name} = {val:.2f}")
         self.canvas.doc.vars.set(name, val)
         self.canvas.doc.refresh_variables()

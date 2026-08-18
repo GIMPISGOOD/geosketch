@@ -134,14 +134,15 @@ def evaluate(expr: str, variables: dict[str, float]) -> Optional[float]:
 
 
 class Variable:
-    __slots__ = ("name", "value", "vmin", "vmax", "expr")
-
-    def __init__(self, name, value=1.0, vmin=0.0, vmax=10.0, expr=""):
+    __slots__ = ("name", "value", "vmin", "vmax", "expr", "step", "binding")
+    def __init__(self, name, value=1.0, vmin=0.0, vmax=10.0, expr="", step=0.1, binding=None):
         self.name = name
         self.value = float(value)
         self.vmin = float(vmin)
         self.vmax = float(vmax)
-        self.expr = expr          # ★ 从动表达式（非空则为从动变量）
+        self.expr = expr
+        self.step = float(step) if step and step > 1e-9 else 0.1
+        self.binding = binding  # {"obj_id": int, "metric": str} 或 None       # ★ 从动表达式（非空则为从动变量）
 
 class VariableStore(QObject):
     changed = Signal()
@@ -157,8 +158,8 @@ class VariableStore(QObject):
     def get_var(self, name):
         return self._vars.get(name)
 
-    def define(self, name, value, vmin, vmax, expr=""):
-        self._vars[name] = Variable(name, value, vmin, vmax, expr)
+    def define(self, name, value=1.0, vmin=0.0, vmax=10.0, expr="", step=0.1, binding=None):
+        self._vars[name] = Variable(name, value, vmin, vmax, expr, step, binding)
         self.version += 1
         self.changed.emit()
 
@@ -226,21 +227,20 @@ class VariableStore(QObject):
         self.changed.emit()
 
     def to_dict(self):
-        """序列化变量，便于保存到 .wgeo 文件。"""
         return {
             name: {
                 "value": v.value,
                 "vmin": v.vmin,
                 "vmax": v.vmax,
                 "expr": v.expr,
+                "step": v.step,
+                "binding": v.binding,
             }
             for name, v in self._vars.items()
         }
 
     def load_dict(self, data):
-        """从字典恢复变量。会清空当前变量。"""
         self._vars.clear()
-
         for name, d in data.items():
             self._vars[name] = Variable(
                 name,
@@ -248,10 +248,68 @@ class VariableStore(QObject):
                 d.get("vmin", 0.0),
                 d.get("vmax", 10.0),
                 d.get("expr", ""),
+                d.get("step", 0.1),
+                d.get("binding", None),
             )
-
         self.version += 1
         self.changed.emit()
+        
+    def update_bindings(self, doc):
+        """更新所有绑定到几何对象度量的变量。
+        ★ 不触发 changed 信号，由调用方统一触发，避免无限循环。
+        """
+        if not any(v.binding for v in self._vars.values()):
+            return
+
+        obj_map = {o.id: o for o in doc.objects}
+        for name, var in self._vars.items():
+            if not var.binding:
+                continue
+
+            obj_id = var.binding.get("obj_id")
+            metric = var.binding.get("metric")
+            obj = obj_map.get(obj_id)
+
+            if obj is None or not getattr(obj, "exists", True):
+                var.binding = None  # 对象被删除，解除绑定
+                continue
+
+            new_val = self._compute_metric(obj, metric)
+            if new_val is None:
+                continue
+
+            # 步长量化 (snap to step)
+            if var.step > 1e-9:
+                new_val = round(new_val / var.step) * var.step
+
+            if abs(new_val - var.value) > 1e-9:
+                # 自动扩展范围
+                if new_val < var.vmin:
+                    var.vmin = new_val - var.step * 10
+                if new_val > var.vmax:
+                    var.vmax = new_val + var.step * 10
+                var.value = new_val
+
+    def _compute_metric(self, obj, metric):
+        """计算几何对象的度量值。"""
+        import math
+        tn = type(obj).__name__
+        try:
+            if metric == "length" and hasattr(obj, "length"):
+                return float(obj.length())
+            if metric == "radius" and hasattr(obj, "r"):
+                return float(obj.r)
+            if metric == "area" and tn == "RegularPolygon":
+                n = obj.n
+                r = obj.r
+                return 0.5 * n * r * r * math.sin(2 * math.pi / n)
+            if metric == "perimeter" and tn == "RegularPolygon":
+                return obj.n * 2 * obj.r * math.sin(math.pi / obj.n)
+            if metric == "degrees" and hasattr(obj, "degrees"):
+                return float(obj.degrees)
+        except Exception:
+            pass
+        return None
 
 
 _STORE = VariableStore()          # 模块级单例，避免跨层传递

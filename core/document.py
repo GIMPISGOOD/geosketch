@@ -405,6 +405,7 @@ class Document(QObject):
             moved.extend(eo.moved_points())
         if moved:
             self.recompute_silent(moved)
+        self.vars.update_bindings(self) 
         self.changed.emit()
 
     @contextmanager

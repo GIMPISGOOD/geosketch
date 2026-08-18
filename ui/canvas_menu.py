@@ -1,7 +1,7 @@
 from PySide6.QtCore import QPointF
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QMenu, QInputDialog, QColorDialog, QDialog, QDialogButtonBox, 
-                               QFormLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout)
+                               QFormLayout, QLineEdit, QPushButton, QSpinBox, QVBoxLayout, QDoubleSpinBox)
 from media.base import MediaObject
 from media.script_button import ScriptButtonObject
 
@@ -50,6 +50,14 @@ def show_context_menu(canvas, ev):
         menu.addAction("选择父对象", lambda: select_related(canvas, selected, "parents"))
         menu.addAction("选择子对象", lambda: select_related(canvas, selected, "children"))
         menu.addSeparator()
+        # ★ 度量绑定变量创建
+        metric_info = _get_metric_info(selected)
+        if metric_info:
+            menu.addSeparator()
+            menu.addAction(
+                f"📏 创建 {metric_info['label']} 变量...",
+                lambda: create_metric_variable(canvas, selected, metric_info)
+            )
         menu.addAction("删除", canvas.doc.remove_selected)
 
     if getattr(canvas.doc, "_clipboard", None):
@@ -184,3 +192,102 @@ def edit_text_object(canvas, obj):
                 trigger_egg(canvas)
 
         doc_action(canvas, doit)
+
+# ============================================================
+# 度量绑定变量
+# ============================================================
+def _get_metric_info(objs):
+    """检查选中对象是否支持创建度量变量。"""
+    if len(objs) == 1:
+        obj = objs[0]
+        tn = type(obj).__name__
+        if tn == "Segment":
+            return {"label": "长度", "metric": "length", "obj": obj}
+        if tn in ("Circle", "ExprCircle"):
+            return {"label": "半径", "metric": "radius", "obj": obj}
+        if tn == "RegularPolygon":
+            return {"label": "面积", "metric": "area", "obj": obj}
+        if tn == "AngleMeasure":
+            return {"label": "角度", "metric": "degrees", "obj": obj}
+    return None
+
+
+class MetricVariableDialog(QDialog):
+    """度量变量创建对话框。"""
+
+    def __init__(self, metric_label, initial_val, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"创建 {metric_label} 变量")
+        self.setMinimumWidth(320)
+        layout = QFormLayout(self)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setPlaceholderText("输入变量名...")
+        layout.addRow("变量名:", self.name_edit)
+
+        self.step_spin = QDoubleSpinBox()
+        self.step_spin.setRange(0.001, 1000.0)
+        self.step_spin.setDecimals(3)
+        self.step_spin.setValue(0.1)
+        self.step_spin.setSingleStep(0.1)
+        layout.addRow("步长 (Step):", self.step_spin)
+
+        vmin = max(0.0, initial_val - 5.0)
+        vmax = initial_val + 5.0
+
+        self.vmin_spin = QDoubleSpinBox()
+        self.vmin_spin.setRange(-1e6, 1e6)
+        self.vmin_spin.setDecimals(3)
+        self.vmin_spin.setValue(vmin)
+        layout.addRow("最小值:", self.vmin_spin)
+
+        self.vmax_spin = QDoubleSpinBox()
+        self.vmax_spin.setRange(-1e6, 1e6)
+        self.vmax_spin.setDecimals(3)
+        self.vmax_spin.setValue(vmax)
+        layout.addRow("最大值:", self.vmax_spin)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def get_data(self):
+        return (
+            self.name_edit.text().strip(),
+            self.step_spin.value(),
+            self.vmin_spin.value(),
+            self.vmax_spin.value(),
+        )
+
+
+def create_metric_variable(canvas, objs, metric_info):
+    """创建度量绑定变量。"""
+    from core.variables import is_valid_name
+
+    obj = metric_info["obj"]
+    metric = metric_info["metric"]
+    label = metric_info["label"]
+
+    store = canvas.doc.vars
+    initial_val = store._compute_metric(obj, metric)
+    if initial_val is None:
+        return
+
+    dlg = MetricVariableDialog(label, initial_val, canvas)
+    default_name = f"{label[0]}{len(store.names()) + 1}"
+    dlg.name_edit.setText(default_name)
+
+    if dlg.exec():
+        name, step, vmin, vmax = dlg.get_data()
+        if not name or not is_valid_name(name):
+            from PySide6.QtWidgets import QMessageBox
+            QMessageBox.warning(canvas, "提示", "变量名不合法或已存在。")
+            return
+
+        binding = {"obj_id": obj.id, "metric": metric}
+        store.define(name, initial_val, vmin, vmax, expr="", step=step, binding=binding)
+        store.update_bindings(canvas.doc)
+        canvas.doc.refresh_variables()
