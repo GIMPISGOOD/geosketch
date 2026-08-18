@@ -88,23 +88,18 @@ class Keyframe:
 
 # ─────────────── 关键帧序列求值 ───────────────
 def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
-    """在给定时间求值关键帧序列。返回 None 表示无关键帧。"""
+    """在给定时间求值关键帧序列。返回 None 表示无关键帧。
+    ★ 调用方必须保证 frames 已按 time 升序排列。
+    """
     if not frames:
         return None
-
-    # 排序（防御性）
-    sorted_frames = sorted(frames, key=lambda f: f.time)
-
-    # 边界
-    if time <= sorted_frames[0].time:
-        return sorted_frames[0].value
-    if time >= sorted_frames[-1].time:
-        return sorted_frames[-1].value
-
-    # 找到当前区间
-    for i in range(len(sorted_frames) - 1):
-        f0 = sorted_frames[i]
-        f1 = sorted_frames[i + 1]
+    if time <= frames[0].time:
+        return frames[0].value
+    if time >= frames[-1].time:
+        return frames[-1].value
+    for i in range(len(frames) - 1):
+        f0 = frames[i]
+        f1 = frames[i + 1]
         if f0.time <= time <= f1.time:
             dt = f1.time - f0.time
             if dt < 1e-12:
@@ -113,5 +108,4 @@ def evaluate_keyframes(frames: List[Keyframe], time: float) -> Optional[float]:
             t = max(0.0, min(1.0, t))
             interp_cls = INTERPOLATORS.get(f0.interpolator, LinearInterpolator)
             return interp_cls.evaluate(t, f0.value, f1.value)
-
-    return sorted_frames[-1].value
+    return frames[-1].value

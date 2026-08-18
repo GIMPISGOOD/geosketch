@@ -53,6 +53,7 @@ class VariableTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "VariableTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(params.get("var_name", ""), frames)
         track.enabled = params.get("enabled", True)
         track.muted = params.get("muted", False)
@@ -112,6 +113,7 @@ class GliderTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "GliderTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(params.get("obj_id", 0), frames)
         track.enabled = params.get("enabled", True)
         track.muted = params.get("muted", False)
@@ -171,6 +173,7 @@ class PropertyTrack(AnimationTrack):
     @classmethod
     def build(cls, doc: Any, params: dict) -> "PropertyTrack":
         frames = [Keyframe.from_dict(d) for d in params.get("keyframes", [])]
+        frames.sort(key=lambda f: f.time)
         track = cls(
             params.get("obj_id", 0),
             params.get("attr_name", ""),

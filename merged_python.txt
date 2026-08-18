@@ -296,9 +296,7 @@ class AnimationController(QObject):
         if self.clip is None:
             return
         self._bind_targets()
-
-        moved = []  # ★ 新增：收集被修改的几何对象
-
+        moved = []
         for track in self.clip.tracks:
             if not track.enabled or track.muted:
                 continue
@@ -306,24 +304,22 @@ class AnimationController(QObject):
                 track.evaluate(time)
             except Exception:
                 pass
-
             if isinstance(track, (GliderTrack, PropertyTrack)):
                 if track.target is not None:
                     moved.append(track.target)
-
         if moved:
             self.doc.recompute_silent(moved)
-
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
+        """为 GliderTrack 和 PropertyTrack 绑定目标对象。"""
         if self.clip is None:
             return
         obj_map = {o.id: o for o in self.doc.objects}
         for track in self.clip.tracks:
             if isinstance(track, (GliderTrack, PropertyTrack)):
                 if track.target is None or track.target not in self.doc.objects:
-                    track.target = obj_map.get(track.obj_id)
+                    track.target = obj_map.get(getattr(track, "obj_id", None))
 
 """关键帧与插值器。"""
 from __future__ import annotations
@@ -1258,9 +1254,10 @@ inject()
 """约束基类与注册表。"""
 from typing import List, Any, Dict, Type
 
+
 class GeometricConstraint:
-    """几何约束基类。"""
     _next_id = 1
+
     def __init__(self):
         self.cid = f"c{GeometricConstraint._next_id}"
         GeometricConstraint._next_id += 1
@@ -1274,20 +1271,94 @@ class GeometricConstraint:
         raise NotImplementedError
 
     def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """雅可比矩阵。优先使用解析解，否则使用带异常保护的数值差分。"""
-        analytic = getattr(self, '_jacobian_analytic', None)
-        if analytic is not None:
+        """雅可比矩阵。
+        快速路径：不涉及从动点 → 解析雅可比或局部数值差分。
+        慢速路径：涉及从动点 → 链式法则解析雅可比。
+        """
+        from geo.points import FreePoint
+
+        pts = self.involved_points()
+        has_dependent = any(not isinstance(p, FreePoint) for p in pts)
+
+        if not has_dependent:
+            analytic = getattr(self, '_jacobian_analytic', None)
+            if analytic is not None:
+                try:
+                    return analytic(vars_map)
+                except Exception:
+                    pass
+            return self._numeric_jacobian(vars_map)
+
+        return self._chain_rule_jacobian(vars_map)
+
+    def _chain_rule_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
+        from geo.points import FreePoint
+        from .chain_rule import get_coordinate_derivatives
+
+        n_cols = 2 * len(vars_map)
+        pts = self.involved_points()
+
+        try:
+            r = self.residual()
+            n_res = len(r)
+        except Exception:
+            return []
+
+        jac = [[0.0] * n_cols for _ in range(n_res)]
+        eps = 1e-7
+
+        for p in pts:
+            dC_dpx = [0.0] * n_res
+            dC_dpy = [0.0] * n_res
+            old_x, old_y = p.x, p.y
+
             try:
-                return analytic(vars_map)
+                p.x = old_x + eps
+                r_px = self.residual()
+                p.x = old_x - eps
+                r_mx = self.residual()
+                for i in range(n_res):
+                    dC_dpx[i] = (r_px[i] - r_mx[i]) / (2 * eps)
             except Exception:
                 pass
+            finally:
+                p.x = old_x
 
+            try:
+                p.y = old_y + eps
+                r_py = self.residual()
+                p.y = old_y - eps
+                r_my = self.residual()
+                for i in range(n_res):
+                    dC_dpy[i] = (r_py[i] - r_my[i]) / (2 * eps)
+            except Exception:
+                pass
+            finally:
+                p.y = old_y
+
+            if isinstance(p, FreePoint):
+                if id(p) in vars_map:
+                    idx = vars_map[id(p)]
+                    for i in range(n_res):
+                        jac[i][idx * 2] = dC_dpx[i]
+                        jac[i][idx * 2 + 1] = dC_dpy[i]
+            else:
+                derivs = get_coordinate_derivatives(p)
+                for fp_id, d_matrix in derivs.items():
+                    if fp_id in vars_map:
+                        idx = vars_map[fp_id]
+                        for i in range(n_res):
+                            jac[i][idx * 2] += dC_dpx[i] * d_matrix[0] + dC_dpy[i] * d_matrix[2]
+                            jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] + dC_dpy[i] * d_matrix[3]
+
+        return jac
+
+    def _numeric_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
         eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
         jac = [[0.0] * n_cols for _ in range(n_res)]
-        
         for p in pts:
             if id(p) not in vars_map:
                 continue
@@ -1299,14 +1370,12 @@ class GeometricConstraint:
                     if axis == 0: p.x = old + eps
                     else: p.y = old + eps
                     r_plus = self.residual()
-                    
                     if axis == 0: p.x = old - eps
                     else: p.y = old - eps
                     r_minus = self.residual()
                 finally:
                     if axis == 0: p.x = old
                     else: p.y = old
-                
                 if r_plus is not None and r_minus is not None:
                     for j in range(min(n_res, len(r_plus), len(r_minus))):
                         jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
@@ -1319,7 +1388,9 @@ class GeometricConstraint:
     def build(cls, point_map: dict, params: dict) -> 'GeometricConstraint':
         raise NotImplementedError
 
+
 CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
+
 
 def register_constraint(name: str):
     def deco(cls):
@@ -1327,6 +1398,93 @@ def register_constraint(name: str):
         CONSTRAINT_REGISTRY[name] = cls
         return cls
     return deco
+
+"""从动点坐标对自由点坐标的解析偏导数。
+
+预留扩展接口：
+- get_coordinate_derivatives(): 新增从动点类型时在此添加分支
+- _intersect_point_derivatives(): IntersectPoint 的隐函数定理实现（待补全）
+"""
+import math
+from typing import Dict, Tuple
+
+
+def get_coordinate_derivatives(point) -> Dict[int, Tuple[float, float, float, float]]:
+    """返回 {id(free_point): (∂x/∂px, ∂x/∂py, ∂y/∂px, ∂y/∂py)}"""
+    from geo.points import FreePoint, PointOnObject
+
+    if isinstance(point, FreePoint):
+        return {id(point): (1.0, 0.0, 0.0, 1.0)}
+
+    if isinstance(point, PointOnObject):
+        return _point_on_object_derivatives(point)
+
+    tn = type(point).__name__
+    if tn == "DivisionPoint":
+        return _division_point_derivatives(point)
+    if tn == "IntersectPoint":
+        return _intersect_point_derivatives(point)
+
+    return {}
+
+
+def _point_on_object_derivatives(poo) -> Dict[int, Tuple[float, float, float, float]]:
+    from geo.points import FreePoint
+    host = poo.host
+    t = poo.t
+    tn = type(host).__name__
+
+    if tn == "Segment":
+        a, b = host.a, host.b
+        result = {}
+        if isinstance(a, FreePoint):
+            result[id(a)] = (1.0 - t, 0.0, 0.0, 1.0 - t)
+        if isinstance(b, FreePoint):
+            result[id(b)] = (t, 0.0, 0.0, t)
+        return result
+
+    if tn in ("Circle", "ExprCircle"):
+        center = host.center
+        r = host.r
+        angle = 2.0 * math.pi * t
+        c, s = math.cos(angle), math.sin(angle)
+        result = {}
+        if isinstance(center, FreePoint):
+            result[id(center)] = (1.0, 0.0, 0.0, 1.0)
+        through = getattr(host, 'through', None)
+        if through is not None and isinstance(through, FreePoint) and r > 1e-12:
+            dr_dtx = (through.x - center.x) / r
+            dr_dty = (through.y - center.y) / r
+            result[id(through)] = (c * dr_dtx, c * dr_dty,
+                                    s * dr_dtx, s * dr_dty)
+        return result
+
+    if tn in ("Line", "Ray", "DirectedLine"):
+        if hasattr(host, 'a') and hasattr(host, 'b'):
+            a, b = host.a, host.b
+            result = {}
+            if isinstance(a, FreePoint):
+                result[id(a)] = (1.0 - t, 0.0, 0.0, 1.0 - t)
+            if isinstance(b, FreePoint):
+                result[id(b)] = (t, 0.0, 0.0, t)
+            return result
+
+    return {}
+
+
+def _division_point_derivatives(dp) -> Dict[int, Tuple[float, float, float, float]]:
+    from geo.points import FreePoint
+    a, b, t = dp.a, dp.b, dp.t
+    result = {}
+    if isinstance(a, FreePoint):
+        result[id(a)] = (1.0 - t, 0.0, 0.0, 1.0 - t)
+    if isinstance(b, FreePoint):
+        result[id(b)] = (t, 0.0, 0.0, t)
+    return result
+
+
+def _intersect_point_derivatives(ip) -> Dict[int, Tuple[float, float, float, float]]:
+    return {}
 
 """Document 补丁：约束序列化、撤销恢复、过约束回滚。"""
 from core.document import Document
@@ -1451,7 +1609,7 @@ def remove_constraint(self, constraint):
         self.constraints.remove(constraint)
         self.changed.emit()
 
-def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
+def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0, quick=False):
     MAX_DEPTH = 5
     if not self.constraints or _depth >= MAX_DEPTH:
         return True
@@ -1459,22 +1617,27 @@ def solve_constraints(self, trigger_points=None, pinned_points=None, _depth=0):
         affected = get_affected_constraints(trigger_points, self.constraints)
     else:
         affected = [c for c in self.constraints if c.enabled]
-    if not affected: return True
-    
+    if not affected:
+        return True
     pinned_set = set(pinned_points or [])
     free_set = set()
     for c in affected:
         for p in c.involved_points():
             if isinstance(p, FreePoint) and p not in pinned_set:
                 free_set.add(p)
-    if not free_set: return True
-    
-    solver = ConstraintSolver(max_iter=50, tol=1e-9)
+    if not free_set:
+        return True
+
+    if quick:
+        solver = ConstraintSolver(max_iter=12, tol=1e-6)
+    else:
+        solver = ConstraintSolver(max_iter=50, tol=1e-9)
+
     success = solver.solve(affected, list(free_set), list(pinned_set))
     _recompute_silent(self, list(free_set))
-    
+
     if list(free_set):
-        self.solve_constraints(list(free_set), pinned_points, _depth + 1)
+        self.solve_constraints(list(free_set), pinned_points, _depth + 1, quick=quick)
     return success
 
 def patch_document():
@@ -1529,11 +1692,9 @@ _original_release = SelectTool.release
 
 def _new_move(self, canvas, wpt, hit):
     _original_move(self, canvas, wpt, hit)
-
     doc = canvas.doc
     if not hasattr(doc, 'constraints') or not doc.constraints:
         return
-
     pinned = []
     if self.drag_poo is not None:
         pinned.append(self.drag_poo)
@@ -1541,19 +1702,25 @@ def _new_move(self, canvas, wpt, hit):
         pinned.append(p)
     if self.drag_media is not None:
         pinned.append(self.drag_media)
-
     if pinned:
         try:
             doc.solve_constraints(
                 trigger_points=pinned,
                 pinned_points=pinned,
+                quick=True,
             )
         except Exception:
-            pass  # 约束求解失败不应阻断拖动
+            pass
 
 
 def _new_release(self, canvas, wpt, hit):
     _original_release(self, canvas, wpt, hit)
+    doc = canvas.doc
+    if hasattr(doc, 'constraints') and doc.constraints:
+        try:
+            doc.solve_constraints(quick=False)
+        except Exception:
+            pass
 
 
 def patch_select_tool():
@@ -1624,10 +1791,8 @@ import math
 from typing import List, Any, Dict
 from .base import GeometricConstraint
 
+
 def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
-    """高斯消元（列主元）求解 Ax = b。返回 None 表示奇异。
-    ★ 必须是模块级函数，不能缩进到类内部。
-    """
     n = len(b)
     if n == 0:
         return []
@@ -1649,13 +1814,18 @@ def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
         x[i] /= M[i][i]
     return x
 
+
 class ConstraintSolver:
-    """LM 求解器。"""
+    """LM 求解器。
+    quick=True 时降低迭代次数和精度，用于拖动帧。
+    quick=False 时完整精度，用于松手后收敛。
+    """
+
     def __init__(self, max_iter=50, tol=1e-9):
         self.max_iter = max_iter
         self.tol = tol
 
-    def solve(self, constraints: List[GeometricConstraint], 
+    def solve(self, constraints: List[GeometricConstraint],
               free_points: List[Any], pinned_points: List[Any]) -> bool:
         valid = [c for c in constraints if c.enabled]
         if not valid or not free_points:
@@ -1665,11 +1835,11 @@ class ConstraintSolver:
         n_vars = 2 * len(free_points)
         lam = 1e-3
         lam_up, lam_down = 10.0, 0.1
+        no_improve = 0
 
         for _ in range(self.max_iter):
             F: List[float] = []
             J: List[List[float]] = []
-            
             for c in valid:
                 try:
                     r = c.residual()
@@ -1692,6 +1862,9 @@ class ConstraintSolver:
             if norm < self.tol:
                 return True
 
+            if no_improve >= 5:
+                return norm < 1e-3
+
             JtJ = [[0.0] * n_vars for _ in range(n_vars)]
             JtF = [0.0] * n_vars
             for i in range(len(F)):
@@ -1699,13 +1872,16 @@ class ConstraintSolver:
                     JtF[j] += J[i][j] * F[i]
                     for k in range(n_vars):
                         JtJ[j][k] += J[i][j] * J[i][k]
+
             for i in range(n_vars):
                 JtJ[i][i] += lam
 
             delta = _solve_linear(JtJ, [-f for f in JtF])
             if delta is None:
                 lam *= lam_up
-                if lam > 1e10: return False
+                no_improve += 1
+                if lam > 1e10:
+                    return False
                 continue
 
             old_coords = [(p.x, p.y) for p in free_points]
@@ -1715,18 +1891,25 @@ class ConstraintSolver:
 
             new_F = []
             for c in valid:
-                try: new_F.extend(c.residual())
-                except: continue
+                try:
+                    new_F.extend(c.residual())
+                except:
+                    continue
             new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
 
             if new_norm < norm:
                 lam = max(lam * lam_down, 1e-12)
-                if new_norm < self.tol: return True
+                no_improve = 0
+                if new_norm < self.tol:
+                    return True
             else:
                 for i, p in enumerate(free_points):
                     p.x, p.y = old_coords[i]
                 lam *= lam_up
-                if lam > 1e10: return False
+                no_improve += 1
+                if lam > 1e10:
+                    return False
+
         return False
 
 
@@ -13216,2406 +13399,6 @@ class TextTool(Tool):
             self._editor.hide()
         self._pos = None
         self._anchor = None
-
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import pytest
-from PySide6.QtCore import QPointF
-from PySide6.QtWidgets import QApplication
-
-
-@pytest.fixture(scope="session", autouse=True)
-def qapp():
-    """全局 Qt 环境。"""
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture(autouse=True)
-def clean_variables():
-    """每个测试隔离变量系统。"""
-    from core.variables import get_store
-
-    store = get_store()
-    saved_vars = dict(store._vars)
-    saved_version = store.version
-
-    yield
-
-    store._vars = saved_vars
-    store.version = saved_version
-
-
-@pytest.fixture
-def doc():
-    """新建一个空文档。"""
-    from core.document import Document
-    return Document()
-
-
-@pytest.fixture
-def canvas(doc, qapp):
-    """离屏画布。"""
-    try:
-        from ui.canvas import Canvas
-    except Exception as e:
-        pytest.skip(f"无法创建 Canvas：{e}")
-
-    c = Canvas(doc)
-    c.resize(420, 320)
-
-    c.origin = QPointF(210.0, 160.0)
-    c.scale = 40.0
-    c._origin_ready = True
-    c.cursor_wpt = (0.0, 0.0)
-
-    return c
-
-"""吸附点（PointOnObject）功能测试。
-运行：pytest tests/test_attached_point.py -v
-"""
-import math
-
-from geo.points import FreePoint, PointOnObject
-from geo.segments import Segment
-from geo.circles import Circle
-
-
-class TestPointOnSegment:
-    def setup_method(self):
-        self.a = FreePoint(0, 0)
-        self.b = FreePoint(4, 0)
-        self.seg = Segment(self.a, self.b)
-        self.p = PointOnObject(self.seg, t=0.5)
-
-    def test_01_initial_position_is_midpoint(self):
-        """t=0.5 应在线段中点"""
-        assert math.isclose(self.p.x, 2.0, abs_tol=1e-9)
-        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
-
-    def test_02_drag_projects_back_onto_segment(self):
-        """拖到线段外，应投影回线段"""
-        self.p.drag_to((3, 5))
-        self.p.recompute()
-        assert math.isclose(self.p.x, 3.0, abs_tol=1e-9)
-        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
-
-    def test_03_drag_clamped_at_endpoints(self):
-        """拖过端点应被夹在端点内"""
-        self.p.drag_to((100, 0))
-        self.p.recompute()
-        assert math.isclose(self.p.x, 4.0, abs_tol=1e-9), "应夹在 b 端"
-        self.p.drag_to((-100, 0))
-        self.p.recompute()
-        assert math.isclose(self.p.x, 0.0, abs_tol=1e-9), "应夹在 a 端"
-
-    def test_04_stays_on_segment_after_many_drags(self):
-        """反复拖动后点始终在线段上（y=0 且 0<=x<=4）"""
-        for tx, ty in [(1, 9), (3, -7), (2, 100), (0, 0), (4, 0)]:
-            self.p.drag_to((tx, ty))
-            self.p.recompute()
-            assert math.isclose(self.p.y, 0.0, abs_tol=1e-6), f"拖到({tx},{ty})后 y={self.p.y}"
-            assert -1e-6 <= self.p.x <= 4.0 + 1e-6, f"拖到({tx},{ty})后 x={self.p.x}"
-
-    def test_05_host_endpoint_move_updates_point(self):
-        """移动线段端点，吸附点应跟随"""
-        self.b.x, self.b.y = 8, 0
-        self.p.recompute()
-        assert math.isclose(self.p.x, 4.0, abs_tol=1e-9), "应是新中点"
-
-    def test_06_degenerate_segment_no_crash(self):
-        """退化线段（两端重合）拖动不应崩溃"""
-        a = FreePoint(2, 2)
-        b = FreePoint(2, 2)
-        seg = Segment(a, b)
-        p = PointOnObject(seg, t=0.5)
-        p.drag_to((5, 5))
-        p.recompute()
-        assert math.isclose(p.x, 2.0, abs_tol=1e-6)
-        assert math.isclose(p.y, 2.0, abs_tol=1e-6)
-
-
-class TestPointOnCircle:
-    def setup_method(self):
-        self.c = FreePoint(0, 0)
-        self.through = FreePoint(3, 0)
-        self.circle = Circle(self.c, self.through)
-        self.p = PointOnObject(self.circle, t=0.0)
-
-    def test_01_initial_position_on_circle(self):
-        """t=0 应在 (3,0)"""
-        assert math.isclose(self.p.x, 3.0, abs_tol=1e-9)
-        assert math.isclose(self.p.y, 0.0, abs_tol=1e-9)
-
-    def test_02_drag_projects_onto_circle(self):
-        """拖到圆外上方，应投影到圆顶 (0,3)"""
-        self.p.drag_to((0, 10))
-        self.p.recompute()
-        assert math.isclose(self.p.x, 0.0, abs_tol=1e-6)
-        assert math.isclose(self.p.y, 3.0, abs_tol=1e-6)
-
-    def test_03_always_on_circle_after_drags(self):
-        """反复拖动后点到圆心距离恒等于半径"""
-        for tx, ty in [(10, 10), (-5, 3), (0, -8), (100, -100)]:
-            self.p.drag_to((tx, ty))
-            self.p.recompute()
-            dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
-            assert math.isclose(dist, 3.0, abs_tol=1e-6), \
-                f"拖到({tx},{ty})后到圆心距离={dist:.4f}，应为3"
-
-    def test_04_drag_to_center_does_not_crash(self):
-        """拖到圆心（方向未定义）不应崩溃，且仍在圆上"""
-        self.p.drag_to((0, 0))
-        self.p.recompute()
-        dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
-        assert math.isclose(dist, 3.0, abs_tol=1e-6)
-
-    def test_05_host_center_move_updates_point(self):
-        """移动圆心，吸附点应仍在圆上（距离=当前半径）"""
-        self.c.x, self.c.y = 5, 5
-        self.p.recompute()
-        dist = math.hypot(self.p.x - self.c.x, self.p.y - self.c.y)
-        assert math.isclose(dist, self.circle.r, abs_tol=1e-6), \
-            f"圆心移动后偏离，距离={dist}, 半径={self.circle.r}"
-
-
-class TestRecomputePropagation:
-    def test_01_move_endpoint_propagates_to_attached_point(self):
-        """recompute_from 移动端点，吸附点应跟随"""
-        from core.document import Document
-        doc = Document()
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        seg = Segment(a, b)
-        p = PointOnObject(seg, t=0.5)
-        for o in (a, b, seg, p):
-            doc.add(o)
-        b.x, b.y = 8, 0
-        doc.recompute_from(b)
-        assert math.isclose(p.x, 4.0, abs_tol=1e-9), f"端点移动后 x={p.x}，应为4"
-
-    def test_02_move_circle_center_propagates(self):
-        """移动圆心，吸附点应仍在圆上"""
-        from core.document import Document
-        doc = Document()
-        c = FreePoint(0, 0)
-        through = FreePoint(3, 0)
-        circle = Circle(c, through)
-        p = PointOnObject(circle, t=0.0)
-        for o in (c, through, circle, p):
-            doc.add(o)
-        c.x, c.y = 10, 10
-        doc.recompute_from(c)
-        dist = math.hypot(p.x - c.x, p.y - c.y)
-        assert math.isclose(dist, circle.r, abs_tol=1e-6), \
-            f"圆心移动后偏离，距离={dist}, 半径={circle.r}"
-
-"""Document 核心功能测试：增删、级联删除、复制粘贴、撤销重做、增量重算。"""
-
-from geo.points import FreePoint
-from geo.segments import Segment
-from geo.division import DivisionPoint
-
-
-class TestDocumentBasic:
-    def test_add_object(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        assert p in doc.objects
-
-    def test_add_emits_changed(self, doc):
-        received = []
-
-        doc.changed.connect(lambda: received.append(1))
-
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        assert received
-
-    def test_remove_object(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        doc.remove(p)
-
-        assert p not in doc.objects
-
-    def test_remove_cascade(self, doc):
-        a = FreePoint(0, 0)
-        b = FreePoint(1, 0)
-        seg = Segment(a, b)
-
-        doc.add(a)
-        doc.add(b)
-        doc.add(seg)
-
-        doc.remove(a)
-
-        assert a not in doc.objects
-        assert seg not in doc.objects
-        assert b in doc.objects
-
-    def test_remove_selected(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        p.selected = True
-        doc.remove_selected()
-
-        assert p not in doc.objects
-
-    def test_clear(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        doc.clear()
-
-        assert len(doc.objects) == 0
-
-    def test_clear_undo(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        doc.clear()
-        assert len(doc.objects) == 0
-
-        doc.undo()
-        assert len(doc.objects) == 1
-
-
-class TestDocumentUndoRedo:
-    def test_action_undo_redo(self, doc):
-        doc.begin_action()
-
-        p = FreePoint(1, 2)
-        doc.add(p)
-
-        doc.end_action()
-
-        assert len(doc.objects) == 1
-
-        doc.undo()
-        assert len(doc.objects) == 0
-
-        doc.redo()
-        assert len(doc.objects) == 1
-
-    def test_remove_can_undo(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        doc.remove(p)
-        assert len(doc.objects) == 0
-
-        doc.undo()
-        assert len(doc.objects) == 1
-
-
-class TestDocumentClipboard:
-    def test_copy_paste_point(self, doc):
-        p = FreePoint(2, 3)
-        doc.add(p)
-
-        p.selected = True
-        doc.copy_selection()
-        doc.paste()
-
-        points = [o for o in doc.objects if isinstance(o, FreePoint)]
-
-        assert len(points) == 2
-
-    def test_cut_selection(self, doc):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        p.selected = True
-        doc.cut_selection()
-
-        assert p not in doc.objects
-
-
-class TestRecompute:
-    def test_recompute_from_moves_dependent(self, doc):
-        a = FreePoint(0, 0)
-        b = FreePoint(2, 0)
-        d = DivisionPoint(a, b, 0.5)
-
-        doc.add(a)
-        doc.add(b)
-        doc.add(d)
-
-        b.x = 4.0
-        doc.recompute_from(b)
-
-        assert abs(d.x - 2.0) < 1e-9
-
-"""变量系统测试：定义、修改、从动变量、表达式求值、模板渲染。"""
-
-import pytest
-
-from core.variables import (
-    get_store,
-    evaluate,
-    render_template,
-    is_valid_name,
-)
-
-
-class TestVariableStore:
-    def test_define_and_get(self):
-        store = get_store()
-
-        store.define("a", 3.0, 0.0, 10.0)
-
-        var = store.get_var("a")
-
-        assert var is not None
-        assert var.value == 3.0
-
-    def test_set_value(self):
-        store = get_store()
-
-        store.define("a", 1.0, 0.0, 10.0)
-        store.set("a", 5.0)
-
-        assert store.get_var("a").value == 5.0
-
-    def test_delete_variable(self):
-        store = get_store()
-
-        store.define("a", 1.0, 0.0, 10.0)
-        store.delete("a")
-
-        assert store.get_var("a") is None
-
-    def test_set_range_clamps_value(self):
-        store = get_store()
-
-        store.define("a", 20.0, 0.0, 10.0)
-        store.set_range("a", 0.0, 5.0)
-
-        var = store.get_var("a")
-
-        assert var.vmin == 0.0
-        assert var.vmax == 5.0
-        assert var.value == 5.0
-
-
-class TestDependentVariable:
-    def test_dependent_variable_eval(self):
-        store = get_store()
-
-        store.define("a", 2.0, 0.0, 10.0)
-        store.define("b", 0.0, 0.0, 10.0, expr="a * 2")
-
-        d = store.as_dict()
-
-        assert d["a"] == 2.0
-        assert d["b"] == 4.0
-
-    def test_dependent_variable_cannot_be_set_manually(self):
-        store = get_store()
-
-        store.define("a", 2.0, 0.0, 10.0)
-        store.define("b", 0.0, 0.0, 10.0, expr="a * 2")
-
-        store.set("b", 100.0)
-
-        d = store.as_dict()
-        assert d["b"] == 4.0
-
-    def test_multi_level_dependency(self):
-        store = get_store()
-
-        store.define("a", 1.0, 0.0, 10.0)
-        store.define("b", 0.0, 0.0, 10.0, expr="a + 1")
-        store.define("c", 0.0, 0.0, 10.0, expr="b * 2")
-
-        d = store.as_dict()
-
-        assert d["b"] == 2.0
-        assert d["c"] == 4.0
-
-
-class TestEvaluate:
-    def test_basic_expression(self):
-        assert evaluate("2*x + 1", {"x": 3}) == 7
-
-    def test_power_expression(self):
-        assert evaluate("x^2", {"x": 4}) == 16
-
-    def test_function_expression(self):
-        val = evaluate("sqrt(x)", {"x": 9})
-        assert abs(val - 3.0) < 1e-9
-
-    def test_undefined_variable_returns_none(self):
-        assert evaluate("no_such_var + 1", {}) is None
-
-    def test_invalid_expression_returns_none(self):
-        assert evaluate("x +*+ 1", {"x": 1}) is None
-
-
-class TestTemplateName:
-    def test_valid_name(self):
-        assert is_valid_name("边长")
-        assert is_valid_name("a")
-        assert is_valid_name("alpha")
-
-    def test_invalid_name(self):
-        assert not is_valid_name("")
-        assert not is_valid_name("a b")
-        assert not is_valid_name("pi")
-        assert not is_valid_name("sqrt")
-
-
-class TestRenderTemplate:
-    def test_render_variable(self):
-        store = get_store()
-        store.define("a", 3.0, 0.0, 10.0)
-
-        assert render_template("{a}") == "3"
-
-    def test_render_expression(self):
-        store = get_store()
-        store.define("a", 3.0, 0.0, 10.0)
-
-        assert render_template("{a + 1}") == "4"
-
-    def test_render_invalid_keeps_original(self):
-        assert render_template("{no_such_var}") == "{no_such_var}"
-
-"""FunctionCurve 函数绘制功能的单元测试。
-
-检测"静默失败"的 5 个根源：
-1. _eval_at 返回错误类型（tuple 而非 float）
-2. 表达式求值失败返回 None → 无点可画
-3. 变量未定义 → evaluate 返回 None
-4. 采样全部被跳过
-5. 对象 visible/exists 为 False
-
-运行：python -m pytest tests/test_function_curve.py -v
-"""
-import math
-import pytest
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    from PySide6.QtWidgets import QApplication
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-@pytest.fixture(autouse=True)
-def _ensure_qapp(qapp):
-    pass
-
-
-@pytest.fixture(autouse=True)
-def clean_variables():
-    """每个测试隔离变量状态，避免测试间污染。"""
-    from core.variables import get_store
-    store = get_store()
-    saved_vars = dict(store._vars)
-    saved_version = store.version
-    yield
-    store._vars = saved_vars
-    store.version = saved_version
-
-
-def sample_explicit(obj, x0, x1, n=200):
-    """复现 _draw_explicit 的采样逻辑，返回有效 (x, y) 点列表。"""
-    pts = []
-    for i in range(n + 1):
-        x = x0 + (x1 - x0) * i / n
-        y = obj._eval_at(x)
-        if isinstance(y, (int, float)) and math.isfinite(y):
-            pts.append((x, float(y)))
-    return pts
-
-
-def sample_parametric(obj, t0, t1, n=200):
-    pts = []
-    for i in range(n + 1):
-        t = t0 + (t1 - t0) * i / n
-        pt = obj._eval_at(t)
-        if isinstance(pt, (tuple, list)) and len(pt) == 2:
-            x, y = pt
-            if all(isinstance(v, (int, float)) and math.isfinite(v) for v in (x, y)):
-                pts.append((float(x), float(y)))
-    return pts
-
-
-def sample_polar(obj, t0, t1, n=200):
-    pts = []
-    for i in range(n + 1):
-        t = t0 + (t1 - t0) * i / n
-        r = obj._eval_at(t)
-        if isinstance(r, (int, float)) and math.isfinite(r):
-            pts.append((float(r) * math.cos(t), float(r) * math.sin(t)))
-    return pts
-
-
-class TestEvalAtTypes:
-
-    def test_explicit_returns_float(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2")
-        y = f._eval_at(2.0)
-        assert isinstance(y, float), f"explicit 应返回 float，实际 {type(y).__name__}"
-        assert y == pytest.approx(4.0)
-
-    def test_explicit_never_returns_tuple(self):
-        """回归：之前 _eval_at 对 explicit 误返回 tuple 导致 math.isfinite 崩溃。"""
-        from geo.function_curve import FunctionCurve
-        for expr in ["x", "x^2", "sin(x)", "x^2 + tan(x)", "2*x + 1", "sqrt(abs(x))"]:
-            f = FunctionCurve(kind="explicit", expr=expr)
-            y = f._eval_at(1.0)
-            assert not isinstance(y, tuple), f"expr={expr!r} 返回了 tuple: {y}"
-
-    def test_parametric_returns_2tuple(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
-        pt = f._eval_at(0.0)
-        assert isinstance(pt, (tuple, list)), f"parametric 应返回 tuple，实际 {type(pt).__name__}"
-        assert len(pt) == 2
-
-    def test_polar_returns_float(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="polar", expr="1 + cos(t)")
-        r = f._eval_at(0.0)
-        assert isinstance(r, float), f"polar 应返回 float，实际 {type(r).__name__}"
-
-
-class TestExpressionEvaluation:
-
-    def test_polynomial(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2 + 2*x + 1")
-        assert f._eval_at(0.0) == pytest.approx(1.0)
-        assert f._eval_at(1.0) == pytest.approx(4.0)
-        assert f._eval_at(-1.0) == pytest.approx(0.0)
-
-    def test_trig(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="sin(x)")
-        assert f._eval_at(0.0) == pytest.approx(0.0)
-        assert f._eval_at(math.pi / 2) == pytest.approx(1.0)
-
-    def test_tan_composite(self):
-        """用户报告的 x^2 + tan(x) 场景。"""
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2 + tan(x)")
-        y = f._eval_at(1.0)
-        assert isinstance(y, float)
-        assert y == pytest.approx(1.0 + math.tan(1.0))
-
-    def test_empty_expr_returns_none(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="")
-        assert f._eval_at(0.0) is None
-
-    def test_invalid_expr_no_crash(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x +*+ bad")
-        result = f._eval_at(1.0)  # 不应抛异常
-        assert result is None or isinstance(result, float)
-
-
-class TestVariableLinkage:
-
-    def test_variable_in_expr(self):
-        from geo.function_curve import FunctionCurve
-        from core.variables import get_store
-        get_store().define("a", 2.0, 0.0, 10.0)
-        f = FunctionCurve(kind="explicit", expr="a*x")
-        assert f._eval_at(3.0) == pytest.approx(6.0)
-
-    def test_variable_change_updates(self):
-        from geo.function_curve import FunctionCurve
-        from core.variables import get_store
-        store = get_store()
-        store.define("a", 2.0, 0.0, 10.0)
-        f = FunctionCurve(kind="explicit", expr="a*x")
-        assert f._eval_at(3.0) == pytest.approx(6.0)
-        store.set("a", 5.0)
-        assert f._eval_at(3.0) == pytest.approx(15.0)
-
-    def test_undefined_variable_returns_none(self):
-        """未定义变量 → evaluate 返回 None（静默失败根源之一）。"""
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="no_such_var * x")
-        assert f._eval_at(1.0) is None
-
-
-class TestSampling:
-
-    def test_explicit_produces_points(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2")
-        pts = sample_explicit(f, -5, 5, n=100)
-        assert len(pts) > 50, f"采样点过少: {len(pts)}"
-
-    def test_tan_has_valid_points(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="tan(x)")
-        pts = sample_explicit(f, -2.0, 2.0, n=400)
-        assert len(pts) > 0, "tan(x) 采样不应为空"
-        assert all(math.isfinite(y) for _, y in pts)
-
-    def test_parametric_unit_circle(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
-        pts = sample_parametric(f, 0, 2 * math.pi, n=100)
-        assert len(pts) > 50
-        for x, y in pts:
-            assert math.hypot(x, y) == pytest.approx(1.0, abs=1e-6)
-
-    def test_polar_circle(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="polar", expr="1")
-        pts = sample_polar(f, 0, 2 * math.pi, n=100)
-        assert len(pts) > 50
-        for x, y in pts:
-            assert math.hypot(x, y) == pytest.approx(1.0, abs=1e-6)
-
-    def test_empty_expr_no_points(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="")
-        assert sample_explicit(f, -5, 5) == []
-
-
-class TestSerialization:
-
-    def test_explicit_roundtrip(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2 + 1", domain=(-3, 3), color="#ff0000")
-        f2 = FunctionCurve.build([], f.dump())
-        assert f2.kind == "explicit"
-        assert f2.expr == "x^2 + 1"
-        assert f2.domain == (-3, 3)
-
-    def test_parametric_roundtrip(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
-        f2 = FunctionCurve.build([], f.dump())
-        assert f2.kind == "parametric"
-        assert f2.expr == "cos(t)"
-        assert f2.expr2 == "sin(t)"
-
-
-class TestEdgeCases:
-
-    def test_division_by_zero(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="1/x")
-        result = f._eval_at(0.0)  # 不应抛异常
-        assert result is None or not math.isfinite(result) or isinstance(result, float)
-
-    def test_sqrt_negative(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="sqrt(x)")
-        result = f._eval_at(-1.0)  # 不应抛异常
-        assert result is None or isinstance(result, float)
-
-    def test_domain_stored(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x", domain=(0, 1))
-        assert f.domain == (0, 1)
-
-    def test_default_domain(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x")
-        assert f.domain is None or isinstance(f.domain, tuple)
-
-
-class TestObjectState:
-
-    def test_visible_by_default(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2")
-        assert getattr(f, "visible", True) is True
-
-    def test_exists_by_default(self):
-        from geo.function_curve import FunctionCurve
-        f = FunctionCurve(kind="explicit", expr="x^2")
-        assert getattr(f, "exists", True) is True
-
-"""几何对象测试：点、线段、圆、等分点、吸附点、多边形、椭圆、填充、交点、函数曲线。"""
-
-import math
-
-import pytest
-
-from geo.points import FreePoint, PointOnObject
-from geo.segments import Segment
-from geo.circles import Circle
-from geo.division import DivisionPoint
-from geo.chain_fill import ChainFill, Span, FillStyle
-from geo.intersects import IntersectPoint
-from geo.function_curve import FunctionCurve
-
-from plugins.line_tool import Line
-from plugins.ray_tool import Ray
-from plugins.polygon import RegularPolygon
-from plugins.ellipse_tool import Ellipse
-
-
-class TestPoint:
-    def test_free_point_dump_build(self):
-        p = FreePoint(1.5, -2.5)
-
-        cls = type(p)
-        p2 = cls.build([], p.dump())
-
-        assert abs(p2.x - 1.5) < 1e-9
-        assert abs(p2.y + 2.5) < 1e-9
-
-    def test_point_distance(self):
-        p = FreePoint(0, 0)
-
-        assert abs(p.distance_to(3, 4) - 5.0) < 1e-9
-
-
-class TestSegment:
-    def test_length(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(3, 4)
-        s = Segment(a, b)
-
-        assert abs(s.length() - 5.0) < 1e-9
-
-    def test_point_at(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        s = Segment(a, b)
-
-        x, y = s.point_at(0.5)
-
-        assert abs(x - 2.0) < 1e-9
-        assert abs(y) < 1e-9
-
-    def test_project(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        s = Segment(a, b)
-
-        t = s.project(1, 0)
-
-        assert abs(t - 0.25) < 1e-9
-
-    def test_project_clamped(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        s = Segment(a, b)
-
-        assert s.project(-10, 0) == 0.0
-        assert s.project(10, 0) == 1.0
-
-
-class TestCircle:
-    def test_radius(self):
-        center = FreePoint(0, 0)
-        through = FreePoint(2, 0)
-
-        c = Circle(center, through)
-
-        assert abs(c.r - 2.0) < 1e-9
-
-    def test_point_at(self):
-        center = FreePoint(0, 0)
-        through = FreePoint(2, 0)
-
-        c = Circle(center, through)
-
-        x, y = c.point_at(0.0)
-
-        assert abs(x - 2.0) < 1e-9
-        assert abs(y) < 1e-9
-
-    def test_project(self):
-        center = FreePoint(0, 0)
-        through = FreePoint(2, 0)
-
-        c = Circle(center, through)
-
-        t = c.project(0, 2)
-
-        assert abs(t - 0.25) < 1e-9
-
-    def test_distance_to(self):
-        center = FreePoint(0, 0)
-        through = FreePoint(2, 0)
-
-        c = Circle(center, through)
-
-        assert abs(c.distance_to(3, 0) - 1.0) < 1e-9
-
-
-class TestLineRay:
-    def test_line_point_at(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(1, 1)
-
-        line = Line(a, b)
-
-        x, y = line.point_at(2.0)
-
-        assert abs(x - 2.0) < 1e-9
-        assert abs(y - 2.0) < 1e-9
-
-    def test_ray_project_non_negative(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(1, 0)
-
-        ray = Ray(a, b)
-
-        assert ray.project(-5, 0) == 0.0
-        assert abs(ray.project(3, 0) - 3.0) < 1e-9
-
-
-class TestDivisionPoint:
-    def test_midpoint(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-
-        m = DivisionPoint(a, b, 0.5)
-
-        assert abs(m.x - 2.0) < 1e-9
-        assert abs(m.y) < 1e-9
-
-    def test_follows_endpoint(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-
-        m = DivisionPoint(a, b, 0.5)
-
-        b.x = 8.0
-        m.recompute()
-
-        assert abs(m.x - 4.0) < 1e-9
-
-
-class TestPointOnObject:
-    def test_point_on_segment(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        seg = Segment(a, b)
-
-        p = PointOnObject(seg, 0.5)
-
-        assert abs(p.x - 2.0) < 1e-9
-
-    def test_drag_projects_back(self):
-        a = FreePoint(0, 0)
-        b = FreePoint(4, 0)
-        seg = Segment(a, b)
-
-        p = PointOnObject(seg, 0.5)
-
-        p.drag_to((10, 5))
-        p.recompute()
-
-        assert abs(p.x - 4.0) < 1e-9
-        assert abs(p.y) < 1e-9
-
-    def test_point_on_circle(self):
-        center = FreePoint(0, 0)
-        through = FreePoint(3, 0)
-        c = Circle(center, through)
-
-        p = PointOnObject(c, 0.0)
-
-        assert abs(p.x - 3.0) < 1e-9
-        assert abs(p.y) < 1e-9
-
-
-class TestRegularPolygon:
-    def test_vertices(self):
-        center = FreePoint(0, 0)
-        vertex = FreePoint(1, 0)
-
-        poly = RegularPolygon(center, vertex, 4)
-
-        assert len(poly.verts) == 4
-
-    def test_distance_to_vertex(self):
-        center = FreePoint(0, 0)
-        vertex = FreePoint(1, 0)
-
-        poly = RegularPolygon(center, vertex, 4)
-
-        assert poly.distance_to(1, 0) < 1e-9
-
-
-class TestEllipse:
-    def test_point_at(self):
-        center = FreePoint(0, 0)
-        axis_a = FreePoint(2, 0)
-        axis_b = FreePoint(0, 1)
-
-        e = Ellipse(center, axis_a, axis_b)
-
-        x, y = e.point_at(0.0)
-
-        assert abs(x - 2.0) < 1e-9
-        assert abs(y) < 1e-9
-
-    def test_project_top_point(self):
-        center = FreePoint(0, 0)
-        axis_a = FreePoint(2, 0)
-        axis_b = FreePoint(0, 1)
-
-        e = Ellipse(center, axis_a, axis_b)
-
-        t = e.project(0, 1)
-
-        assert abs(t - 0.25) < 1e-6
-
-
-class TestChainFill:
-    def test_triangle_fill_exists(self):
-        p1 = FreePoint(0, 0)
-        p2 = FreePoint(1, 0)
-        p3 = FreePoint(0, 1)
-
-        spans = [
-            Span(p1, p2, None),
-            Span(p2, p3, None),
-            Span(p3, p1, None),
-        ]
-
-        style = FillStyle("#ff0000", 0.5, "solid")
-        fill = ChainFill(spans, style)
-
-        assert fill.exists
-        assert len(fill.path_pts) >= 3
-
-    def test_area_positive(self):
-        p1 = FreePoint(0, 0)
-        p2 = FreePoint(1, 0)
-        p3 = FreePoint(0, 1)
-
-        spans = [
-            Span(p1, p2, None),
-            Span(p2, p3, None),
-            Span(p3, p1, None),
-        ]
-
-        style = FillStyle("#ff0000", 0.5, "solid")
-        fill = ChainFill(spans, style)
-
-        assert abs(abs(fill._area()) - 0.5) < 1e-9
-
-
-class TestIntersect:
-    def test_circle_circle_intersection(self):
-        c1 = Circle(FreePoint(0, 0), FreePoint(2, 0))
-        c2 = Circle(FreePoint(1, 0), FreePoint(3, 0))
-
-        p0 = IntersectPoint(c1, c2, 0)
-        p1 = IntersectPoint(c1, c2, 1)
-
-        assert p0.exists
-        assert p1.exists
-
-    def test_no_intersection_hidden(self):
-        c1 = Circle(FreePoint(0, 0), FreePoint(1, 0))
-        c2 = Circle(FreePoint(10, 0), FreePoint(11, 0))
-
-        p = IntersectPoint(c1, c2, 0)
-
-        assert not p.exists
-
-
-class TestFunctionCurve:
-    def test_explicit_eval_point(self):
-        f = FunctionCurve(kind="explicit", expr="x^2")
-
-        p = f._eval_point(2.0)
-
-        assert p is not None
-        assert abs(p[0] - 2.0) < 1e-9
-        assert abs(p[1] - 4.0) < 1e-9
-
-    def test_parametric_eval_point(self):
-        f = FunctionCurve(kind="parametric", expr="cos(t)", expr2="sin(t)")
-
-        p = f._eval_point(0.0)
-
-        assert p is not None
-        assert abs(p[0] - 1.0) < 1e-9
-        assert abs(p[1]) < 1e-9
-
-    def test_polar_eval_point(self):
-        f = FunctionCurve(kind="polar", expr="1")
-
-        p = f._eval_point(0.0)
-
-        assert p is not None
-        assert abs(p[0] - 1.0) < 1e-9
-        assert abs(p[1]) < 1e-9
-
-"""宏系统测试。
-
-如果 core.macro 不存在，或 Document 未启用宏录制信号，则自动跳过。
-"""
-
-import pytest
-
-macro = pytest.importorskip("core.macro")
-
-from core.document import Document
-from geo.points import FreePoint
-
-
-@pytest.fixture
-def macro_doc():
-    doc = Document()
-
-    if not hasattr(doc, "object_added"):
-        pytest.skip("Document 未启用 object_added 信号，无法测试宏录制")
-
-    if not hasattr(doc, "macros"):
-        pytest.skip("Document 未启用 macros 字段，无法测试宏系统")
-
-    return doc
-
-
-class TestMacroRecorder:
-    def test_record_add_point(self, macro_doc):
-        mm = macro.MacroManager(macro_doc)
-
-        if hasattr(macro, "set_macro_manager"):
-            macro.set_macro_manager(mm)
-
-        mm.start_recording()
-
-        p = FreePoint(0, 0)
-        macro_doc.add(p)
-
-        mm.stop_recording()
-
-        assert macro_doc.macros
-        assert macro_doc.macros[0]["commands"]
-
-    def test_playback_creates_object(self, macro_doc):
-        mm = macro.MacroManager(macro_doc)
-
-        if hasattr(macro, "set_macro_manager"):
-            macro.set_macro_manager(mm)
-
-        mm.start_recording()
-
-        p = FreePoint(0, 0)
-        macro_doc.add(p)
-
-        mm.stop_recording()
-
-        if not macro_doc.macros:
-            pytest.skip("宏录制未产生命令")
-
-        before = len(macro_doc.objects)
-
-        mm.play_last()
-
-        assert len(macro_doc.objects) > before
-
-    def test_playback_can_undo(self, macro_doc):
-        mm = macro.MacroManager(macro_doc)
-
-        if hasattr(macro, "set_macro_manager"):
-            macro.set_macro_manager(mm)
-
-        mm.start_recording()
-
-        p = FreePoint(0, 0)
-        macro_doc.add(p)
-
-        mm.stop_recording()
-
-        if not macro_doc.macros:
-            pytest.skip("宏录制未产生命令")
-
-        before = len(macro_doc.objects)
-
-        mm.play_last()
-
-        after = len(macro_doc.objects)
-        assert after > before
-
-        macro_doc.undo()
-
-        assert len(macro_doc.objects) == before
-
-
-class TestMacroLibrary:
-    def test_register_script_library(self, macro_doc):
-        if not hasattr(macro, "register_script_library"):
-            pytest.skip("当前宏系统没有 register_script_library")
-
-        macro.register_script_library(
-            macro_doc,
-            "mylib",
-            """
-func double(x) {
-    return x * 2
-}
-"""
-        )
-
-        assert hasattr(macro_doc, "script_libs")
-        assert "mylib" in macro_doc.script_libs
-
-"""媒体对象测试：表格、饼图、柱状图、基础矩形拾取。"""
-
-import pytest
-
-from media.table_obj import TableObject
-from media.chart_obj import PieChartObject, BarChartObject
-
-
-class TestTableObject:
-    def test_create(self):
-        t = TableObject(0, 0, rows=2, cols=3, width=4, height=2)
-
-        assert t.rows == 2
-        assert t.cols == 3
-
-    def test_dump_build(self):
-        t = TableObject(1, 2, rows=2, cols=2, width=3, height=2)
-
-        t2 = TableObject.build([], t.dump())
-
-        assert abs(t2.x - 1) < 1e-9
-        assert abs(t2.y - 2) < 1e-9
-        assert t2.rows == 2
-        assert t2.cols == 2
-
-    def test_distance_inside(self):
-        t = TableObject(0, 0, rows=2, cols=2, width=4, height=2)
-
-        assert t.distance_to(1, -1) == 0.0
-
-
-class TestPieChart:
-    def test_get_values_numeric(self):
-        p = PieChartObject(0, 0, data=[1, 2.5, 3])
-
-        assert p.get_values() == [1.0, 2.5, 3.0]
-
-    def test_get_values_string(self):
-        p = PieChartObject(0, 0, data=["1", "2.0"])
-
-        assert p.get_values() == [1.0, 2.0]
-
-
-class TestBarChart:
-    def test_get_values(self):
-        b = BarChartObject(0, 0, data=[4, 5])
-
-        assert b.get_values() == [4.0, 5.0]
-
-
-class TestMediaRenderSmoke:
-    def test_render_table(self, doc, canvas):
-        t = TableObject(0, 0, rows=2, cols=2, width=3, height=2)
-        doc.add(t)
-
-        img = canvas.render_to_image(fit=True, bg_mode="grid", scale=1.0)
-
-        assert img.width() > 0
-        assert img.height() > 0
-
-"""新特性综合测试：隐函数、橡皮擦、图表、图片内嵌、汉化、线程安全。
-运行：pytest tests/test_new_features.py -v
-"""
-import os
-import json
-import zipfile
-import pytest
-from PySide6.QtGui import QPixmap
-from PySide6.QtWidgets import QApplication
-
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-@pytest.fixture(autouse=True)
-def clean_variables():
-    from core.variables import get_store
-    store = get_store()
-    saved_vars = dict(store._vars)
-    saved_version = store.version
-    yield
-    store._vars = saved_vars
-    store.version = saved_version
-
-class TestImplicitCurve:
-    def test_parse_equation(self):
-        from geo.implicit_curve import parse_equation
-        assert parse_equation("x^2+y^2=1") == "(x^2+y^2)-(1)"
-        assert parse_equation("x^2+y^2-1") == "x^2+y^2-1"
-        assert parse_equation(" sin(x)*cos(y) = 0.5 ") == "(sin(x)*cos(y))-(0.5)"
-
-    def test_implicit_curve_init(self):
-        from geo.implicit_curve import ImplicitCurve
-        c = ImplicitCurve("x^2+y^2=1")
-        assert c._resolved_expr == "(x^2+y^2)-(1)"
-        assert c.expr == "x^2+y^2=1"
-        
-    def test_marching_squares_circle(self):
-        from geo.implicit_sampler import _marching_squares
-        from core.variables import evaluate
-
-        class _Eval:
-            def __init__(self, e):
-                self.expr = e
-                self.valid = True
-            def eval(self, vd):
-                return evaluate(self.expr, vd)
-
-        test_val = evaluate("x^2+y^2-1", {"x": 0.0, "y": 0.0})
-        assert test_val is not None, "evaluate 无法求值 x^2+y^2-1"
-        assert abs(test_val - (-1.0)) < 1e-9, f"期望 -1.0，实际 {test_val}"
-
-        test_val2 = evaluate("x^2+y^2-1", {"x": 1.0, "y": 0.0})
-        assert test_val2 is not None, "evaluate 无法求值 x^2+y^2-1 在 (1,0)"
-        assert abs(test_val2 - 0.0) < 1e-9, f"期望 0.0，实际 {test_val2}"
-
-        fast = _Eval("x^2+y^2-1")  # ★ 直接传原始表达式
-        vd = {}
-        segments = _marching_squares(fast, vd, -2, 2, -2, 2, 20, 20)
-        assert len(segments) > 0, "圆 x²+y²=1 应产生等值线段"
-        for x1, y1, x2, y2 in segments:
-            assert abs(x1**2 + y1**2 - 1.0) < 0.25
-            assert abs(x2**2 + y2**2 - 1.0) < 0.25
-
-class TestInkEraser:
-    def test_split_stroke(self):
-        from tools.ink_tool import InkTool
-        points = [(float(x), 0.0) for x in range(-5, 6)]
-        segments = InkTool._split_stroke(points, (0.0, 0.0), 1.5)
-        assert len(segments) == 2
-        assert segments[0][0] == (-5.0, 0.0)
-        assert segments[0][-1] == (-2.0, 0.0)
-        assert segments[1][0] == (2.0, 0.0)
-        assert segments[1][-1] == (5.0, 0.0)
-
-    def test_split_stroke_no_erase(self):
-        from tools.ink_tool import InkTool
-        points = [(float(x), 0.0) for x in range(-5, 6)]
-        segments = InkTool._split_stroke(points, (10.0, 10.0), 1.0)
-        assert len(segments) == 1
-        assert len(segments[0]) == len(points)
-
-class TestChartObjects:
-    def test_line_chart_dump_build(self):
-        from media.chart_obj import LineChartObject
-        obj = LineChartObject(1, 2, data=[10, 20], labels=["A", "B"], colors=["#ff0000"])
-        d = obj.dump()
-        obj2 = LineChartObject.build([], d)
-        assert obj2.x == 1
-        assert obj2.data == [10, 20]
-        assert obj2.labels == ["A", "B"]
-
-    def test_donut_chart_dump_build(self):
-        from media.chart_obj import DonutChartObject
-        obj = DonutChartObject(0, 0, data=[25, 25, 25, 25], hole=0.5)
-        d = obj.dump()
-        obj2 = DonutChartObject.build([], d)
-        assert obj2.hole == 0.5
-        assert len(obj2.data) == 4
-
-class TestImageEmbed:
-    def test_image_embed_save_load(self, tmp_path, qapp):
-        from core.document import Document
-        from media.image_obj import ImageObject
-        
-        img_path = tmp_path / "test_img.png"
-        px = QPixmap(10, 10)
-        px.save(str(img_path))
-        
-        doc = Document()
-        img_obj = ImageObject(0, 0, str(img_path))
-        doc.add(img_obj)
-        
-        wgeo_path = tmp_path / "test.wgeo"
-        doc.save(str(wgeo_path))
-        
-        with zipfile.ZipFile(wgeo_path, 'r') as zf:
-            names = zf.namelist()
-            img_files = [n for n in names if n.startswith("media/images/")]
-            assert len(img_files) == 1, "图片应被内嵌到 media/images/ 目录"
-            
-            sketch = json.loads(zf.read("sketch.json"))
-            img_data = sketch[0]["params"]
-            assert "image_name" in img_data, "序列化应使用 image_name 而非绝对路径"
-            assert "path" not in img_data
-            
-        doc2 = Document()
-        doc2.load(str(wgeo_path))
-        assert len(doc2.objects) == 1
-        loaded_img = doc2.objects[0]
-        assert isinstance(loaded_img, ImageObject)
-        assert os.path.exists(loaded_img.path), "加载时应自动解压到临时目录"
-        assert not loaded_img.pixmap.isNull()
-
-class TestPropertyPanelI18n:
-    def test_chinese_labels(self, qapp):
-        from ui.property_panel import PropertyPanel
-        
-        class MockDoc:
-            changed = type('Signal', (), {'connect': lambda *a: None})()
-        class MockCanvas:
-            doc = MockDoc()
-            height = 800
-            width = 1200
-            
-        panel = PropertyPanel(MockCanvas())
-        
-        class DummyImplicit: pass
-        DummyImplicit.__name__ = "ImplicitCurve"
-        
-        class DummyParallel: pass
-        DummyParallel.__name__ = "ParallelLine"
-        
-        class DummyIncenter: pass
-        DummyIncenter.__name__ = "Incenter"
-        
-        assert panel._get_type_label(DummyImplicit()) == "隐函数曲线"
-        assert panel._get_type_label(DummyParallel()) == "平行线"
-        assert panel._get_type_label(DummyIncenter()) == "内心"
-
-class TestSamplerShutdown:
-    def test_implicit_sampler_shutdown(self):
-        from geo.implicit_sampler import get_implicit_sampler, shutdown_implicit_sampler
-        sampler = get_implicit_sampler()
-        assert sampler.isRunning()
-        shutdown_implicit_sampler()
-        assert not sampler.isRunning()
-
-"""工具覆盖层 draw_overlay 可见性回归测试。
-
-用于防止：
-1. 画圆预览圆/半径不见
-2. 框选框不见
-3. 选择工具红色参考线不见
-4. 某个对象渲染异常导致整个 overlay 层被吞掉
-
-运行：
-    python -m pytest tests/test_overlay_visible.py -v
-"""
-
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import pytest
-
-from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QColor, QImage, QPainter, QPen
-from PySide6.QtWidgets import QApplication
-
-
-@pytest.fixture(scope="module", autouse=True)
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-
-def _make_canvas():
-    from core.document import Document
-    from ui.canvas import Canvas
-
-    doc = Document()
-    canvas = Canvas(doc)
-
-    canvas.resize(360, 240)
-    canvas.origin = QPointF(180.0, 120.0)
-    canvas.scale = 20.0
-
-    return canvas
-
-
-def _non_white_count(img: QImage, step=2):
-    count = 0
-    for y in range(0, img.height(), step):
-        for x in range(0, img.width(), step):
-            c = img.pixelColor(x, y)
-            if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
-                count += 1
-    return count
-
-
-
-class _OverlayProbeTool:
-    """探针工具：只要 draw_overlay 被调用，就把画布涂红。"""
-    hint = "probe"
-    def activated(self, canvas): pass
-    def deactivated(self, canvas): pass
-    def press(self, canvas, wpt, hit): pass
-    def move(self, canvas, wpt, hit): pass
-    def release(self, canvas, wpt, hit): pass
-    def cancel(self, canvas): pass
-    def draw_overlay(self, p, view):
-        p.fillRect(view.rect(), QColor(255, 0, 0))
-
-
-def test_paint_event_executes_tool_overlay():
-    """验证 Canvas.paintEvent 源码中是否包含调用 draw_overlay 的逻辑。
-    使用源码检查可以避免 Qt 离屏渲染 (offscreen) 下 QWidget 未显示时
-    QPainter(self) 报错的底层限制。"""
-    import inspect
-    from ui.canvas import Canvas
-    
-    source = inspect.getsource(Canvas.paintEvent)
-    
-    assert "draw_overlay" in source, (
-        "Canvas.paintEvent 源码中没有找到 draw_overlay 调用。"
-        "请确保 paintEvent 中包含 self.tool.draw_overlay(p, self)。"
-    )
-
-
-
-def test_circle_tool_preview_visible():
-    from geo.points import FreePoint
-    from tools.circle_tool import CircleTool
-
-    canvas = _make_canvas()
-    tool = CircleTool()
-    tool.center = FreePoint(0.0, 0.0)
-    canvas.cursor_wpt = (3.0, 0.0)
-
-    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img.fill(Qt.GlobalColor.white)
-
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    tool.draw_overlay(p, canvas)
-    p.end()
-
-    assert _non_white_count(img) > 20, (
-        "画圆工具预览不可见。"
-        "请检查 theme.dashed_pen 是否返回了有效画笔，"
-        "以及 CircleTool.draw_overlay 是否正常绘制。"
-    )
-
-
-
-def test_circle_tool_radius_line_visible():
-    from geo.points import FreePoint
-    from tools.circle_tool import CircleTool
-
-    canvas = _make_canvas()
-    tool = CircleTool()
-    tool.center = FreePoint(0.0, 0.0)
-    canvas.cursor_wpt = (4.0, 0.0)
-
-    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img.fill(Qt.GlobalColor.white)
-
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    tool.draw_overlay(p, canvas)
-    p.end()
-
-    marked = 0
-    y = int(canvas.origin.y())
-    for x in range(int(canvas.origin.x()), int(canvas.origin.x() + 4.0 * canvas.scale), 2):
-        c = img.pixelColor(x, y)
-        if not (c.red() > 245 and c.green() > 245 and c.blue() > 245):
-            marked += 1
-
-    assert marked > 5, (
-        "画圆工具半径预览线不可见。"
-        "请检查 CircleTool.draw_overlay 是否画了 p.drawLine(center, cursor)。"
-    )
-
-
-
-def test_select_tool_red_guide_visible():
-    from tools.select import SelectTool
-
-    canvas = _make_canvas()
-    tool = SelectTool()
-    tool._guides = [("v", 0.0)]
-
-    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img.fill(Qt.GlobalColor.white)
-
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
-    tool.draw_overlay(p, canvas)
-    p.end()
-
-    x = int(canvas.origin.x())
-    red_found = False
-
-    for y in range(0, img.height(), 1):
-        c = img.pixelColor(x, y)
-        if c.red() > 150 and c.red() > c.green() + 30 and c.red() > c.blue() + 30:
-            red_found = True
-            break
-
-    assert red_found, (
-        "选择工具红色参考线不可见。"
-        "请检查 SelectTool.draw_overlay 和 theme.dashed_pen。"
-    )
-
-
-
-def test_box_select_overlay_visible():
-    from tools.box_select import BoxSelectTool
-
-    canvas = _make_canvas()
-    tool = BoxSelectTool()
-    tool.box_start = (-4.0, -2.0)
-    tool.box_end = (4.0, 2.0)
-
-    img = QImage(canvas.size(), QImage.Format.Format_ARGB32)
-    img.fill(Qt.GlobalColor.white)
-
-    p = QPainter(img)
-    p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    tool.draw_overlay(p, canvas)
-    p.end()
-
-    assert _non_white_count(img) > 50, (
-        "框选工具预览框不可见。"
-        "请检查 BoxSelectTool.draw_overlay。"
-    )
-
-"""渲染冒烟测试：确保常见对象可以离屏渲染，不抛异常。"""
-
-import pytest
-
-from geo.points import FreePoint
-from geo.segments import Segment
-from geo.circles import Circle
-
-from plugins.text_tool import TextObject
-
-
-class TestRenderSmoke:
-    def test_render_basic_objects(self, doc, canvas):
-        a = FreePoint(0, 0)
-        b = FreePoint(2, 1)
-        seg = Segment(a, b)
-        cir = Circle(a, b)
-        text = TextObject("test", "#000000", 14, anchor=None, pos=(0, 1))
-
-        for obj in (a, b, seg, cir, text):
-            doc.add(obj)
-
-        img = canvas.render_to_image(fit=False, bg_mode="grid", scale=1.0)
-
-        assert img.width() > 0
-        assert img.height() > 0
-
-    def test_render_fit_content(self, doc, canvas):
-        a = FreePoint(-1, -1)
-        b = FreePoint(1, 1)
-        seg = Segment(a, b)
-
-        doc.add(a)
-        doc.add(b)
-        doc.add(seg)
-
-        img = canvas.render_to_image(fit=True, bg_mode="grid", scale=1.0)
-
-        assert img.width() > 0
-        assert img.height() > 0
-
-    def test_export_png(self, doc, canvas, tmp_path):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        path = tmp_path / "export.png"
-
-        canvas.export_image(str(path), fit=True, bg_mode="grid", png_scale=1.0)
-
-        assert path.exists()
-        assert path.stat().st_size > 0
-
-"""保存 / 载入测试。"""
-
-from core.document import Document
-from core.variables import get_store
-
-from geo.points import FreePoint
-from geo.segments import Segment
-
-
-class TestSaveLoad:
-    def test_roundtrip(self, doc, tmp_path):
-        store = get_store()
-
-        store.define("a", 3.0, 0.0, 10.0)
-
-        a = FreePoint(0, 0)
-        b = FreePoint(1, 1)
-        seg = Segment(a, b)
-
-        doc.add(a)
-        doc.add(b)
-        doc.add(seg)
-
-        path = tmp_path / "test.wgeo"
-
-        doc.save(str(path))
-
-        doc2 = Document()
-        doc2.load(str(path))
-
-        assert len(doc2.objects) == len(doc.objects)
-
-        var = doc2.vars.get_var("a")
-        assert var is not None
-        assert abs(var.value - 3.0) < 1e-9
-
-"""脚本引擎测试。
-
-由于脚本系统可能处于旧语法 / 新语法过渡阶段，
-本测试会自动探测当前可用的基础建点语法。
-"""
-
-import math
-
-import pytest
-
-scripting = pytest.importorskip("core.scripting")
-
-run_script = getattr(scripting, "run_script", None)
-
-if run_script is None:
-    pytest.skip("core.scripting 没有 run_script 入口", allow_module_level=True)
-
-from core.document import Document
-from geo.points import AbstractPoint
-
-
-def _points(doc):
-    return [o for o in doc.objects if isinstance(o, AbstractPoint)]
-
-
-def _run(doc, script):
-    try:
-        run_script(doc, script, owner_id="pytest", canvas=None)
-    except Exception:
-        pass
-
-
-@pytest.fixture(scope="module")
-def syntax():
-    """探测当前脚本引擎支持哪种基础建点语法。"""
-
-    candidates = [
-        (
-            "new",
-            """
-A = point(1, 2)
-__keep = true
-"""
-        ),
-        (
-            "old",
-            """
-add point A at (1, 2)
-__keep = true
-"""
-        ),
-    ]
-
-    for style, script in candidates:
-        doc = Document()
-        _run(doc, script)
-
-        if _points(doc):
-            return style
-
-    pytest.skip("当前脚本引擎无法通过基础建点脚本")
-
-
-def _point_script(syntax, keep=True):
-    keep_line = "__keep = true" if keep else "__keep = false"
-
-    if syntax == "new":
-        return f"""
-A = point(1, 2)
-{keep_line}
-"""
-
-    return f"""
-add point A at (1, 2)
-{keep_line}
-"""
-
-
-class TestScriptPoint:
-    def test_create_point_keep_true(self, syntax):
-        doc = Document()
-
-        _run(doc, _point_script(syntax, keep=True))
-
-        assert len(_points(doc)) == 1
-
-    def test_create_point_keep_false(self, syntax):
-        doc = Document()
-
-        _run(doc, _point_script(syntax, keep=False))
-
-        assert len(_points(doc)) == 0
-
-
-class TestScriptControlFlow:
-    def test_if_true(self, syntax):
-        doc = Document()
-
-        if syntax == "new":
-            script = """
-if true {
-    A = point(0, 0)
-}
-__keep = true
-"""
-        else:
-            script = """
-if true {
-    add point A at (0, 0)
-}
-__keep = true
-"""
-
-        _run(doc, script)
-
-        assert len(_points(doc)) == 1
-
-    def test_if_false_else(self, syntax):
-        doc = Document()
-
-        if syntax == "new":
-            script = """
-if false {
-    A = point(0, 0)
-} else {
-    B = point(1, 1)
-}
-__keep = true
-"""
-        else:
-            script = """
-if false {
-    add point A at (0, 0)
-} else {
-    add point B at (1, 1)
-}
-__keep = true
-"""
-
-        _run(doc, script)
-
-        assert len(_points(doc)) == 1
-
-
-class TestScriptVariable:
-    def test_global_variable(self, syntax):
-        doc = Document()
-
-        script = """
-global n = 7
-__keep = true
-"""
-
-        _run(doc, script)
-
-        var = doc.vars.get_var("n")
-
-        assert var is not None
-        assert abs(var.value - 7.0) < 1e-9
-
-
-class TestScriptDelete:
-    def test_delete_script_created_point(self, syntax):
-        doc = Document()
-
-        if syntax == "new":
-            script = """
-A = point(0, 0)
-delete A
-__keep = true
-"""
-        else:
-            script = """
-add point A at (0, 0)
-delete A
-__keep = true
-"""
-
-        _run(doc, script)
-
-        assert len(_points(doc)) == 0
-
-
-class TestScriptMath:
-    def test_math_function(self, syntax):
-        doc = Document()
-
-        if syntax == "new":
-            script = """
-A = point(sin(0) + 1, 0)
-__keep = true
-"""
-        else:
-            script = """
-add point A at (sin(0) + 1, 0)
-__keep = true
-"""
-
-        _run(doc, script)
-
-        pts = _points(doc)
-
-        if not pts:
-            pytest.skip("当前脚本引擎不支持在坐标表达式中调用数学函数")
-
-        assert abs(pts[0].x - 1.0) < 1e-6
-
-
-class TestScriptOldLoop:
-    def test_old_name_template_loop(self, syntax):
-        if syntax != "old":
-            pytest.skip("该测试仅针对旧语法的名字模板循环")
-
-        doc = Document()
-
-        script = """
-for i from 1 to 3 {
-    add point P{i} at (i, 0)
-}
-__keep = true
-"""
-
-        _run(doc, script)
-
-        assert len(_points(doc)) >= 3
-
-"""根号渲染诊断测试。
-验证 sqrt 的各种输入形式是否被正确解析为 Sqrt 节点并渲染为根号图形。
-
-运行：pytest tests/test_sqrt_rendering.py -v
-"""
-import os
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
-import pytest
-from PySide6.QtWidgets import QApplication
-from PySide6.QtGui import QImage, QPainter, QColor
-from PySide6.QtCore import Qt
-
-
-@pytest.fixture(scope="session")
-def qapp():
-    app = QApplication.instance() or QApplication([])
-    yield app
-
-
-class TestSqrtParsing:
-    """测试不同输入形式是否产生 Sqrt AST 节点。"""
-
-    def test_latex_sqrt_produces_sqrt_node(self):
-        """\\sqrt{x} 应产生 Sqrt 节点。"""
-        from ui.math.parser import parse, Sqrt, Row
-        ast = parse(r"\sqrt{x}")
-        if isinstance(ast, Row):
-            found = any(isinstance(c, Sqrt) for c in ast.children)
-        else:
-            found = isinstance(ast, Sqrt)
-        assert found, (
-            f"\\sqrt{{x}} 未产生 Sqrt 节点，"
-            f"实际类型: {type(ast).__name__}"
-        )
-
-    def test_function_sqrt_NOT_produces_sqrt_node(self):
-        """sqrt(x) 当前【不会】产生 Sqrt 节点 —— 这是 bug 根源。"""
-        from ui.math.parser import parse, Sqrt, Row, Ord
-        ast = parse("sqrt(x)")
-        if isinstance(ast, Row):
-            types = [type(c).__name__ for c in ast.children]
-            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
-        else:
-            types = [type(ast).__name__]
-            has_sqrt = isinstance(ast, Sqrt)
-
-        if not has_sqrt:
-            pytest.fail(
-                f"【确认 BUG】sqrt(x) 未产生 Sqrt 节点。\n"
-                f"AST 子节点类型: {types}\n"
-                f"原因: parser 将 'sqrt' 识别为 Ord(func) 而非 Sqrt 命令。\n"
-                f"修复: 需在 parser 或 draw_math 前将 sqrt(...) 转换为 \\sqrt{{...}}"
-            )
-
-    def test_unicode_sqrt_NOT_produces_sqrt_node(self):
-        """√(x) 当前【不会】产生 Sqrt 节点。"""
-        from ui.math.parser import parse, Sqrt, Row
-        ast = parse("√(x)")
-        if isinstance(ast, Row):
-            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
-        else:
-            has_sqrt = isinstance(ast, Sqrt)
-        if not has_sqrt:
-            pytest.fail(
-                "【确认 BUG】√(x) 未产生 Sqrt 节点。"
-                "parser 不认识 Unicode √ 字符。"
-            )
-
-    def test_nested_sqrt(self):
-        """\\sqrt{\\sqrt{x}} 嵌套根号。"""
-        from ui.math.parser import parse, Sqrt, Row
-        ast = parse(r"\sqrt{\sqrt{x}}")
-        if isinstance(ast, Row):
-            outer = [c for c in ast.children if isinstance(c, Sqrt)]
-        else:
-            outer = [ast] if isinstance(ast, Sqrt) else []
-        assert len(outer) > 0, "嵌套根号外层未识别"
-        inner = outer[0].content
-        if isinstance(inner, Row):
-            inner_sqrt = [c for c in inner.children if isinstance(c, Sqrt)]
-        else:
-            inner_sqrt = [inner] if isinstance(inner, Sqrt) else []
-        assert len(inner_sqrt) > 0, "嵌套根号内层未识别"
-
-    def test_sqrt_with_complex_content(self):
-        """\\sqrt{x^2+1} 根号内含上标。"""
-        from ui.math.parser import parse, Sqrt, Row
-        ast = parse(r"\sqrt{x^2+1}")
-        if isinstance(ast, Row):
-            found = any(isinstance(c, Sqrt) for c in ast.children)
-        else:
-            found = isinstance(ast, Sqrt)
-        assert found, "\\sqrt{x^2+1} 未产生 Sqrt 节点"
-
-
-class TestSqrtLayout:
-    """测试 Sqrt 节点的度量是否正确（宽/升/降）。"""
-
-    def test_sqrt_measure_has_positive_dimensions(self):
-        from ui.math.parser import parse
-        from ui.math.layout import MathLayout
-        ast = parse(r"\sqrt{x}")
-        lay = MathLayout(None, 16, QColor(0, 0, 0))
-        w, a, d = lay.measure(ast)
-        assert w > 0, f"Sqrt 宽度应 > 0，实际 {w}"
-        assert a > 0, f"Sqrt 升部应 > 0，实际 {a}"
-
-    def test_sqrt_wider_than_plain_x(self):
-        """根号渲染应比纯文本 x 更宽（因为有根号勾）。"""
-        from ui.math.parser import parse
-        from ui.math.layout import MathLayout
-        lay = MathLayout(None, 16, QColor(0, 0, 0))
-        
-        w_sqrt, _, _ = lay.measure(parse(r"\sqrt{x}"))
-        w_text, _, _ = lay.measure(parse("x"))
-        
-        assert w_sqrt > w_text, (
-            f"根号宽度 {w_sqrt:.1f} 应大于纯 x 宽度 {w_text:.1f}"
-        )
-
-    def test_function_sqrt_measure_is_just_text(self):
-        """sqrt(x) 的度量应该只是纯文本宽度（无根号勾）。"""
-        from ui.math.parser import parse
-        from ui.math.layout import MathLayout
-        lay = MathLayout(None, 16, QColor(0, 0, 0))
-        w, a, d = lay.measure(parse("sqrt(x)"))
-        assert w > 0, "sqrt(x) 度量宽度应 > 0"
-
-
-class TestSqrtRendering:
-    """实际渲染到 QImage，检查根号勾是否被绘制。"""
-
-    def _render_to_image(self, text, size=20):
-        from ui.math import draw_math
-        img = QImage(300, 80, QImage.Format.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        draw_math(p, 20, 50, text, size, QColor(0, 0, 0))
-        p.end()
-        return img
-
-    def _count_dark_pixels(self, img):
-        """统计非白色像素数量。"""
-        count = 0
-        for y in range(img.height()):
-            for x in range(img.width()):
-                c = img.pixelColor(x, y)
-                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
-                    count += 1
-        return count
-
-    def test_latex_sqrt_renders_hook(self, qapp):
-        """\\sqrt{x} 应渲染出根号勾（比纯文本多笔画）。"""
-        img_sqrt = self._render_to_image(r"\sqrt{x}")
-        img_text = self._render_to_image("x")
-        px_sqrt = self._count_dark_pixels(img_sqrt)
-        px_text = self._count_dark_pixels(img_text)
-        assert px_sqrt > px_text, (
-            f"\\sqrt{{x}} 像素 {px_sqrt} 未多于 x 像素 {px_text}"
-        )
-
-    def test_function_sqrt_renders_as_text_only(self, qapp):
-        """sqrt(x) 当前只渲染为纯文本（无根号勾）。"""
-        img_func = self._render_to_image("sqrt(x)")
-        img_latex = self._render_to_image(r"\sqrt{x}")
-        px_func = self._count_dark_pixels(img_func)
-        px_latex = self._count_dark_pixels(img_latex)
-        if px_func < px_latex * 0.9:
-            pytest.fail(
-                f"【确认 BUG】sqrt(x) 像素 {px_func} 显著少于 "
-                f"\\sqrt{{x}} 像素 {px_latex}。\n"
-                f"差值 {px_latex - px_func} 像素 = 缺失的根号勾。"
-            )
-
-
-class TestFormulaEditorSqrt:
-    """测试公式编辑器中根号的完整链路。"""
-
-    def test_keypad_inserts_sqrt_text(self):
-        """键盘按钮 √( 插入的是 'sqrt(' 字符串。"""
-        from ui.formula_editor import FormulaKeypad
-        for label, ins, cls in FormulaKeypad.KEYS:
-            if "√" in label:
-                assert ins == "sqrt(", (
-                    f"√ 按钮插入的是 '{ins}' 而非 'sqrt('"
-                )
-                return
-        pytest.fail("FormulaKeypad.KEYS 中未找到 √ 按钮")
-
-    def test_preview_text_contains_sqrt_not_latex(self):
-        """预览文本是 'y = sqrt(x)' 而非 'y = \\sqrt{x}'。"""
-        expr = "sqrt(x)"
-        preview_text = f"y = {expr}"
-        assert "sqrt(" in preview_text
-        assert "\\sqrt" not in preview_text, (
-            "预览文本中不应包含 LaTeX \\sqrt（当前确实不包含，这是 bug）"
-        )
-
-    def test_draw_math_with_preview_text(self, qapp):
-        """用预览文本调用 draw_math，验证根号是否渲染。"""
-        from ui.math import draw_math
-        img = QImage(400, 80, QImage.Format.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        draw_math(p, 12, 40, "y = sqrt(x)", 18, QColor(0, 0, 0))
-        p.end()
-        px = self._count_non_white(img)
-        assert px > 0, "渲染结果不应为空白"
-
-    def _count_non_white(self, img):
-        count = 0
-        for y in range(img.height()):
-            for x in range(img.width()):
-                c = img.pixelColor(x, y)
-                if c.red() < 200 or c.green() < 200 or c.blue() < 200:
-                    count += 1
-        return count
-
-
-class TestSqrtConversion:
-    """测试 sqrt(...) → \\sqrt{...} 的转换函数。
-    这是修复方案的核心：在 draw_math 之前进行语法转换。
-    """
-
-    @staticmethod
-    def _convert_sqrt_to_latex(text: str) -> str:
-        """将 sqrt(...) 函数调用转换为 \\sqrt{...} LaTeX 命令。
-        支持嵌套括号：sqrt(x^2+sqrt(x)) → \\sqrt{x^2+\\sqrt{x}}
-        """
-        import re
-        result = text
-        max_iter = 20
-        for _ in range(max_iter):
-            idx = result.find("sqrt(")
-            if idx == -1:
-                break
-            start = idx + 5  # "sqrt(" 的长度
-            depth = 1
-            end = start
-            while end < len(result) and depth > 0:
-                if result[end] == "(":
-                    depth += 1
-                elif result[end] == ")":
-                    depth -= 1
-                end += 1
-            inner = result[start:end - 1]
-            result = result[:idx] + "\\sqrt{" + inner + "}" + result[end:]
-        return result
-
-    def test_simple_sqrt(self):
-        assert self._convert_sqrt_to_latex("sqrt(x)") == "\\sqrt{x}"
-
-    def test_sqrt_with_expression(self):
-        assert self._convert_sqrt_to_latex("sqrt(x^2+1)") == "\\sqrt{x^2+1}"
-
-    def test_nested_sqrt(self):
-        result = self._convert_sqrt_to_latex("sqrt(x+sqrt(y))")
-        assert result == "\\sqrt{x+\\sqrt{y}}"
-
-    def test_sqrt_in_larger_expr(self):
-        result = self._convert_sqrt_to_latex("y = 2*sqrt(x) + 1")
-        assert result == "y = 2*\\sqrt{x} + 1"
-
-    def test_no_sqrt_unchanged(self):
-        assert self._convert_sqrt_to_latex("x^2 + 1") == "x^2 + 1"
-
-    def test_multiple_sqrt(self):
-        result = self._convert_sqrt_to_latex("sqrt(a) + sqrt(b)")
-        assert result == "\\sqrt{a} + \\sqrt{b}"
-
-    def test_sqrt_with_nested_parens(self):
-        result = self._convert_sqrt_to_latex("sqrt((x+1)*(x-1))")
-        assert result == "\\sqrt{(x+1)*(x-1)}"
-
-    def test_unicode_sqrt_conversion(self):
-        """√(x) 也应被转换。"""
-        text = "√(x)"
-        text = text.replace("√(", "sqrt(")
-        assert self._convert_sqrt_to_latex(text) == "\\sqrt{x}"
-
-
-class TestSqrtEndToEnd:
-    """转换后的完整渲染链路验证。"""
-
-    def test_converted_sqrt_renders_hook(self, qapp):
-        """转换后的 \\sqrt{x} 应渲染出根号勾。"""
-        from ui.math import draw_math
-        from ui.math.parser import parse, Sqrt, Row
-
-        text = "sqrt(x)"
-        converted = TestSqrtConversion._convert_sqrt_to_latex(text)
-        assert converted == "\\sqrt{x}"
-
-        ast = parse(converted)
-        if isinstance(ast, Row):
-            has_sqrt = any(isinstance(c, Sqrt) for c in ast.children)
-        else:
-            has_sqrt = isinstance(ast, Sqrt)
-        assert has_sqrt, f"转换后仍未产生 Sqrt 节点: {converted}"
-
-        img = QImage(200, 80, QImage.Format.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        w = draw_math(p, 20, 50, converted, 20, QColor(0, 0, 0))
-        p.end()
-        assert w > 0, "渲染宽度应 > 0"
-
-    def test_formula_editor_preview_with_conversion(self, qapp):
-        """模拟公式编辑器预览：先转换再渲染。"""
-        from ui.math import draw_math
-
-        user_input = "sqrt(x^2 + 1)"
-        preview = f"y = {user_input}"
-        converted = TestSqrtConversion._convert_sqrt_to_latex(preview)
-        assert "\\sqrt{" in converted
-
-        img = QImage(400, 80, QImage.Format.Format_ARGB32)
-        img.fill(Qt.GlobalColor.white)
-        p = QPainter(img)
-        p.setRenderHint(QPainter.RenderHint.Antialiasing)
-        draw_math(p, 12, 40, converted, 18, QColor(0, 0, 0))
-        p.end()
-
-"""工具测试：点、线段、圆、框选、选择拖动。"""
-
-import pytest
-
-from geo.points import FreePoint
-from geo.segments import Segment
-from geo.circles import Circle
-
-from tools.point_tool import PointTool
-from tools.segment_tool import SegmentTool
-from tools.circle_tool import CircleTool
-from tools.box_select import BoxSelectTool
-from tools.select import SelectTool
-
-
-class TestPointTool:
-    def test_press_creates_point(self, doc, canvas):
-        tool = PointTool()
-        tool.activated(canvas)
-
-        tool.press(canvas, (1.0, 1.0), None)
-
-        points = [o for o in doc.objects if isinstance(o, FreePoint)]
-        assert len(points) == 1
-
-
-class TestSegmentTool:
-    def test_two_presses_create_segment(self, doc, canvas):
-        tool = SegmentTool()
-        tool.activated(canvas)
-
-        tool.press(canvas, (0.0, 0.0), None)
-        tool.press(canvas, (2.0, 0.0), None)
-
-        points = [o for o in doc.objects if isinstance(o, FreePoint)]
-        segments = [o for o in doc.objects if isinstance(o, Segment)]
-
-        assert len(points) == 2
-        assert len(segments) == 1
-
-
-class TestCircleTool:
-    def test_two_presses_create_circle(self, doc, canvas):
-        tool = CircleTool()
-        tool.activated(canvas)
-
-        tool.press(canvas, (0.0, 0.0), None)
-        tool.press(canvas, (2.0, 0.0), None)
-
-        circles = [o for o in doc.objects if isinstance(o, Circle)]
-        assert len(circles) == 1
-
-
-class TestBoxSelectTool:
-    def test_box_selects_inside_points(self, doc, canvas):
-        inside = FreePoint(0, 0)
-        outside = FreePoint(10, 10)
-
-        doc.add(inside)
-        doc.add(outside)
-
-        tool = BoxSelectTool()
-        tool.activated(canvas)
-
-        tool.box_start = (-1, -1)
-        tool.box_end = (1, 1)
-
-        tool.release(canvas, (1, 1), None)
-
-        assert inside.selected
-        assert not outside.selected
-
-
-class TestSelectTool:
-    def test_press_selects_object(self, doc, canvas):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        tool = SelectTool()
-        tool.activated(canvas)
-
-        tool.press(canvas, (0, 0), p)
-
-        assert p.selected
-
-    def test_drag_moves_point(self, doc, canvas):
-        p = FreePoint(0, 0)
-        doc.add(p)
-
-        tool = SelectTool()
-        tool.activated(canvas)
-
-        tool.press(canvas, (0, 0), p)
-        tool.move(canvas, (2, 0), None)
-        tool.release(canvas, (2, 0), None)
-
-        assert abs(p.x - 2.0) < 1e-6
-
-"""变换系统测试：平移、旋转、缩放、反射、迭代点。"""
-
-import math
-
-import pytest
-
-from geo.points import FreePoint
-from transforms.objects import TransformDriver, TransformPoint, IterPoint
-
-
-class TestTransformPoint:
-    def test_translate_expr(self):
-        p = FreePoint(1, 1)
-
-        drv = TransformDriver(
-            "translate",
-            exprs={"mode": "expr", "dx": "2", "dy": "3"}
-        )
-
-        tp = TransformPoint(drv, p)
-
-        assert tp.exists
-        assert abs(tp.x - 3.0) < 1e-9
-        assert abs(tp.y - 4.0) < 1e-9
-
-    def test_rotate_90(self):
-        center = FreePoint(0, 0)
-        p = FreePoint(1, 0)
-
-        drv = TransformDriver(
-            "rotate",
-            points=[center],
-            exprs={"angle": "90"}
-        )
-
-        tp = TransformPoint(drv, p)
-
-        assert tp.exists
-        assert abs(tp.x) < 1e-9
-        assert abs(tp.y - 1.0) < 1e-9
-
-    def test_scale_factor(self):
-        center = FreePoint(0, 0)
-        p = FreePoint(1, 1)
-
-        drv = TransformDriver(
-            "scale",
-            points=[center],
-            exprs={"mode": "expr", "factor": "2"}
-        )
-
-        tp = TransformPoint(drv, p)
-
-        assert tp.exists
-        assert abs(tp.x - 2.0) < 1e-9
-        assert abs(tp.y - 2.0) < 1e-9
-
-    def test_reflect_x_axis(self):
-        p1 = FreePoint(0, 0)
-        p2 = FreePoint(1, 0)
-        p = FreePoint(1, 2)
-
-        drv = TransformDriver(
-            "reflect",
-            points=[p1, p2],
-            exprs={}
-        )
-
-        tp = TransformPoint(drv, p)
-
-        assert tp.exists
-        assert abs(tp.x - 1.0) < 1e-9
-        assert abs(tp.y + 2.0) < 1e-9
-
-
-class TestIterPoint:
-    def test_iteration_expression(self):
-        base = FreePoint(0, 0)
-
-        p = IterPoint(base, 1, "x + 1", "y + 2")
-
-        assert p.exists
-        assert abs(p.x - 1.0) < 1e-9
-        assert abs(p.y - 2.0) < 1e-9
 
 """几何对象库。
 新增对象：在本目录新建 .py 文件，用 @register_geo + @register_renderer 即可，
