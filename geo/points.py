@@ -22,6 +22,7 @@ class AbstractPoint(GeoObject):
 
     x: float
     y: float
+    _auto_label: str
 
     def __init__(self, parents=()):
         super().__init__(parents)

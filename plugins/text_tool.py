@@ -52,7 +52,6 @@ class TextObject(GeoObject):
 
 
 @register_renderer(TextObject)
-@register_renderer(TextObject)
 def draw_text(p, obj, view):
     wx, wy = obj.world_pos()
     sp = view.to_screen(wx, wy) + QPointF(12, 24)     # 显示在锚点右上方
@@ -190,6 +189,12 @@ class TextTool(Tool):
     def _commit(self, canvas, text, color, size, use_anchor):
         anchor = self._anchor if use_anchor else None
         canvas.doc.add(TextObject(text, color, size, anchor=anchor, pos=self._pos))
+        
+        # ★ 异步资源预取拦截
+        if "[New Year]" in text:
+            from ui.easter_eggs import trigger_new_year_egg
+            trigger_new_year_egg(canvas)
+            
         self._editor.hide()
         self._pos = None
         self._anchor = None

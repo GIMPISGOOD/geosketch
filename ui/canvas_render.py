@@ -3,7 +3,7 @@ import os
 from PySide6.QtCore import QPointF, Qt
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap, QPen, QFont
 from core.registry import find_renderer
-from geo.points import AbstractPoint, _point_label
+from geo.points import AbstractPoint 
 from geo.function_curve import FunctionCurve
 from ui import theme
 
@@ -400,7 +400,7 @@ def find_label_offset(p, sp, label, view, screen_segments):
 
 def draw_publication_point(p, obj, view, screen_segments):
     from PySide6.QtGui import QFont, QPen
-    label = getattr(obj, "name", "") or _point_label(obj, view)
+    label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "") or f"P{obj.id}"
     font = QFont("Times New Roman", 16)
     font.setItalic(True)
     p.setFont(font)
