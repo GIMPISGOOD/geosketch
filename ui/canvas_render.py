@@ -1,6 +1,7 @@
 import math
 import os
-from PySide6.QtCore import QPointF, Qt
+import random
+from PySide6.QtCore import QPointF, Qt, QRectF
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPainterPath, QPixmap, QPen, QFont
 from core.registry import find_renderer
 from geo.points import AbstractPoint 
@@ -408,3 +409,104 @@ def draw_publication_point(p, obj, view, screen_segments):
     sp = view.to_screen(obj.x, obj.y)
     offset = find_label_offset(p, sp, label, view, screen_segments)
     p.drawText(sp + offset, label)
+    
+# ============================================================
+# 彩蛋补丁：[ACG] 触发后在渲染层直接绘制图片
+# ============================================================
+_egg_pixmap = None       # QPixmap，None 表示未激活
+_egg_loading = False     # 防止重复触发
+
+
+def trigger_egg(canvas):
+    global _egg_loading
+    if _egg_loading or _egg_pixmap is not None:
+        return
+    _egg_loading = True
+
+    import threading
+    import urllib.request
+    from PySide6.QtCore import QMetaObject, Qt
+
+    def _download():
+        global _egg_loading
+        try:
+            num = random.randint(1, 1000)
+            url = f"https://esa-img.loliapi.cn/i/pc/img{num}.webp"
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+            print(f"[EGG] 后台下载完成，{len(data)} bytes")
+
+            # 将数据暂存到 canvas 对象
+            canvas._egg_data = data
+            # 在主线程中调用 _process_egg_data
+            QMetaObject.invokeMethod(
+                canvas,
+                "_process_egg_data",
+                Qt.ConnectionType.QueuedConnection
+            )
+        except Exception as e:
+            print(f"[EGG] 下载失败: {e}")
+        finally:
+            _egg_loading = False
+
+    threading.Thread(target=_download, daemon=True).start()
+
+def _build_pixmap(canvas, data: bytes):
+    """★ 主线程中执行：WebP 解码 → PNG 转换 → QPixmap 创建。"""
+    global _egg_pixmap, _egg_loading
+    try:
+        from PySide6.QtGui import QImage, QPixmap
+        from PySide6.QtCore import QByteArray, QBuffer
+
+        img = QImage()
+        loaded = img.loadFromData(data)
+        if not loaded:
+            loaded = img.loadFromData(data, "WEBP") # pyright: ignore[reportArgumentType]
+
+        if not loaded or img.isNull():
+            _egg_loading = False
+            return
+
+        # 转为 ARGB32 确保兼容
+        img = img.convertToFormat(QImage.Format.Format_ARGB32)
+
+        # 通过 QBuffer 获取 PNG 字节
+        ba = QByteArray()
+        buf = QBuffer(ba)
+        buf.open(QBuffer.OpenModeFlag.WriteOnly)
+        img.save(buf, "PNG") # pyright: ignore[reportCallIssue, reportArgumentType]
+        buf.close()
+
+        # 直接从内存创建 QPixmap（不写临时文件）
+        pm = QPixmap()
+        pm.loadFromData(ba.data(), "PNG") # pyright: ignore[reportCallIssue, reportArgumentType]
+
+        if pm.isNull():
+            _egg_loading = False
+            return
+
+        _egg_pixmap = pm
+
+        # 触发重绘
+        canvas.update()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        _egg_loading = False
+
+
+def draw_egg_if_active(p: QPainter, canvas):
+    global _egg_pixmap
+    if _egg_pixmap is None or _egg_pixmap.isNull():
+        return
+    aspect = _egg_pixmap.height() / max(_egg_pixmap.width(), 1)
+    x, y, w = 3.0, 3.0, 12.0
+    h = w * aspect
+    tl = canvas.to_screen(x, y)
+    br = canvas.to_screen(x + w, y - h)
+    rect = QRectF(tl, br).normalized()
+    p.drawPixmap(rect.toRect(), _egg_pixmap)

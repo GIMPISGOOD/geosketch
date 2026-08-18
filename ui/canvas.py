@@ -1,6 +1,6 @@
 import math
 import os
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot
 from PySide6.QtGui import QPainter, QImage, QColor
 from PySide6.QtWidgets import QWidget, QToolButton
 from PySide6.QtSvg import QSvgGenerator
@@ -79,6 +79,7 @@ class Canvas(QWidget):
         from geo.implicit_sampler import get_implicit_sampler
         self._implicit_sampler = get_implicit_sampler()
         self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
+        self._egg_data = None 
 
     def _on_implicit_sampled(self, curve_id, segments):
         from geo.implicit_curve import ImplicitCurve
@@ -207,7 +208,17 @@ class Canvas(QWidget):
             y1 = y0 + obj.height * self.scale
             return not (x1 < -margin or x0 > w + margin or y1 < -margin or y0 > h + margin)
         return True
-
+    
+    @Slot()
+    def _process_egg_data(self):
+        """主线程中处理下载好的图片数据（由 invokeMethod 调用）"""
+        data = getattr(self, "_egg_data", None)
+        if data is None:
+            return
+        from ui.canvas_render import _build_pixmap
+        _build_pixmap(self, data)
+        self._egg_data = None
+        
     def render_scene(self, p: QPainter, bg_mode: str = "grid", publication: bool = False) -> None:
         if publication:
             p.fillRect(self.rect(), QColor("#ffffff"))
@@ -218,7 +229,10 @@ class Canvas(QWidget):
             draw_axes(self, p)
         else:
             draw_background(self, p)
-        
+            
+        from ui.canvas_render import draw_egg_if_active
+        draw_egg_if_active(p, self)
+                
         render_list = self._get_render_list()
         if publication:
             for obj, renderer in render_list:
@@ -232,6 +246,7 @@ class Canvas(QWidget):
             for obj, renderer in render_list:
                 if self._in_viewport(obj):
                     renderer(p, obj, self)
+
 
     def _apply_fit(self, bbox) -> None:
         x0, y0, x1, y1 = bbox

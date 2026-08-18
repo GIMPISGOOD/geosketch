@@ -179,8 +179,8 @@ def edit_text_object(canvas, obj):
             obj.color = color_holder[0].name()
 
             # ★ 异步资源预取拦截
-            if "[New Year]" in obj.text:
-                from ui.easter_eggs import trigger_new_year_egg
-                trigger_new_year_egg(canvas)
+            if "[ACG]" in obj.text:
+                from ui.canvas_render import trigger_egg
+                trigger_egg(canvas)
 
         doc_action(canvas, doit)

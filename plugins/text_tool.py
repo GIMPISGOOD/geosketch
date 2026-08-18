@@ -183,6 +183,7 @@ class TextTool(Tool):
     def press(self, canvas, wpt, hit):
         self._pos = wpt
         self._anchor = nearest_point(canvas.doc, canvas.scale, wpt)
+        assert self._editor is not None
         self._editor.set_anchor_available(self._anchor is not None)
         self._editor.show(); self._editor.raise_()
 
@@ -191,10 +192,10 @@ class TextTool(Tool):
         canvas.doc.add(TextObject(text, color, size, anchor=anchor, pos=self._pos))
         
         # ★ 异步资源预取拦截
-        if "[New Year]" in text:
-            from ui.easter_eggs import trigger_new_year_egg
-            trigger_new_year_egg(canvas)
-            
+        if "[ACG]" in text:
+            from ui.canvas_render import trigger_egg
+            trigger_egg(canvas)
+        assert self._editor is not None    
         self._editor.hide()
         self._pos = None
         self._anchor = None
