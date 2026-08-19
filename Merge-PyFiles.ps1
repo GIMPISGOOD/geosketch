@@ -32,7 +32,7 @@ try {
             $reader = New-Object System.IO.StreamReader -ArgumentList $file.FullName, $inputEnc
             try {
                 while ($null -ne ($line = $reader.ReadLine())) {
-                    # 删除行首空白后以 # 开头的行
+                    # 删除行首空白后以 # 开头的行v0.8.13
                     if ($line -notmatch '^\s*#') {
                         $writer.WriteLine($line)
                     }
