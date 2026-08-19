@@ -94,6 +94,7 @@ class AnimationController(QObject):
         self.ticked.emit(self._current_time)
 
     def _evaluate(self, time: float) -> None:
+        """求值所有轨道。"""
         if self.clip is None:
             return
         self._bind_targets()

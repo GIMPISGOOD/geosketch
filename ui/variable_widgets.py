@@ -182,7 +182,8 @@ class VariableSliderPanel(QWidget):
         is_bound = bool(var.binding)
 
         if getattr(var, "expr", ""):
-            lbl = QLabel(f"{name} = {var.expr} = {var.value:.2f}")
+            real_val = self.canvas.doc.vars.as_dict().get(name, var.value)
+            lbl = QLabel(f"{name} = {var.expr} = {real_val:.2f}")
             lbl.setFont(theme.LABEL_FONT)
             lbl.setToolTip("从动变量：由表达式自动计算，不能手动拖动")
             h.addWidget(lbl, 1)

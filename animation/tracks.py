@@ -32,10 +32,13 @@ class VariableTrack(AnimationTrack):
         var = store.get_var(self.var_name)
         if var is None or getattr(var, "expr", ""):
             return
-        # ★ 静默修改，不触发 changed 信号
+        # ★ 静默修改：直接写 var.value，不调用 store.set()
+        # store.set() 会触发 changed → refresh_variables → changed → 画布重绘
+        # 由 AnimationController._evaluate 末尾统一调用一次 refresh_variables
         if var.value != float(val):
             var.value = float(val)
             store.version += 1
+            # 不调用 store.changed.emit()
 
     def duration(self) -> float:
         if not self.keyframes:
