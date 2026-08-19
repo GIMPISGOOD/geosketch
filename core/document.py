@@ -1,4 +1,5 @@
 import json
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -41,12 +42,22 @@ class Document(QObject):
         self._objects_version = 0
         self._type_cache = {}
         self._type_cache_version = -1
-
+        self._temp_image_dir = None  # ★ 临时图片目录，load 时创建，退出/重新加载时清理
         # ★ 约束系统预留（当前为空列表，零开销）
         self.constraints = []
         
     # ================= 对象命名 =================
-
+    
+    def _cleanup_temp_images(self):
+        """清理上次加载时创建的临时图片目录，防止磁盘泄漏。"""
+        if self._temp_image_dir and os.path.isdir(self._temp_image_dir):
+            import shutil
+            try:
+                shutil.rmtree(self._temp_image_dir, ignore_errors=True)
+            except Exception:
+                pass
+        self._temp_image_dir = None
+        
     def _auto_name(self, obj):
         """根据对象类型自动生成名字：P1、S1、C1、Btn1 等。"""
         tn = type(obj).__name__
@@ -279,6 +290,7 @@ class Document(QObject):
     def clear(self):
         if self.objects:
             self._push_undo()
+            self._cleanup_temp_images()
             self.objects.clear()
             self.expr_objects.clear()
             self._objects_version += 1      # ★ 结构变化
@@ -523,6 +535,7 @@ class Document(QObject):
         import tempfile
         import os
         from ui import theme as _theme
+        self._cleanup_temp_images() # ★ 清理上次加载的临时图片目录
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()
 

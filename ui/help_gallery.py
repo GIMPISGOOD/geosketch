@@ -373,10 +373,18 @@ class HelpGalleryWidget(QWidget):
                 row += 1
 
     def _on_card_clicked(self, temp_wgeo_path: str):
-        """卡片点击：加载 .wgeo 文件到文档。"""
+        """卡片点击：加载 .wgeo 文件到文档，加载完成后删除临时副本。"""
         try:
             self.doc.load(temp_wgeo_path)
             self.project_loaded.emit(temp_wgeo_path)
             self.closed.emit()
         except Exception as e:
             print(f"[HelpGallery] 加载项目失败: {e}")
+        finally:
+            # ★ 无论成功或失败，都删除临时 .wgeo 副本
+            try:
+                import os
+                if os.path.exists(temp_wgeo_path):
+                    os.unlink(temp_wgeo_path)
+            except Exception:
+                pass
