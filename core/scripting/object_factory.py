@@ -16,6 +16,23 @@ from plugins.ray_tool import Ray
 from plugins.ellipse_tool import Ellipse
 from plugins.polygon import RegularPolygon
 from plugins.text_tool import TextObject
+from geo.points import PointOnObject
+from geo.constraints import ExprSegment, ExprAngle, ExprPoint
+from plugins.perp_tool import PerpLine
+from plugins.parallel_tool import ParallelLine
+from plugins.bisector_tool import AngleBisector
+from plugins.angle_divide_tool import AngleDivLine
+from plugins.construction_tools import (
+    ThreePointCircle,
+    PerpBisector,
+    Incenter,
+    Centroid,
+)
+from plugins.bezier_tool import CubicBezier
+from plugins.angle_tool import AngleMeasure
+from plugins.ratio_tool import RatioMeasure
+from plugins.measure_tools import Measure, RegionMeasure
+from plugins.polygon import PolygonVertex
 
 from .errors import ScriptError
 
@@ -109,7 +126,148 @@ class ObjectFactory:
             return value
 
         raise ScriptError("此处需要点对象", line)
+    
+    def build_object(self, type_name, *args):
+        """通用对象构建函数。
+        用法：
+            build_object("PerpLine", L1, P1)
+            build_object("RegularPolygon", P1, P2, "{\"n\": 6}")
+        """
+        import json
+        from core.registry import GEO_REGISTRY
 
+        params = {}
+        parents = []
+
+        for a in args:
+            if isinstance(a, str):
+                try:
+                    data = json.loads(a)
+                    if isinstance(data, dict):
+                        params.update(data)
+                except Exception:
+                    pass
+            else:
+                parents.append(a)
+
+        cls = GEO_REGISTRY.get(str(type_name))
+        if cls is None:
+            raise ScriptError(f"未知对象类型：{type_name}")
+
+        obj = cls.build(parents, params)
+        return self.interp.add_created_object(obj)
+
+    def point_on_object(self, host, t):
+        host = self._point(host)
+        t = self._num(t)
+        obj = PointOnObject(host, t)
+        return self.interp.add_created_object(obj)
+
+    def perp_line(self, ref, point):
+        point = self._point(point)
+        obj = PerpLine(ref, point)
+        return self.interp.add_created_object(obj)
+
+    def parallel_line(self, ref, point):
+        point = self._point(point)
+        obj = ParallelLine(ref, point)
+        return self.interp.add_created_object(obj)
+
+    def angle_bisector(self, vertex, p1, p2):
+        vertex = self._point(vertex)
+        p1 = self._point(p1)
+        p2 = self._point(p2)
+        obj = AngleBisector(vertex, p1, p2)
+        return self.interp.add_created_object(obj)
+
+    def angle_div_line(self, vertex, p1, p2, k, n):
+        vertex = self._point(vertex)
+        p1 = self._point(p1)
+        p2 = self._point(p2)
+        k = int(self._num(k))
+        n = int(self._num(n))
+        obj = AngleDivLine(vertex, p1, p2, k, n)
+        return self.interp.add_created_object(obj)
+
+    def perp_bisector(self, a, b):
+        a = self._point(a)
+        b = self._point(b)
+        obj = PerpBisector(a, b)
+        return self.interp.add_created_object(obj)
+
+    def three_point_circle(self, p1, p2, p3):
+        p1 = self._point(p1)
+        p2 = self._point(p2)
+        p3 = self._point(p3)
+        obj = ThreePointCircle(p1, p2, p3)
+        return self.interp.add_created_object(obj)
+
+    def incenter(self, a, b, c):
+        a = self._point(a)
+        b = self._point(b)
+        c = self._point(c)
+        obj = Incenter(a, b, c)
+        return self.interp.add_created_object(obj)
+
+    def centroid(self, a, b, c):
+        a = self._point(a)
+        b = self._point(b)
+        c = self._point(c)
+        obj = Centroid(a, b, c)
+        return self.interp.add_created_object(obj)
+
+    def cubic_bezier(self, p0, p1, p2, p3):
+        p0 = self._point(p0)
+        p1 = self._point(p1)
+        p2 = self._point(p2)
+        p3 = self._point(p3)
+        obj = CubicBezier(p0, p1, p2, p3)
+        return self.interp.add_created_object(obj)
+
+    def angle_measure(self, vertex, p1, p2):
+        vertex = self._point(vertex)
+        p1 = self._point(p1)
+        p2 = self._point(p2)
+        obj = AngleMeasure(vertex, p1, p2)
+        return self.interp.add_created_object(obj)
+
+    def ratio_measure(self, seg1, seg2):
+        obj = RatioMeasure(seg1, seg2)
+        return self.interp.add_created_object(obj)
+
+    def measure(self, kind, *targets):
+        kind = self._text(kind)
+        targets = [self._point(t) if hasattr(t, "x") and hasattr(t, "y") else t
+                   for t in targets]
+        obj = Measure(kind, list(targets))
+        return self.interp.add_created_object(obj)
+
+    def region_measure(self, *points):
+        pts = [self._point(p) for p in points]
+        obj = RegionMeasure(pts)
+        return self.interp.add_created_object(obj)
+
+    def expr_segment(self, segment, expr):
+        expr = self._text(expr)
+        obj = ExprSegment(segment, expr)
+        return self.interp.add_created_object(obj)
+
+    def expr_angle(self, angle, expr):
+        expr = self._text(expr)
+        obj = ExprAngle(angle, expr)
+        return self.interp.add_created_object(obj)
+
+    def expr_point(self, expr_x, expr_y):
+        expr_x = self._text(expr_x)
+        expr_y = self._text(expr_y)
+        obj = ExprPoint(expr_x, expr_y)
+        return self.interp.add_created_object(obj)
+
+    def polygon_vertex(self, poly, k):
+        k = int(self._num(k))
+        obj = PolygonVertex(poly, k)
+        return self.interp.add_created_object(obj)
+    
     def _text(self, value, line=None):
         if isinstance(value, str):
             return value

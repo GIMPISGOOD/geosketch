@@ -40,7 +40,12 @@ class ExprSegment(GeoObject):
 
     def dump(self):
         return {"expr": self.expr}
-
+    
+    def distance_to(self, x, y):
+        if getattr(self, "segment", None) is not None and getattr(self.segment, "exists", True):
+            return self.segment.distance_to(x, y)
+        return None
+    
     @classmethod
     def build(cls, parents, params):
         return cls(parents[0], params["expr"])
@@ -78,7 +83,12 @@ class ExprAngle(GeoObject):
         p2.y = v.y + dist * math.sin(new_a2)
 
         self.angle.degrees = target % 360
-
+        
+    def distance_to(self, x, y):
+        if getattr(self, "angle", None) is not None and getattr(self.angle, "exists", True):
+            return self.angle.distance_to(x, y)
+        return None
+    
     def moved_points(self):
         return [self.angle.p2]
 

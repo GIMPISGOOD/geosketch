@@ -32,7 +32,13 @@ class RatioMeasure(GeoObject):
             self.num, self.den = 1, 0
 
     def distance_to(self, x, y):
-        return None          # HUD 渲染，不在世界坐标中拾取；删线段即级联删除
+        try:
+            s = self.seg1
+            mx = (s.a.x + s.b.x) / 2.0
+            my = (s.a.y + s.b.y) / 2.0
+            return math.hypot(x - mx, y - my)
+        except Exception:
+            return None        # HUD 渲染，不在世界坐标中拾取；删线段即级联删除
 
     def dump(self):
         return {}

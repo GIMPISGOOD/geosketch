@@ -6,7 +6,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QVBoxLayout, QHBoxLayout, QFormLayout, QLabel,
                                QLineEdit, QDoubleSpinBox, QPushButton, QSlider,
                                QWidget, QWizard, QWizardPage, QDialog,
-                               QDialogButtonBox, QGraphicsDropShadowEffect, QCheckBox)
+                               QDialogButtonBox, QGraphicsDropShadowEffect, QCheckBox,
+                               QComboBox)
 
 from core.variables import is_valid_name
 from ui import theme
@@ -187,22 +188,43 @@ class VariableSliderPanel(QWidget):
             lbl.setFont(theme.LABEL_FONT)
             lbl.setToolTip("从动变量：由表达式自动计算，不能手动拖动")
             h.addWidget(lbl, 1)
+
         elif is_bound:
             metric_cn = {
-                "length": "长度", "radius": "半径", "area": "面积",
-                "perimeter": "周长", "degrees": "角度",
+                "length": "长度",
+                "distance": "距离",
+                "angle": "角度",
+                "ratio": "比值",
+                "area": "面积",
+                "perimeter": "周长",
+                "radius": "半径",
+                "diameter": "直径",
+                "slope": "斜率",
+                "degrees": "角度",
+                "value": "度量",
             }.get(var.binding.get("metric"), "度量")
+
             lbl = QLabel(f"{name} ({metric_cn}) = {var.value:.2f}")
             lbl.setFont(theme.LABEL_FONT)
             lbl.setToolTip("度量绑定变量：由几何对象决定，不能手动拖动")
             h.addWidget(lbl, 1)
+
+            unbind = QPushButton("解绑")
+            unbind.setFixedHeight(20)
+            unbind.setCursor(Qt.CursorShape.PointingHandCursor)
+            unbind.setStyleSheet(
+                f"border:none;color:{theme.SELECTED.name()};font-weight:600;"
+            )
+            unbind.setToolTip("解除该变量与度量对象的绑定")
+            unbind.clicked.connect(lambda _=False, n=name: self._unbind_var(n))
+            h.addWidget(unbind)
+
         else:
             lbl = QLabel(f"{name} = {var.value:.2f}")
             lbl.setFont(theme.LABEL_FONT)
             lbl.setMinimumWidth(90)
             h.addWidget(lbl)
 
-            # ★ 基于步长离散化滑杆
             step = var.step if var.step > 1e-9 else (var.vmax - var.vmin) / 1000.0
             steps = int(round((var.vmax - var.vmin) / step))
             if steps < 1:
@@ -220,6 +242,18 @@ class VariableSliderPanel(QWidget):
             slider.sliderReleased.connect(self.refresh)
             h.addWidget(slider, 1)
 
+            bind_btn = QPushButton("⛓")
+            bind_btn.setFixedSize(26, 20)
+            bind_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            bind_btn.setToolTip("绑定到度量值")
+            bind_btn.setStyleSheet(
+                "border:none;border-radius:5px;"
+                "background:rgba(120,140,170,0.16);"
+                "font-weight:700;"
+            )
+            bind_btn.clicked.connect(lambda _=False, n=name: self._bind_var(n))
+            h.addWidget(bind_btn)
+
         rm = QPushButton("×")
         rm.setFixedSize(20, 20)
         rm.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -228,6 +262,7 @@ class VariableSliderPanel(QWidget):
         )
         rm.clicked.connect(lambda _=False, n=name: self._delete(n))
         h.addWidget(rm)
+
         return w
     
     def _on_slide(self, name, v, lbl, vmin, step):
@@ -250,7 +285,44 @@ class VariableSliderPanel(QWidget):
             self.canvas.doc.vars.define(name, val, lo, hi, expr)
             self.canvas.doc.refresh_variables()
             self.refresh()
+    def _bind_var(self, name):
+        dlg = VariableBindingDialog(self.canvas.doc, self.window())
+        if not dlg.exec():
+            return
 
+        item = dlg.get_binding()
+        if item is None:
+            return
+
+        store = self.canvas.doc.vars
+        var = store.get_var(name)
+        if var is None:
+            return
+
+        var.expr = ""
+        var.binding = {
+            "obj_id": item["obj_id"],
+            "metric": item["metric"],
+        }
+
+        store.version += 1
+        store.changed.emit()
+        store.update_bindings(self.canvas.doc)
+        self.canvas.doc.refresh_variables()
+        self.refresh()
+
+    def _unbind_var(self, name):
+        store = self.canvas.doc.vars
+        var = store.get_var(name)
+        if var is None:
+            return
+
+        var.binding = None
+        store.version += 1
+        store.changed.emit()
+        self.canvas.doc.refresh_variables()
+        self.refresh()
+        
 class VariableRangeDialog(QDialog):
     """修改变量的滑杆范围（最小值 / 最大值）。"""
     def __init__(self, name, vmin, vmax, parent=None):
@@ -278,3 +350,45 @@ class VariableRangeDialog(QDialog):
         if lo > hi:
             lo, hi = hi, lo
         return lo, hi
+    
+class VariableBindingDialog(QDialog):
+    """选择文档中的某个度量对象，并绑定到变量。"""
+
+    def __init__(self, doc, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("绑定到度量值")
+        self.setMinimumWidth(420)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("选择要绑定的度量对象："))
+
+        self.combo = QComboBox()
+        self._items = []
+
+        from core.variables import available_bindings
+        self._items = available_bindings(doc)
+
+        for item in self._items:
+            self.combo.addItem(item["label"])
+
+        if not self._items:
+            self.combo.addItem("（当前文档没有可用度量）")
+
+        layout.addWidget(self.combo)
+
+        btns = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setEnabled(bool(self._items))
+
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_binding(self):
+        idx = self.combo.currentIndex()
+        if 0 <= idx < len(self._items):
+            return self._items[idx]
+        return None

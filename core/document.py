@@ -237,6 +237,7 @@ class Document(QObject):
         for o in new_objs:
             o.selected = True
         self.end_action()
+        self.vars.update_bindings(self)
         self.changed.emit()
 
     def add(self, obj):
@@ -273,6 +274,7 @@ class Document(QObject):
         if self._group_depth == 0:
             self._push_undo()
         doomed = self._remove(obj)
+        self.vars.update_bindings(self)
         self.changed.emit()
         return doomed
 
@@ -285,6 +287,7 @@ class Document(QObject):
             if o in self.objects:
                 self._remove(o)
         self.end_action()
+        self.vars.update_bindings(self)
         self.changed.emit()
 
     def clear(self):
@@ -297,8 +300,9 @@ class Document(QObject):
             # ★ 宏录制：通知清空
             if not getattr(self, "_macro_suppress", False):
                 self.cleared.emit()
-            self._assign_point_labels()
-            self.changed.emit()
+        self._assign_point_labels()
+        self.vars.update_bindings(self)
+        self.changed.emit()
         
     # ================= 选择 =================
     def set_selection(self, objs):
@@ -367,9 +371,15 @@ class Document(QObject):
         
     # ================= 增量重算 =================
     def recompute_from(self, roots):
-        """增量重算 + emit changed（对外接口，行为不变）。"""
+        """增量重算 + emit changed。
+        如果绑定变量发生变化，则进一步刷新表达式对象。
+        """
         self.recompute_silent(roots)
-        self.changed.emit()
+
+        if self.vars.update_bindings(self):
+            self.refresh_variables()
+        else:
+            self.changed.emit()
 
     # ================= 撤销 / 重做 =================
     def snapshot(self):
@@ -403,6 +413,7 @@ class Document(QObject):
 
     def refresh_variables(self):
         """变量变化后，重算所有表达式约束对象并联动其后代。"""
+        self.vars.update_bindings(self)
         from geo.function_curve import FunctionCurve
         for obj in self.get_typed("FunctionCurve"):
             obj.invalidate_cache()
@@ -487,6 +498,7 @@ class Document(QObject):
         finally:
             self._macro_suppress = False
         self._assign_point_labels()
+        self.vars.update_bindings(self)
         self.changed.emit()
 
     def save(self, path):

@@ -64,7 +64,21 @@ class TransformDriver(GeoObject):
         self.recompute()
 
     # ---------------- 重算 ----------------
+    def _anchor(self):
+        if self.kind == "invert" and self.ready:
+            return self.inv_center
 
+        if self.ready:
+            p = self.apply_point(0.0, 0.0)
+            if p is not None:
+                return p
+
+        for p in self._points:
+            if getattr(p, "exists", True):
+                return (p.x, p.y)
+
+        return None
+    
     def recompute(self):
         self.ready = False
         self.similarity = False
@@ -253,7 +267,10 @@ class TransformDriver(GeoObject):
         return [self]
 
     def distance_to(self, x, y):
-        return None
+        a = self._anchor()
+        if a is None:
+            return None
+        return math.hypot(x - a[0], y - a[1])
 
     # ---------------- 序列化 ----------------
 
@@ -512,3 +529,17 @@ class IterPoint(AbstractPoint):
             params.get("expr_x", "x"),
             params.get("expr_y", "y"),
         )
+
+@register_renderer(TransformDriver)
+def draw_transform_driver(p, obj, view):
+    if not obj.selected:
+        return
+
+    a = obj._anchor()
+    if a is None:
+        return
+
+    sp = view.to_screen(a[0], a[1])
+    p.setPen(theme.pen(theme.SELECTED, 1.6))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    p.drawRect(sp.x() - 5, sp.y() - 5, 10, 10)

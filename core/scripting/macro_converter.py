@@ -3,7 +3,7 @@
 扩展：新增对象类型只需 @register_converter("TypeName") 即可。
 """
 from __future__ import annotations
-
+import json
 from typing import Any, Callable, Dict, List, Optional
 
 # ═══════════════════════════════════════════════════════════
@@ -77,6 +77,40 @@ def register_converter(type_name: str):
         return fn
     return deco
 
+def _script_string(s: str) -> str:
+    s = str(s)
+    s = s.replace("\\", "\\\\")
+    s = s.replace('"', '\\"')
+    s = s.replace("\n", "\\n")
+    return f'"{s}"'
+
+
+def _generic_add(conv: "MacroToScriptConverter", cmd: dict) -> str:
+    """通用宏命令 → 脚本转换器。
+    不再输出注释，而是输出：
+        X = build_object("TypeName", parent1, parent2, "{...params...}")
+    """
+    type_name = cmd.get("class", "")
+    alias = cmd.get("alias", "")
+    var = conv.alias_to_var.get(alias, alias or "obj")
+
+    parents = []
+    for a in cmd.get("parents", []):
+        parents.append(conv.resolve_parent(a))
+
+    params = cmd.get("params", {}) or {}
+    args = list(parents)
+
+    if params:
+        try:
+            params_text = json.dumps(params, ensure_ascii=False)
+        except Exception:
+            params_text = "{}"
+        args.append(_script_string(params_text))
+
+    if args:
+        return f'{var} = build_object("{type_name}", {", ".join(args)})'
+    return f'{var} = build_object("{type_name}")'
 
 # ═══════════════════════════════════════════════════════════
 #  主转换器
@@ -155,20 +189,17 @@ class MacroToScriptConverter:
     def _convert_add(self, cmd: dict) -> str:
         type_name = cmd.get("class", "")
         alias = cmd.get("alias", "")
-
-        # 分配变量名
         var = self._make_var(alias, type_name)
         self.alias_to_var[alias] = var
 
-        # 查找转换器
         converter_fn = CONVERTERS.get(type_name)
         if converter_fn is None:
-            return f"# ⚠ 暂不支持的对象类型：{type_name}（变量 {var}）"
+            return _generic_add(self, cmd)
 
         try:
             return converter_fn(self.alias_to_var, cmd, self)
-        except Exception as e:
-            return f"# ⚠ 转换 {type_name} 时出错：{e}"
+        except Exception:
+            return _generic_add(self, cmd)
 
     # ─────────────── move ───────────────
     def _convert_move(self, cmd: dict) -> str:
@@ -434,150 +465,242 @@ def _conv_regular_polygon(am: dict, cmd: dict, conv: MacroToScriptConverter) -> 
     return f"{var} = regular_polygon({center}, {vertex}, {n})"
 
 
-@register_converter("ChainFill")
-def _conv_chain_fill(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+# ================= 新增：更多真实脚本转换器 =================
+
+def _register_generic(type_name: str):
+    @register_converter(type_name)
+    def _fn(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+        return _generic_add(conv, cmd)
+    return _fn
+
+
+_GENERIC_TYPES = (
+    "DirectedLine",
+    "ScriptButtonObject",
+    "TableObject",
+    "PieChartObject",
+    "BarChartObject",
+    "LineChartObject",
+    "DonutChartObject",
+    "ImageObject",
+    "InkStroke",
+    "InkEraser",
+    "TransformDriver",
+    "TransformPoint",
+    "IterPoint",
+    "InvertedCircle",
+    "CircleAxisPoint",
+)
+
+for _tn in _GENERIC_TYPES:
+    _register_generic(_tn)
+
+
+@register_converter("PointOnObject")
+def _conv_point_on_object_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
     var = am[cmd["alias"]]
-    return f"# ⚠ ChainFill（链式填充）暂不支持转换（变量 {var}）"
+    if len(parents) < 1:
+        return _generic_add(conv, cmd)
+
+    host = conv.resolve_parent(parents[0])
+    t = cmd.get("params", {}).get("t", 0.5)
+    return f"{var} = point_on_object({host}, {conv._fmt_num(t)})"
 
 
-# ───────── 度量 ─────────
+@register_converter("PerpLine")
+def _conv_perp_line_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return _generic_add(conv, cmd)
+
+    ref = conv.resolve_parent(parents[0])
+    point = conv.resolve_parent(parents[1])
+    return f"{var} = perp_line({ref}, {point})"
+
+
+@register_converter("ParallelLine")
+def _conv_parallel_line_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return _generic_add(conv, cmd)
+
+    ref = conv.resolve_parent(parents[0])
+    point = conv.resolve_parent(parents[1])
+    return f"{var} = parallel_line({ref}, {point})"
+
+
+@register_converter("AngleBisector")
+def _conv_angle_bisector_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 3:
+        return _generic_add(conv, cmd)
+
+    vertex = conv.resolve_parent(parents[0])
+    p1 = conv.resolve_parent(parents[1])
+    p2 = conv.resolve_parent(parents[2])
+    return f"{var} = angle_bisector({vertex}, {p1}, {p2})"
+
+
+@register_converter("AngleDivLine")
+def _conv_angle_div_line_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    var = am[cmd["alias"]]
+    if len(parents) < 3:
+        return _generic_add(conv, cmd)
+
+    vertex = conv.resolve_parent(parents[0])
+    p1 = conv.resolve_parent(parents[1])
+    p2 = conv.resolve_parent(parents[2])
+    k = params.get("k", 1)
+    n = params.get("n", 3)
+    return f"{var} = angle_div_line({vertex}, {p1}, {p2}, {k}, {n})"
+
+
+@register_converter("PerpBisector")
+def _conv_perp_bisector_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 2:
+        return _generic_add(conv, cmd)
+
+    a = conv.resolve_parent(parents[0])
+    b = conv.resolve_parent(parents[1])
+    return f"{var} = perp_bisector({a}, {b})"
+
+
+@register_converter("ThreePointCircle")
+def _conv_three_point_circle_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 3:
+        return _generic_add(conv, cmd)
+
+    p1 = conv.resolve_parent(parents[0])
+    p2 = conv.resolve_parent(parents[1])
+    p3 = conv.resolve_parent(parents[2])
+    return f"{var} = three_point_circle({p1}, {p2}, {p3})"
+
+
+@register_converter("CubicBezier")
+def _conv_cubic_bezier_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    var = am[cmd["alias"]]
+    if len(parents) < 4:
+        return _generic_add(conv, cmd)
+
+    p0 = conv.resolve_parent(parents[0])
+    p1 = conv.resolve_parent(parents[1])
+    p2 = conv.resolve_parent(parents[2])
+    p3 = conv.resolve_parent(parents[3])
+    return f"{var} = cubic_bezier({p0}, {p1}, {p2}, {p3})"
+
+
 @register_converter("AngleMeasure")
-def _conv_angle_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+def _conv_angle_measure_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
     var = am[cmd["alias"]]
-    return f"# ⚠ AngleMeasure（角度度量）暂不支持转换（变量 {var}）"
+    if len(parents) < 3:
+        return _generic_add(conv, cmd)
+
+    vertex = conv.resolve_parent(parents[0])
+    p1 = conv.resolve_parent(parents[1])
+    p2 = conv.resolve_parent(parents[2])
+    return f"{var} = angle_measure({vertex}, {p1}, {p2})"
 
 
 @register_converter("RatioMeasure")
-def _conv_ratio_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+def _conv_ratio_measure_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
     var = am[cmd["alias"]]
-    return f"# ⚠ RatioMeasure（比例度量）暂不支持转换（变量 {var}）"
+    if len(parents) < 2:
+        return _generic_add(conv, cmd)
+
+    seg1 = conv.resolve_parent(parents[0])
+    seg2 = conv.resolve_parent(parents[1])
+    return f"{var} = ratio_measure({seg1}, {seg2})"
 
 
 @register_converter("Measure")
-def _conv_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+def _conv_measure_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
     params = cmd.get("params", {})
-    kind = params.get("kind", "unknown")
     var = am[cmd["alias"]]
-    return f"# ⚠ Measure（{kind} 度量）暂不支持转换（变量 {var}）"
 
+    kind = params.get("kind", "length")
 
-@register_converter("ExprSegment")
-def _conv_expr_segment(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    params = cmd.get("params", {})
-    expr = params.get("expr", "")
-    var = am[cmd["alias"]]
-    return f"# ⚠ ExprSegment（表达式线段，表达式：{expr}）暂不支持转换（变量 {var}）"
+    if params.get("label_pos") is None and parents:
+        parent_text = ", ".join(conv.resolve_parent(p) for p in parents)
+        return f'{var} = measure("{kind}", {parent_text})'
 
-
-@register_converter("ExprAngle")
-def _conv_expr_angle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    params = cmd.get("params", {})
-    expr = params.get("expr", "")
-    var = am[cmd["alias"]]
-    return f"# ⚠ ExprAngle（表达式角度，表达式：{expr}）暂不支持转换（变量 {var}）"
-
-
-@register_converter("ExprPoint")
-def _conv_expr_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    params = cmd.get("params", {})
-    ex = params.get("expr_x", "0")
-    ey = params.get("expr_y", "0")
-    var = am[cmd["alias"]]
-    return f"# ⚠ ExprPoint（表达式点，x={ex}, y={ey}）暂不支持转换（变量 {var}）"
-
-
-# ───────── 文本 / 媒体 ─────────
-@register_converter("TextObject")
-def _conv_text_object(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    params = cmd.get("params", {})
-    text = params.get("text", "")
-    color = params.get("color", "#1f2937")
-    size = params.get("size", 16)
-    pos = params.get("pos", [0, 0])
-    var = am[cmd["alias"]]
-    text_escaped = str(text).replace('"', '\\"').replace("\n", "\\n")
-    px = conv._fmt_num(pos[0]) if len(pos) > 0 else "0"
-    py = conv._fmt_num(pos[1]) if len(pos) > 1 else "0"
-    return f'{var} = text({px}, {py}, "{text_escaped}", {size}, "{color}")'
-
-
-@register_converter("ScriptButtonObject")
-def _conv_script_button(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ ScriptButtonObject（脚本按钮）暂不支持转换（变量 {var}）"
-
-
-@register_converter("TableObject")
-def _conv_table(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ TableObject（表格）暂不支持转换（变量 {var}）"
-
-
-@register_converter("PieChartObject")
-def _conv_pie_chart(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ PieChartObject（饼图）暂不支持转换（变量 {var}）"
-
-
-@register_converter("BarChartObject")
-def _conv_bar_chart(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ BarChartObject（柱状图）暂不支持转换（变量 {var}）"
-
-
-@register_converter("ImageObject")
-def _conv_image(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ ImageObject（图片）暂不支持转换（变量 {var}）"
-
-
-@register_converter("InkStroke")
-def _conv_ink_stroke(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ InkStroke（墨迹）暂不支持转换（变量 {var}）"
-
-
-@register_converter("InkEraser")
-def _conv_ink_eraser(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ InkEraser（橡皮擦）暂不支持转换（变量 {var}）"
-
-
-# ───────── 变换 ─────────
-@register_converter("TransformDriver")
-def _conv_transform_driver(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ TransformDriver（变换驱动器）暂不支持转换（变量 {var}）"
-
-
-@register_converter("TransformPoint")
-def _conv_transform_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ TransformPoint（变换点）暂不支持转换（变量 {var}）"
-
-
-@register_converter("IterPoint")
-def _conv_iter_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ IterPoint（迭代点）暂不支持转换（变量 {var}）"
-
-
-@register_converter("InvertedCircle")
-def _conv_inverted_circle(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ InvertedCircle（反演圆）暂不支持转换（变量 {var}）"
-
-
-@register_converter("CircleAxisPoint")
-def _conv_circle_axis_point(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
-    var = am[cmd["alias"]]
-    return f"# ⚠ CircleAxisPoint（圆轴点）暂不支持转换（变量 {var}）"
+    return _generic_add(conv, cmd)
 
 
 @register_converter("RegionMeasure")
-def _conv_region_measure(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+def _conv_region_measure_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
     var = am[cmd["alias"]]
-    return f"# ⚠ RegionMeasure（区域度量）暂不支持转换（变量 {var}）"
+    if not parents:
+        return _generic_add(conv, cmd)
+
+    parent_text = ", ".join(conv.resolve_parent(p) for p in parents)
+    return f"{var} = region_measure({parent_text})"
+
+
+@register_converter("ExprSegment")
+def _conv_expr_segment_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return _generic_add(conv, cmd)
+
+    seg = conv.resolve_parent(parents[0])
+    expr = params.get("expr", "")
+    return f"{var} = expr_segment({seg}, {_script_string(expr)})"
+
+
+@register_converter("ExprAngle")
+def _conv_expr_angle_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return _generic_add(conv, cmd)
+
+    if abs(float(params.get("sign", 1.0)) - 1.0) > 1e-9:
+        return _generic_add(conv, cmd)
+
+    angle = conv.resolve_parent(parents[0])
+    expr = params.get("expr", "")
+    return f"{var} = expr_angle({angle}, {_script_string(expr)})"
+
+
+@register_converter("ExprPoint")
+def _conv_expr_point_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    params = cmd.get("params", {})
+    var = am[cmd["alias"]]
+
+    ex = params.get("expr_x", "0")
+    ey = params.get("expr_y", "0")
+    return f"{var} = expr_point({_script_string(ex)}, {_script_string(ey)})"
+
+
+@register_converter("PolygonVertex")
+def _conv_polygon_vertex_real(am: dict, cmd: dict, conv: MacroToScriptConverter) -> str:
+    parents = cmd.get("parents", [])
+    params = cmd.get("params", {})
+    var = am[cmd["alias"]]
+    if len(parents) < 1:
+        return _generic_add(conv, cmd)
+
+    poly = conv.resolve_parent(parents[0])
+    k = params.get("k", 0)
+    return f"{var} = polygon_vertex({poly}, {k})"
 
 
 # ═══════════════════════════════════════════════════════════

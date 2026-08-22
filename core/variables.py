@@ -142,7 +142,408 @@ class Variable:
         self.vmax = float(vmax)
         self.expr = expr
         self.step = float(step) if step and step > 1e-9 else 0.1
-        self.binding = binding  # {"obj_id": int, "metric": str} 或 None       # ★ 从动表达式（非空则为从动变量）
+        self.binding = binding  # {"obj_id": int, "metric": str} 或 None  
+        # ★ 从动表达式（非空则为从动变量）
+        
+# ================= 度量绑定辅助 =================
+
+def _finite_float(value):
+    try:
+        value = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(value):
+        return None
+    return value
+def point_label(pt):
+    if pt is None:
+        return "?"
+    label = getattr(pt, "name", "") or getattr(pt, "_auto_label", "")
+    if label:
+        return str(label)
+    return f"P{getattr(pt, 'id', 0)}"
+
+
+def object_display_name(obj):
+    if obj is None:
+        return "对象"
+
+    tn = type(obj).__name__
+
+    try:
+        if tn == "Segment":
+            return f"线段{point_label(obj.a)}{point_label(obj.b)}"
+
+        if tn == "Line":
+            return f"直线{point_label(obj.a)}{point_label(obj.b)}"
+
+        if tn == "Ray":
+            return f"射线{point_label(obj.origin)}{point_label(obj.through)}"
+
+        if tn in ("Circle", "ExprCircle", "InvertedCircle"):
+            c = getattr(obj, "center", None)
+            if c is None:
+                return "圆"
+            return f"圆{point_label(c)}"
+
+        if tn == "ThreePointCircle":
+            return f"圆{point_label(obj.p1)}{point_label(obj.p2)}{point_label(obj.p3)}"
+
+        if tn == "Ellipse":
+            return f"椭圆{point_label(obj.center)}"
+
+        if tn == "RegularPolygon":
+            return f"正{obj.n}边形{point_label(obj.center)}"
+
+        if tn == "AngleMeasure":
+            return f"角{point_label(obj.p1)}{point_label(obj.vertex)}{point_label(obj.p2)}"
+
+        if tn == "RegionMeasure":
+            pts = getattr(obj, "pts", [])
+            if pts:
+                names = "".join(point_label(p) for p in pts[:4])
+                if len(pts) > 4:
+                    names += "…"
+                return f"区域{names}"
+            return "区域"
+
+        if tn == "Measure":
+            kind = getattr(obj, "kind", "")
+            targets = getattr(obj, "targets", [])
+
+            if kind == "angle" and len(targets) >= 3:
+                v, p1, p2 = targets[0], targets[1], targets[2]
+                return f"角{point_label(p1)}{point_label(v)}{point_label(p2)}"
+
+            if kind == "distance" and len(targets) >= 2:
+                return f"距离{point_label(targets[0])}{point_label(targets[1])}"
+
+            if targets:
+                return object_display_name(targets[0])
+
+            return "度量"
+
+        if tn == "RatioMeasure":
+            return "比值"
+
+        if tn == "ChainFill":
+            return "填充"
+
+        if tn == "FunctionCurve":
+            return "函数"
+
+        if tn == "ImplicitCurve":
+            return "隐函数"
+
+        if tn == "TextObject":
+            return "文本"
+
+        if tn == "ScriptButtonObject":
+            return "按钮"
+
+        if tn == "TableObject":
+            return "表格"
+
+        if tn in ("PieChartObject", "BarChartObject", "LineChartObject", "DonutChartObject"):
+            return "图表"
+
+        if tn == "ImageObject":
+            return "图片"
+
+        if tn == "InkStroke":
+            return "墨迹"
+
+        if tn == "InkEraser":
+            return "橡皮擦"
+
+        if tn == "TransformDriver":
+            return "变换"
+
+        if tn == "TransformPoint":
+            return "变换点"
+
+        if tn == "IterPoint":
+            return "迭代点"
+
+        if tn == "CircleAxisPoint":
+            return "圆轴点"
+
+    except Exception:
+        pass
+
+    return getattr(obj, "name", "") or tn
+
+
+def binding_display_name(obj, metric):
+    base = object_display_name(obj)
+    tn = type(obj).__name__
+
+    if tn == "Segment" and metric == "length":
+        return base
+
+    if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle") and metric == "radius":
+        return base
+
+    if tn == "Ellipse" and metric == "area":
+        return base
+
+    if tn == "RegularPolygon" and metric == "area":
+        return base
+
+    if tn == "AngleMeasure" and metric == "degrees":
+        return base
+
+    if tn == "Measure":
+        kind = getattr(obj, "kind", "")
+
+        if kind in ("length", "distance", "angle", "area", "radius"):
+            return base
+
+        suffix = {
+            "perimeter": "周长",
+            "diameter": "直径",
+            "slope": "斜率",
+            "ratio": "比值",
+            "coord": "坐标",
+        }.get(kind, "")
+
+        if suffix:
+            return f"{base}{suffix}"
+        return base
+
+    if metric == "value":
+        return base
+
+    suffix = {
+        "length": "长度",
+        "distance": "距离",
+        "angle": "角度",
+        "ratio": "比值",
+        "area": "面积",
+        "perimeter": "周长",
+        "radius": "半径",
+        "diameter": "直径",
+        "slope": "斜率",
+        "degrees": "角度",
+    }.get(metric, metric)
+
+    if suffix:
+        return f"{base}{suffix}"
+
+    return base
+
+def available_metrics(obj):
+    """返回对象支持的度量列表：[(metric, label), ...]"""
+    if obj is None or not getattr(obj, "exists", True):
+        return []
+
+    tn = type(obj).__name__
+
+    if tn == "Measure":
+        kind = getattr(obj, "kind", "")
+        if kind == "coord":
+            return []
+        labels = {
+            "length": "长度",
+            "distance": "距离",
+            "angle": "角度",
+            "ratio": "比值",
+            "area": "面积",
+            "perimeter": "周长",
+            "radius": "半径",
+            "diameter": "直径",
+            "slope": "斜率",
+        }
+        return [("value", labels.get(kind, kind))]
+
+    if tn == "RegionMeasure":
+        return [
+            ("area", "区域面积"),
+            ("perimeter", "区域周长"),
+        ]
+
+    if tn == "Segment":
+        return [
+            ("length", "线段长度"),
+            ("slope", "斜率"),
+        ]
+
+    if tn == "Line":
+        return [
+            ("slope", "斜率"),
+        ]
+
+    if tn == "AngleMeasure":
+        return [
+            ("degrees", "角度"),
+        ]
+
+    if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
+        return [
+            ("radius", "半径"),
+            ("diameter", "直径"),
+            ("area", "面积"),
+            ("perimeter", "周长"),
+        ]
+
+    if tn == "Ellipse":
+        return [
+            ("area", "面积"),
+            ("perimeter", "周长"),
+        ]
+
+    if tn == "RegularPolygon":
+        return [
+            ("radius", "外接圆半径"),
+            ("area", "面积"),
+            ("perimeter", "周长"),
+        ]
+
+    return []
+
+
+def compute_metric(obj, metric):
+    """计算对象某个度量的 float 值；失败返回 None。"""
+    if obj is None or not getattr(obj, "exists", True):
+        return None
+
+    tn = type(obj).__name__
+
+    try:
+        # Measure 对象统一用 value
+        if tn == "Measure":
+            kind = getattr(obj, "kind", "")
+            if kind == "coord":
+                return None
+            if metric in ("value", kind):
+                return _finite_float(getattr(obj, "value", 0.0))
+            return None
+
+        # RegionMeasure
+        if tn == "RegionMeasure":
+            if metric == "area":
+                return _finite_float(getattr(obj, "area", 0.0))
+            if metric == "perimeter":
+                return _finite_float(getattr(obj, "perimeter", 0.0))
+            return None
+
+        # 长度
+        if metric == "length":
+            if hasattr(obj, "length") and callable(obj.length):
+                return _finite_float(obj.length())
+            return None
+
+        # 角度
+        if metric == "degrees":
+            if hasattr(obj, "degrees"):
+                return _finite_float(obj.degrees)
+            return None
+
+        # 半径 / 直径
+        if metric == "radius":
+            if hasattr(obj, "r"):
+                return _finite_float(obj.r)
+            return None
+
+        if metric == "diameter":
+            if hasattr(obj, "r"):
+                return _finite_float(2.0 * obj.r)
+            return None
+
+        # 斜率
+        if metric == "slope":
+            a = getattr(obj, "a", None)
+            b = getattr(obj, "b", None)
+            if a is None and hasattr(obj, "origin"):
+                a = obj.origin
+            if b is None and hasattr(obj, "through"):
+                b = obj.through
+            if a is None or b is None:
+                return None
+            dx = b.x - a.x
+            dy = b.y - a.y
+            if abs(dx) < 1e-12:
+                return None
+            return _finite_float(dy / dx)
+
+        # 面积
+        if metric == "area":
+            if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
+                if hasattr(obj, "r"):
+                    return _finite_float(math.pi * obj.r * obj.r)
+                return None
+
+            if tn == "Ellipse":
+                return _finite_float(math.pi * abs(obj.ux * obj.vy - obj.uy * obj.vx))
+
+            if tn == "RegularPolygon":
+                n = obj.n
+                r = obj.r
+                return _finite_float(0.5 * n * r * r * math.sin(2.0 * math.pi / n))
+
+            return None
+
+        # 周长
+        if metric == "perimeter":
+            if tn in ("Circle", "ExprCircle", "ThreePointCircle", "InvertedCircle"):
+                if hasattr(obj, "r"):
+                    return _finite_float(2.0 * math.pi * obj.r)
+                return None
+
+            if tn == "Ellipse":
+                a = math.hypot(obj.ux, obj.uy)
+                b = math.hypot(obj.vx, obj.vy)
+                if a + b <= 0:
+                    return 0.0
+                h = ((a - b) ** 2) / ((a + b) ** 2)
+                return _finite_float(
+                    math.pi * (a + b) * (1.0 + 3.0 * h / (10.0 + math.sqrt(4.0 - 3.0 * h)))
+                )
+
+            if tn == "RegularPolygon":
+                return _finite_float(obj.n * 2.0 * obj.r * math.sin(math.pi / obj.n))
+
+            return None
+
+    except Exception:
+        return None
+
+    return None
+
+
+def available_bindings(doc):
+    items = []
+    for obj in getattr(doc, "objects", []):
+        if not getattr(obj, "exists", True):
+            continue
+        if not getattr(obj, "visible", True):
+            continue
+
+        for metric, label in available_metrics(obj):
+            val = compute_metric(obj, metric)
+            if val is None:
+                continue
+
+            kind = getattr(obj, "kind", "")
+            if metric == "degrees" or kind == "angle":
+                value_text = f"{val:.1f}°"
+            else:
+                value_text = f"{val:.3f}"
+
+            name = binding_display_name(obj, metric)
+
+            items.append(
+                {
+                    "obj_id": obj.id,
+                    "metric": metric,
+                    "label": f"{name} = {value_text}",
+                    "var_name": name,
+                }
+            )
+
+    return items
+
+# ================= 度量绑定辅助结束 =================
 
 class VariableStore(QObject):
     changed = Signal()
@@ -159,13 +560,15 @@ class VariableStore(QObject):
         return self._vars.get(name)
 
     def define(self, name, value=1.0, vmin=0.0, vmax=10.0, expr="", step=0.1, binding=None):
+        if binding:
+            expr = ""
         self._vars[name] = Variable(name, value, vmin, vmax, expr, step, binding)
         self.version += 1
         self.changed.emit()
 
     def set(self, name, value):
         v = self._vars.get(name)
-        if v and not v.expr and v.value != float(value):  # 从动变量不可手动改值
+        if v and not v.expr and not v.binding and v.value != float(value):
             v.value = float(value)
             self.version += 1
             self.changed.emit()
@@ -174,9 +577,21 @@ class VariableStore(QObject):
         v = self._vars.get(name)
         if v:
             v.expr = expr
+            if expr:
+                v.binding = None
             self.version += 1
             self.changed.emit()
-
+            
+    def bind(self, name, binding):
+        v = self._vars.get(name)
+        if not v:
+            return
+        v.binding = binding
+        if binding:
+            v.expr = ""
+        self.version += 1
+        self.changed.emit()
+        
     def delete(self, name):
         if name in self._vars:
             del self._vars[name]
@@ -256,14 +671,22 @@ class VariableStore(QObject):
         
     def update_bindings(self, doc):
         """更新所有绑定到几何对象度量的变量。
+        返回 True 表示有绑定变量或绑定关系发生了变化。
         ★ 不触发 changed 信号，由调用方统一触发，避免无限循环。
         """
+        changed = False
+
         if not any(v.binding for v in self._vars.values()):
-            return
+            return changed
 
         obj_map = {o.id: o for o in doc.objects}
+
         for name, var in self._vars.items():
             if not var.binding:
+                continue
+
+            # 表达式变量优先，绑定不生效
+            if var.expr:
                 continue
 
             obj_id = var.binding.get("obj_id")
@@ -271,45 +694,31 @@ class VariableStore(QObject):
             obj = obj_map.get(obj_id)
 
             if obj is None or not getattr(obj, "exists", True):
-                var.binding = None  # 对象被删除，解除绑定
+                var.binding = None
+                changed = True
                 continue
 
-            new_val = self._compute_metric(obj, metric)
+            new_val = compute_metric(obj, metric)
             if new_val is None:
                 continue
 
-            # 步长量化 (snap to step)
-            if var.step > 1e-9:
-                new_val = round(new_val / var.step) * var.step
-
             if abs(new_val - var.value) > 1e-9:
-                # 自动扩展范围
+                step = var.step if var.step > 1e-9 else 0.1
+                pad = max(step * 10.0, 1.0)
+
                 if new_val < var.vmin:
-                    var.vmin = new_val - var.step * 10
+                    var.vmin = new_val - pad
                 if new_val > var.vmax:
-                    var.vmax = new_val + var.step * 10
+                    var.vmax = new_val + pad
+
                 var.value = new_val
+                changed = True
+
+        return changed
 
     def _compute_metric(self, obj, metric):
-        """计算几何对象的度量值。"""
-        import math
-        tn = type(obj).__name__
-        try:
-            if metric == "length" and hasattr(obj, "length"):
-                return float(obj.length())
-            if metric == "radius" and hasattr(obj, "r"):
-                return float(obj.r)
-            if metric == "area" and tn == "RegularPolygon":
-                n = obj.n
-                r = obj.r
-                return 0.5 * n * r * r * math.sin(2 * math.pi / n)
-            if metric == "perimeter" and tn == "RegularPolygon":
-                return obj.n * 2 * obj.r * math.sin(math.pi / obj.n)
-            if metric == "degrees" and hasattr(obj, "degrees"):
-                return float(obj.degrees)
-        except Exception:
-            pass
-        return None
+        """兼容旧接口。"""
+        return compute_metric(obj, metric)
 
 
 _STORE = VariableStore()          # 模块级单例，避免跨层传递
