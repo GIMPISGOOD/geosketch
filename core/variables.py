@@ -598,28 +598,6 @@ class VariableStore(QObject):
             self.version += 1
             self.changed.emit()
 
-    def as_dict(self):
-        """返回所有变量的当前值（自动计算从动变量）。"""
-        d = {}
-        # 1. 先收集独立变量
-        for n, v in self._vars.items():
-            if not v.expr:
-                d[n] = v.value
-        
-        # 2. 迭代计算从动变量（支持多级依赖，如 c=b*2, b=a+1）
-        changed = True
-        max_iter = 10
-        while changed and max_iter > 0:
-            changed = False
-            max_iter -= 1
-            for n, v in self._vars.items():
-                if v.expr:
-                    val = evaluate(v.expr, d)
-                    if val is not None and d.get(n) != val:
-                        d[n] = val
-                        changed = True
-        return d
-
     def evaluate(self, expr):
         return evaluate(expr, self.as_dict())
     
@@ -640,7 +618,72 @@ class VariableStore(QObject):
 
         self.version += 1
         self.changed.emit()
+        
+    def as_dict(self):
+        """返回所有变量的当前值（自动计算从动变量）。
+        对纯循环依赖做安全兜底：
+        - 普通 DAG 表达式正常求值；
+        - 循环依赖若未引用外部未定义变量，则使用上次值作为初值迭代；
+        - 引用未定义变量的表达式仍不会进入结果。
+        """
+        d = {}
 
+        for n, v in self._vars.items():
+            if not v.expr:
+                d[n] = v.value
+
+        def relax():
+            changed = True
+            max_iter = 10
+            while changed and max_iter > 0:
+                changed = False
+                max_iter -= 1
+                for n, v in self._vars.items():
+                    if v.expr:
+                        val = evaluate(v.expr, d)
+                        if val is not None and d.get(n) != val:
+                            d[n] = val
+                            changed = True
+
+        relax()
+
+        unresolved = [
+            n
+            for n, v in self._vars.items()
+            if v.expr and n not in d
+        ]
+
+        if unresolved:
+            allowed = set(d.keys()) | set(unresolved)
+
+            ok = True
+            for n in unresolved:
+                refs = self._expr_refs(self._vars[n].expr)
+                if not refs <= allowed:
+                    ok = False
+                    break
+
+            if ok:
+                for n in unresolved:
+                    d[n] = self._vars[n].value
+                relax()
+
+        return d
+    
+    def _expr_refs(self, expr):
+        """提取表达式中引用的变量名，排除函数和常量。"""
+        try:
+            tree = ast.parse(_preprocess(expr), mode="eval")
+        except Exception:
+            return set()
+
+        exclude = set(FUNCS) | set(CONSTS)
+        return {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id not in exclude
+        }
+               
     def to_dict(self):
         return {
             name: {

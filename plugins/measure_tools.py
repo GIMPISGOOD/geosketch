@@ -82,6 +82,18 @@ MEASURE_SPEC = {
     "coord":     {"label": "坐标", "fmt": lambda v: v},
 }
 
+MEASURE_MIN_TARGETS = {
+    "length": 1,
+    "distance": 2,
+    "angle": 3,
+    "ratio": 2,
+    "area": 1,
+    "perimeter": 1,
+    "radius": 1,
+    "diameter": 1,
+    "slope": 1,
+    "coord": 1,
+}
 
 # ───────── 通用度量对象 ─────────
 @register_geo("Measure")
@@ -96,6 +108,21 @@ class Measure(GeoObject):
         self.recompute()
 
     def recompute(self):
+        need = MEASURE_MIN_TARGETS.get(self.kind, 1)
+
+        if len(self.targets) < need:
+            self.exists = False
+            self.value = 0.0
+            self.label_pos = self._fixed_lp or (0.0, 0.0)
+            return
+
+        self.exists = all(getattr(t, "exists", True) for t in self.targets)
+
+        if not self.exists:
+            self.value = 0.0
+            self.label_pos = self._fixed_lp or (0.0, 0.0)
+            return
+
         self.value = self._compute()
         self.label_pos = self._fixed_lp or self._auto_lp()
 
@@ -135,35 +162,66 @@ class Measure(GeoObject):
 
     def _auto_lp(self):
         t = self.targets
-        if self.kind == "length":
-            s = t[0]
-            mx, my = (s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2
-            dx, dy = s.b.x - s.a.x, s.b.y - s.a.y
-            L = math.hypot(dx, dy) or 1.0
-            return (mx - dy / L * 0.3, my + dx / L * 0.3)
-        if self.kind == "distance":
-            return ((t[0].x + t[1].x) / 2, (t[0].y + t[1].y) / 2)
-        if self.kind == "angle":
-            v, p1, p2 = t[0], t[1], t[2]
-            a1 = math.atan2(p1.y - v.y, p1.x - v.x)
-            a2 = math.atan2(p2.y - v.y, p2.x - v.x)
-            mid = (a1 + a2) / 2
-            return (v.x + 0.6 * math.cos(mid), v.y + 0.6 * math.sin(mid))
-        if self.kind in ("area", "perimeter"):
-            verts = _get_vertices(t[0])
-            if verts:
-                return (sum(v[0] for v in verts) / len(verts),
-                        sum(v[1] for v in verts) / len(verts))
-            if type(t[0]).__name__ in ("Circle", "Ellipse"):
-                return (t[0].center.x, t[0].center.y)
-        if self.kind in ("radius", "diameter"):
-            c = t[0]
-            return (c.center.x + c.r * 0.5, c.center.y)
-        if self.kind == "slope":
-            s = t[0]
-            return ((s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2)
-        if self.kind == "coord":
-            return (t[0].x, t[0].y)
+
+        if not t:
+            return (0.0, 0.0)
+
+        try:
+            if self.kind == "length":
+                if len(t) < 1:
+                    return (0.0, 0.0)
+                s = t[0]
+                mx, my = (s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2
+                dx, dy = s.b.x - s.a.x, s.b.y - s.a.y
+                L = math.hypot(dx, dy) or 1.0
+                return (mx - dy / L * 0.3, my + dx / L * 0.3)
+
+            if self.kind == "distance":
+                if len(t) < 2:
+                    return (0.0, 0.0)
+                return ((t[0].x + t[1].x) / 2, (t[0].y + t[1].y) / 2)
+
+            if self.kind == "angle":
+                if len(t) < 3:
+                    return (0.0, 0.0)
+                v, p1, p2 = t[0], t[1], t[2]
+                a1 = math.atan2(p1.y - v.y, p1.x - v.x)
+                a2 = math.atan2(p2.y - v.y, p2.x - v.x)
+                mid = (a1 + a2) / 2
+                return (v.x + 0.6 * math.cos(mid), v.y + 0.6 * math.sin(mid))
+
+            if self.kind in ("area", "perimeter"):
+                if len(t) < 1:
+                    return (0.0, 0.0)
+                verts = _get_vertices(t[0])
+                if verts:
+                    return (
+                        sum(v[0] for v in verts) / len(verts),
+                        sum(v[1] for v in verts) / len(verts),
+                    )
+                if type(t[0]).__name__ in ("Circle", "Ellipse"):
+                    return (t[0].center.x, t[0].center.y)
+
+            if self.kind in ("radius", "diameter"):
+                if len(t) < 1:
+                    return (0.0, 0.0)
+                c = t[0]
+                return (c.center.x + c.r * 0.5, c.center.y)
+
+            if self.kind == "slope":
+                if len(t) < 1:
+                    return (0.0, 0.0)
+                s = t[0]
+                return ((s.a.x + s.b.x) / 2, (s.a.y + s.b.y) / 2)
+
+            if self.kind == "coord":
+                if len(t) < 1:
+                    return (0.0, 0.0)
+                return (t[0].x, t[0].y)
+
+        except Exception:
+            return (0.0, 0.0)
+
         return (0.0, 0.0)
 
     def distance_to(self, x, y):

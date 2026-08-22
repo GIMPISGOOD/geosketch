@@ -49,17 +49,20 @@ def draw_segment(p, obj, view):
     sa = view.to_screen(obj.a.x, obj.a.y)
     sb = view.to_screen(obj.b.x, obj.b.y)
     p.drawLine(sa, sb)
-    # 长度标签：中点沿屏幕垂线偏移 14px，水平居中
+
     mx, my = (sa.x() + sb.x()) / 2, (sa.y() + sb.y()) / 2
     sdx, sdy = sb.x() - sa.x(), sb.y() - sa.y()
     slen = math.hypot(sdx, sdy)
+
     if slen > 1e-6:
         px, py = -sdy / slen, sdx / slen
         lx, ly = mx + px * 14, my + py * 14
     else:
         lx, ly = mx + 10, my - 10
+
     drv = expr_driver(obj)
     label = f"{drv.expr} = {obj.length():.2f}" if drv else f"{obj.length():.2f}"
+
     w, _, _ = measure_math(label, 12)
     draw_math(p, lx - w / 2, ly, label, 12,
               theme.SELECTED if obj.selected else theme.LABEL)

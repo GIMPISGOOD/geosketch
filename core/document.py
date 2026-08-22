@@ -395,9 +395,16 @@ class Document(QObject):
         }
         for o in self.objects
         ]
-
+        
+    def _full_state(self):
+        """撤销/重做用完整状态：几何对象 + 变量系统。"""
+        return {
+            "objects": self.snapshot(),
+            "vars": self.vars.to_dict(),
+        }
+        
     def _push_undo(self):
-        self._undo.append(self.snapshot())
+        self._undo.append(self._full_state())
         if len(self._undo) > UNDO_LIMIT:
             self._undo.pop(0)
         self._redo.clear()
@@ -442,7 +449,7 @@ class Document(QObject):
             self.end_action()
 
     def _arm_undo(self):
-        self._pending = self.snapshot()
+        self._pending = self._full_state()
         self._mut_before = self._mutation_count
 
     def _commit_undo_if_changed(self):
@@ -465,22 +472,38 @@ class Document(QObject):
     def undo(self):
         if not self._undo:
             return
-        self._redo.append(self.snapshot())
+        self._redo.append(self._full_state())
         self._load_state(self._undo.pop())
         self.history_changed.emit()
 
     def redo(self):
         if not self._redo:
             return
-        self._undo.append(self.snapshot())
+        self._undo.append(self._full_state())
         self._load_state(self._redo.pop())
         self.history_changed.emit()
 
     # ================= 序列化 =================
     def _load_state(self, data):
+        vars_state = None
+
+        # 新格式：{"objects": [...], "vars": {...}}
+        # 旧格式：[...]
+        if isinstance(data, dict):
+            vars_state = data.get("vars")
+            data = data.get("objects", [])
+
+        if vars_state is not None:
+            self.vars.blockSignals(True)
+            try:
+                self.vars.load_dict(vars_state)
+            finally:
+                self.vars.blockSignals(False)
+
         self.objects.clear()
         self.expr_objects.clear()
         self._objects_version += 1
+
         pool = {}
         self._macro_suppress = True
         try:
@@ -489,16 +512,22 @@ class Document(QObject):
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
                 obj.id = item["id"]
-                # ★ 修复：恢复自定义名称和可见性
                 obj.name = item.get("name", "")
                 obj.visible = item.get("visible", True)
                 pool[item["id"]] = self._add(obj)
+
             if data:
                 GeoObject.bump_ids(max(item["id"] for item in data))
         finally:
             self._macro_suppress = False
+
         self._assign_point_labels()
+
+        # 恢复对象后重新校验绑定：
+        # - 对象存在：绑定继续有效
+        # - 对象不存在：自动解绑
         self.vars.update_bindings(self)
+
         self.changed.emit()
 
     def save(self, path):
