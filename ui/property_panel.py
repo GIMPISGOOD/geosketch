@@ -1,8 +1,6 @@
-"""统一对象属性面板 (v3 - 折叠功能 + Pylance 零报错)。"""
+"""统一对象属性面板 (v4 - 主题适配修复)。"""
 from __future__ import annotations
-
 from typing import Any, Callable
-
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -19,14 +17,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from geo.points import AbstractPoint, FreePoint, PointOnObject
 from media.base import MediaObject
 from ui import theme
 
 
 class PropertyPanel(QWidget):
-    """统一对象属性面板，支持折叠/展开。"""
+    """统一对象属性面板，支持折叠/展开，跟随主题切换。"""
 
     def __init__(self, canvas: Any, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -36,154 +33,108 @@ class PropertyPanel(QWidget):
         self._expanded_width: int = 300
         self._collapsed_width: int = 36
 
-        # ══════════════════════════════════════════
-        # 主布局：只放两个容器，切换显示
-        # ══════════════════════════════════════════
         self._outer = QVBoxLayout(self)
         self._outer.setContentsMargins(0, 0, 0, 0)
         self._outer.setSpacing(0)
 
-        # ──────────────────────────────────────────
-        # 容器 A：展开状态（完整面板）
-        # ──────────────────────────────────────────
+        # ── 展开态 ──
         self._expanded_widget = QWidget()
         self._expanded_layout = QVBoxLayout(self._expanded_widget)
         self._expanded_layout.setContentsMargins(12, 10, 12, 10)
         self._expanded_layout.setSpacing(6)
 
-        # 标题行 + 折叠按钮
         head = QHBoxLayout()
         self.title = QLabel("属性")
         self.title.setObjectName("panelTitle")
         head.addWidget(self.title)
         head.addStretch(1)
 
-        # ★ 折叠按钮：透明背景 + 灰色边框，明显区别于面板内其他按钮
         self._collapse_btn = QPushButton("»")
+        self._collapse_btn.setObjectName("collapseBtn")
         self._collapse_btn.setFixedSize(22, 22)
         self._collapse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._collapse_btn.setToolTip("折叠属性面板")
-        self._collapse_btn.setStyleSheet(
-            "QPushButton {"
-            "  background: transparent;"
-            "  border: 1px solid rgba(120,140,170,0.5);"
-            "  border-radius: 4px;"
-            "  color: #777;"
-            "  font-size: 13px;"
-            "  font-weight: bold;"
-            "}"
-            "QPushButton:hover {"
-            "  background: rgba(120,140,170,0.15);"
-            "  border-color: rgba(120,140,170,0.8);"
-            "}"
-        )
         self._collapse_btn.clicked.connect(self._toggle_collapse)
         head.addWidget(self._collapse_btn)
         self._expanded_layout.addLayout(head)
 
-        # 类型标签
         self.type_label = QLabel("")
         self.type_label.setObjectName("panelSubtitle")
         self.type_label.setWordWrap(True)
         self._expanded_layout.addWidget(self.type_label)
 
-        # 滚动区域
         self._scroll_area = QScrollArea()
         self._scroll_area.setWidgetResizable(True)
         self._scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self._scroll_area.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
-
         self._content = QWidget()
         self.form = QVBoxLayout(self._content)
         self.form.setContentsMargins(0, 0, 0, 0)
         self.form.setSpacing(10)
-
         self._scroll_area.setWidget(self._content)
         self._expanded_layout.addWidget(self._scroll_area, 1)
 
-        # ──────────────────────────────────────────
-        # 容器 B：折叠状态（窄条）
-        # ──────────────────────────────────────────
+        # ── 折叠态 ──
         self._collapsed_widget = QWidget()
         self._collapsed_layout = QVBoxLayout(self._collapsed_widget)
         self._collapsed_layout.setContentsMargins(4, 10, 4, 10)
         self._collapsed_layout.setSpacing(8)
 
-        # ★ 展开按钮：同样透明背景 + 灰色边框
         self._expand_btn = QPushButton("«")
+        self._expand_btn.setObjectName("expandBtn")
         self._expand_btn.setFixedSize(24, 24)
         self._expand_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._expand_btn.setToolTip("展开属性面板")
-        self._expand_btn.setStyleSheet(
-            "QPushButton {"
-            "  background: transparent;"
-            "  border: 1px solid rgba(120,140,170,0.5);"
-            "  border-radius: 4px;"
-            "  color: #777;"
-            "  font-size: 14px;"
-            "  font-weight: bold;"
-            "}"
-            "QPushButton:hover {"
-            "  background: rgba(120,140,170,0.15);"
-            "  border-color: rgba(120,140,170,0.8);"
-            "}"
-        )
         self._expand_btn.clicked.connect(self._toggle_collapse)
         self._collapsed_layout.addWidget(
             self._expand_btn, 0, Qt.AlignmentFlag.AlignHCenter
         )
 
-        # 竖排文字提示
         self._collapsed_label = QLabel("属\n性")
         self._collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._collapsed_label.setStyleSheet(
-            "font-size: 11px; color: #999; letter-spacing: 2px;"
+            "font-size: 11px; letter-spacing: 2px; background: transparent;"
         )
         self._collapsed_layout.addWidget(self._collapsed_label)
         self._collapsed_layout.addStretch(1)
 
-        # ──────────────────────────────────────────
-        # 组装
-        # ──────────────────────────────────────────
         self._outer.addWidget(self._expanded_widget)
         self._outer.addWidget(self._collapsed_widget)
         self._collapsed_widget.hide()
-
-        # 初始状态：展开
         self.setFixedWidth(self._expanded_width)
 
-        # 信号连接
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._do_refresh)
         self.canvas.doc.changed.connect(self._schedule_refresh)
+
+        # ★ 主题切换时重新应用样式
         theme.bus.changed.connect(self._on_theme_changed)
 
         self.hide()
 
-    # ══════════════════════════════════════════
-    # 刷新调度
-    # ══════════════════════════════════════════
-
-    def _schedule_refresh(self) -> None:
-        if not self._collapsed:
-            self._timer.start()
-
+    # ──────────────────────────────────────────────────────
+    #  主题切换
+    # ──────────────────────────────────────────────────────
     def _on_theme_changed(self, *_: Any) -> None:
+        """主题切换时：强制重新解析样式表并刷新。"""
+        # 清除旧样式缓存
+        self.setStyleSheet("")
+        # unpolish + polish 强制重新计算
         self.style().unpolish(self)
         self.style().polish(self)
+        # 递归刷新所有子控件
+        for child in self.findChildren(QWidget):
+            child.style().unpolish(child)
+            child.style().polish(child)
         self.update()
 
-    def refresh(self) -> None:
-        self._timer.start()
-
-    # ══════════════════════════════════════════
-    # 折叠 / 展开
-    # ══════════════════════════════════════════
-
+    # ──────────────────────────────────────────────────────
+    #  折叠 / 展开
+    # ──────────────────────────────────────────────────────
     def _toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
         if self._collapsed:
@@ -195,10 +146,8 @@ class PropertyPanel(QWidget):
             self._collapsed_widget.hide()
             self._expanded_widget.show()
             self.setFixedWidth(self._expanded_width)
-            # ★ 修复：解除折叠时的固定高度，恢复弹性布局
             self.setMinimumHeight(0)
-            self.setMaximumHeight(16777215)   # QWIDGETSIZE_MAX
-            # 恢复合理显示高度
+            self.setMaximumHeight(16777215)
             target_h = max(320, min(600, self.canvas.height() - 80))
             self.resize(self._expanded_width, target_h)
             self.reposition()
@@ -211,12 +160,17 @@ class PropertyPanel(QWidget):
         if not self._collapsed:
             self.setMaximumHeight(max(240, self.canvas.height() - 110))
 
-    # ══════════════════════════════════════════
-    # 表单构建工具
-    # ══════════════════════════════════════════
+    # ──────────────────────────────────────────────────────
+    #  刷新调度
+    # ──────────────────────────────────────────────────────
+    def _schedule_refresh(self) -> None:
+        if not self._collapsed:
+            self._timer.start()
+
+    def refresh(self) -> None:
+        self._timer.start()
 
     def _clear_form(self) -> None:
-        """安全清理表单。"""
         while self.form.count():
             item = self.form.takeAt(0)
             if item is None:
@@ -238,7 +192,7 @@ class PropertyPanel(QWidget):
         lbl = QLabel(title_text)
         lbl.setStyleSheet(
             f"color: {theme.ACCENT.name()}; font-weight: bold; "
-            f"font-size: 12px; margin-top: 6px;"
+            f"font-size: 12px; margin-top: 6px; background: transparent;"
         )
         self.form.addWidget(lbl)
 
@@ -250,7 +204,9 @@ class PropertyPanel(QWidget):
         label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
-        label.setStyleSheet(f"color: {theme.SUBINK.name()}; font-size: 12px;")
+        label.setStyleSheet(
+            f"color: {theme.SUBINK.name()}; font-size: 12px; background: transparent;"
+        )
         row.addWidget(label)
         row.addWidget(widget, 1)
         self.form.addLayout(row)
@@ -272,12 +228,8 @@ class PropertyPanel(QWidget):
         return edit
 
     def _make_spin(
-        self,
-        value: Any,
-        vmin: float,
-        vmax: float,
-        decimals: int,
-        on_commit: Callable[[float], Any],
+        self, value: Any, vmin: float, vmax: float,
+        decimals: int, on_commit: Callable[[float], Any],
     ) -> QDoubleSpinBox:
         spin = QDoubleSpinBox()
         spin.setRange(vmin, vmax)
@@ -287,18 +239,14 @@ class PropertyPanel(QWidget):
         spin.editingFinished.connect(lambda: on_commit(spin.value()))
         return spin
 
-    def _make_check(
-        self, checked: Any, on_toggle: Callable[[bool], Any]
-    ) -> QCheckBox:
+    def _make_check(self, checked: Any, on_toggle: Callable[[bool], Any]) -> QCheckBox:
         check = QCheckBox()
         check.setChecked(bool(checked))
         check.toggled.connect(on_toggle)
         return check
 
     def _make_combo(
-        self,
-        items: list[str],
-        current: Any,
+        self, items: list[str], current: Any,
         on_change: Callable[[str], Any],
     ) -> QComboBox:
         combo = QComboBox()
@@ -314,7 +262,6 @@ class PropertyPanel(QWidget):
         btn = QPushButton()
         btn.setFixedHeight(24)
         btn.setCursor(Qt.CursorShape.PointingHandCursor)
-
         local_color = QColor(color)
 
         def paint() -> None:
@@ -336,6 +283,9 @@ class PropertyPanel(QWidget):
         paint()
         return btn
 
+    # ──────────────────────────────────────────────────────
+    #  文档操作
+    # ──────────────────────────────────────────────────────
     def _doc_action(self, fn: Callable[[], Any]) -> None:
         doc = self.canvas.doc
         doc.begin_action()
@@ -345,23 +295,18 @@ class PropertyPanel(QWidget):
             doc.end_action()
         doc.changed.emit()
 
-    # ══════════════════════════════════════════
-    # 刷新内容
-    # ══════════════════════════════════════════
-
+    # ──────────────────────────────────────────────────────
+    #  刷新逻辑
+    # ──────────────────────────────────────────────────────
     def _do_refresh(self) -> None:
         if self._collapsed:
             return
-
         doc = self.canvas.doc
         selected = [o for o in doc.objects if o.selected and o in doc.objects]
-
         if not selected:
             self.hide()
             return
-
         self._clear_form()
-
         if len(selected) == 1:
             obj = selected[0]
             self.title.setText(
@@ -373,17 +318,15 @@ class PropertyPanel(QWidget):
             self.title.setText(f"已选 {len(selected)} 个对象")
             self.type_label.setText("批量操作")
             self._build_multi(selected)
-
         self.form.addStretch(1)
         self.reposition()
         if not self._collapsed:
             self.show()
-        self.raise_()
+            self.raise_()
 
     def _get_type_label(self, obj: Any) -> str:
         name = type(obj).__name__
         cn: dict[str, str] = {
-            # 点类
             "FreePoint": "自由点",
             "PointOnObject": "吸附点",
             "IntersectPoint": "交点",
@@ -395,7 +338,6 @@ class PropertyPanel(QWidget):
             "TransformPoint": "变换点",
             "IterPoint": "迭代点",
             "CircleAxisPoint": "圆轴点",
-            # 线/面类
             "Segment": "线段",
             "Line": "直线",
             "Ray": "射线",
@@ -405,7 +347,6 @@ class PropertyPanel(QWidget):
             "AngleDivLine": "等分角线",
             "PerpBisector": "中垂线",
             "DirectedLine": "方向直线",
-            # 圆/曲线类
             "Circle": "圆",
             "ThreePointCircle": "过三点圆",
             "ExprCircle": "表达式圆",
@@ -416,7 +357,6 @@ class PropertyPanel(QWidget):
             "FunctionCurve": "函数曲线",
             "ImplicitCurve": "隐函数曲线",
             "ChainFill": "链式填充",
-            # 媒体/标注类
             "TextObject": "文本",
             "ScriptButtonObject": "脚本按钮",
             "TableObject": "表格",
@@ -426,7 +366,6 @@ class PropertyPanel(QWidget):
             "DonutChartObject": "环形图",
             "ImageObject": "图片",
             "InkStroke": "墨迹",
-            # 度量/约束/变换类
             "Measure": "度量",
             "AngleMeasure": "角度",
             "RatioMeasure": "比例",
@@ -436,10 +375,6 @@ class PropertyPanel(QWidget):
             "TransformDriver": "变换驱动器",
         }
         return cn.get(name, name)
-
-    # ══════════════════════════════════════════
-    # 多选批量操作
-    # ══════════════════════════════════════════
 
     def _build_multi(self, objs: list[Any]) -> None:
         self._add_section("批量操作")
@@ -453,10 +388,6 @@ class PropertyPanel(QWidget):
             ("置顶", lambda: self._reorder(objs, True)),
             ("置底", lambda: self._reorder(objs, False)),
         ])
-
-    # ══════════════════════════════════════════
-    # 单选属性编辑
-    # ══════════════════════════════════════════
 
     def _build_single(self, obj: Any) -> None:
         doc = self.canvas.doc
@@ -499,7 +430,6 @@ class PropertyPanel(QWidget):
                     lambda v: self._set_point_coord(obj, "y", v),
                 ),
             )
-
         elif isinstance(obj, PointOnObject):
             self._add_section("参数")
             self._add_row(
@@ -509,7 +439,6 @@ class PropertyPanel(QWidget):
                     lambda v: self._set_attr_and_recompute(obj, "t", v),
                 ),
             )
-
         elif isinstance(obj, MediaObject):
             self._add_section("布局")
             self._add_row(
@@ -550,66 +479,65 @@ class PropertyPanel(QWidget):
                     ),
                 )
 
-        # ★ 全部使用 getattr 绕过 Pylance 对特定子类属性的误报
-        if tn == "ScriptButtonObject":
-            self._add_section("按钮样式")
-            self._add_row(
-                "文字",
-                self._make_line(
-                    getattr(obj, "text", ""),
-                    lambda t: self._set_attr_and_changed(obj, "text", t),
-                ),
-            )
-            self._add_row(
-                "背景",
-                self._make_color_button(
-                    QColor(getattr(obj, "color", "#1971c2")),
-                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
-                ),
-            )
-            self._add_row(
-                "字色",
-                self._make_color_button(
-                    QColor(getattr(obj, "text_color", "#ffffff")),
-                    lambda c: self._set_attr_and_changed(
-                        obj, "text_color", c.name()
+            if tn == "ScriptButtonObject":
+                self._add_section("按钮样式")
+                self._add_row(
+                    "文字",
+                    self._make_line(
+                        getattr(obj, "text", ""),
+                        lambda t: self._set_attr_and_changed(obj, "text", t),
                     ),
-                ),
-            )
-            run_fn = getattr(obj, "run", None)
-            edit_fn = getattr(obj, "edit", None)
-            btns: list[tuple[str, Callable[[], Any]]] = []
-            if callable(run_fn):
-                btns.append(("▶ 运行", lambda: run_fn(self.canvas)))
-            if callable(edit_fn):
-                btns.append(("✎ 编辑", lambda: edit_fn(self.canvas)))
-            if btns:
-                self._add_buttons(btns)
+                )
+                self._add_row(
+                    "背景",
+                    self._make_color_button(
+                        QColor(getattr(obj, "color", "#1971c2")),
+                        lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                    ),
+                )
+                self._add_row(
+                    "字色",
+                    self._make_color_button(
+                        QColor(getattr(obj, "text_color", "#ffffff")),
+                        lambda c: self._set_attr_and_changed(
+                            obj, "text_color", c.name()
+                        ),
+                    ),
+                )
+                run_fn = getattr(obj, "run", None)
+                edit_fn = getattr(obj, "edit", None)
+                btns: list[tuple[str, Callable[[], Any]]] = []
+                if callable(run_fn):
+                    btns.append(("▶ 运行", lambda: run_fn(self.canvas)))
+                if callable(edit_fn):
+                    btns.append(("✎ 编辑", lambda: edit_fn(self.canvas)))
+                if btns:
+                    self._add_buttons(btns)
 
-        elif tn == "TextObject":
-            self._add_section("文本样式")
-            self._add_row(
-                "内容",
-                self._make_line(
-                    getattr(obj, "text", ""),
-                    lambda t: self._set_attr_and_changed(obj, "text", t),
-                ),
-            )
-            self._add_row(
-                "颜色",
-                self._make_color_button(
-                    QColor(getattr(obj, "color", "#1f2937")),
-                    lambda c: self._set_attr_and_changed(obj, "color", c.name()),
-                ),
-            )
-            self._add_row(
-                "字号",
-                self._make_spin(
-                    getattr(obj, "size", 16),
-                    6, 200, 0,
-                    lambda v: self._set_attr_and_changed(obj, "size", int(v)),
-                ),
-            )
+            elif tn == "TextObject":
+                self._add_section("文本样式")
+                self._add_row(
+                    "内容",
+                    self._make_line(
+                        getattr(obj, "text", ""),
+                        lambda t: self._set_attr_and_changed(obj, "text", t),
+                    ),
+                )
+                self._add_row(
+                    "颜色",
+                    self._make_color_button(
+                        QColor(getattr(obj, "color", "#1f2937")),
+                        lambda c: self._set_attr_and_changed(obj, "color", c.name()),
+                    ),
+                )
+                self._add_row(
+                    "字号",
+                    self._make_spin(
+                        getattr(obj, "size", 16),
+                        6, 200, 0,
+                        lambda v: self._set_attr_and_changed(obj, "size", int(v)),
+                    ),
+                )
 
         elif tn == "FunctionCurve":
             self._add_section("函数")
@@ -657,15 +585,13 @@ class PropertyPanel(QWidget):
             ("选子", lambda: self._select_related(obj, "children")),
         ])
 
-    # ══════════════════════════════════════════
-    # 提交逻辑
-    # ══════════════════════════════════════════
-
+    # ──────────────────────────────────────────────────────
+    #  操作
+    # ──────────────────────────────────────────────────────
     def _set_visible(self, objs: list[Any], visible: bool) -> None:
         def doit():
             for o in objs:
                 o.visible = bool(visible)
-            # ★ 修复：visible 变化不触发 _mutation_count，需手动失效渲染缓存
             self.canvas.doc._mutation_count += 1
         self._doc_action(doit)
 
@@ -682,7 +608,6 @@ class PropertyPanel(QWidget):
                     if o in doc_objects:
                         doc_objects.remove(o)
                         doc_objects.insert(0, o)
-            # ★ 修复：重排序后需失效渲染缓存
             self.canvas.doc._mutation_count += 1
         self._doc_action(doit)
 
@@ -694,38 +619,28 @@ class PropertyPanel(QWidget):
         def doit() -> None:
             setattr(obj, axis, float(value))
             self.canvas.doc.recompute_from(obj)
-
         self._doc_action(doit)
 
-    def _set_attr_and_recompute(
-        self, obj: Any, name: str, value: Any
-    ) -> None:
+    def _set_attr_and_recompute(self, obj: Any, name: str, value: Any) -> None:
         def doit() -> None:
             setattr(obj, name, value)
             self.canvas.doc.recompute_from(obj)
-
         self._doc_action(doit)
 
-    def _set_attr_and_changed(
-        self, obj: Any, name: str, value: Any
-    ) -> None:
+    def _set_attr_and_changed(self, obj: Any, name: str, value: Any) -> None:
         self._doc_action(lambda: setattr(obj, name, value))
 
     def _set_expr(self, obj: Any, text: str) -> None:
         def doit() -> None:
             setattr(obj, "expr", text)
             self.canvas.doc.refresh_variables()
-
         self._doc_action(doit)
 
-    def _set_function_curve_expr(
-        self, obj: Any, field: str, text: str
-    ) -> None:
+    def _set_function_curve_expr(self, obj: Any, field: str, text: str) -> None:
         def doit() -> None:
             setattr(obj, field, text)
             if hasattr(obj, "invalidate_cache"):
                 obj.invalidate_cache()
-
         self._doc_action(doit)
 
     def _set_function_curve_color(self, obj: Any, color: QColor) -> None:
@@ -733,5 +648,4 @@ class PropertyPanel(QWidget):
             obj.color = color.name()
             if hasattr(obj, "invalidate_cache"):
                 obj.invalidate_cache()
-
         self._doc_action(doit)
