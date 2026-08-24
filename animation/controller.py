@@ -111,7 +111,16 @@ class AnimationController(QObject):
                     moved.append(track.target)
         if moved:
             self.doc.recompute_silent(moved)
-        # ★ 统一刷新一次（VariableTrack 已静默修改，不触发信号）
+            # ★ 动画播放时实时求解约束（与拖动一致，用 quick 模式）
+            if hasattr(self.doc, 'constraints') and self.doc.constraints:
+                try:
+                    self.doc.solve_constraints(
+                        trigger_points=moved,
+                        pinned_points=moved,
+                        quick=True,
+                    )
+                except Exception:
+                    pass
         self.doc.refresh_variables()
 
     def _bind_targets(self) -> None:
