@@ -430,7 +430,7 @@ def trigger_egg(canvas):
     def _download():
         global _egg_loading
         try:
-            num = random.randint(1, 1000)
+            num = random.randint(1, 512)
             url = f"https://esa-img.loliapi.cn/i/pc/img{num}.webp"
             req = urllib.request.Request(
                 url,

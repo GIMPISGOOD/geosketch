@@ -136,22 +136,46 @@ class PropertyPanel(QWidget):
     #  折叠 / 展开
     # ──────────────────────────────────────────────────────
     def _toggle_collapse(self) -> None:
+        """折叠/展开属性面板，带平滑宽度动画。"""
+        from PySide6.QtCore import QPropertyAnimation, QEasingCurve
+
         self._collapsed = not self._collapsed
+
         if self._collapsed:
             self._expanded_widget.hide()
             self._collapsed_widget.show()
-            self.setFixedWidth(self._collapsed_width)
             self.setFixedHeight(90)
+            # ★ 宽度动画：300 → 36
+            self._width_anim = QPropertyAnimation(self, b"minimumWidth")
+            self._width_anim.setDuration(180)
+            self._width_anim.setStartValue(self._expanded_width)
+            self._width_anim.setEndValue(self._collapsed_width)
+            self._width_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._width_anim.valueChanged.connect(
+                lambda v: self.setFixedWidth(int(v)))
+            self._width_anim.finished.connect(
+                lambda: self.setFixedWidth(self._collapsed_width))
+            self._width_anim.start()
         else:
             self._collapsed_widget.hide()
             self._expanded_widget.show()
-            self.setFixedWidth(self._expanded_width)
             self.setMinimumHeight(0)
             self.setMaximumHeight(16777215)
             target_h = max(320, min(600, self.canvas.height() - 80))
             self.resize(self._expanded_width, target_h)
             self.reposition()
             self.raise_()
+            # ★ 宽度动画：36 → 300
+            self._width_anim = QPropertyAnimation(self, b"minimumWidth")
+            self._width_anim.setDuration(180)
+            self._width_anim.setStartValue(self._collapsed_width)
+            self._width_anim.setEndValue(self._expanded_width)
+            self._width_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+            self._width_anim.valueChanged.connect(
+                lambda v: self.setFixedWidth(int(v)))
+            self._width_anim.finished.connect(
+                lambda: self.setFixedWidth(self._expanded_width))
+            self._width_anim.start()
 
     def reposition(self) -> None:
         x = max(10, self.canvas.width() - self.width() - 16)
