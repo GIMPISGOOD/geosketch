@@ -151,100 +151,142 @@ def canvas_qss() -> str:
     """画布内所有悬浮面板的样式（磨砂玻璃）——面板都是 canvas 子控件，必须放这里。"""
     t = THEMES[_active]
     return f"""
-background: {t["PANEL_BG"]};
-border: 1px solid {t["PANEL_BORDER"]};
-border-radius: 14px;
-}}
-border: none; background: transparent; border-radius: 9px;
-color: {t["INK"]}; font-weight: 600;
-}}
-background: {t["PANEL_HOVER"]};
-}}
-background: {t["ACCENT"]}; color: #ffffff;
-}}
-color: {t["SUBINK"]}; font-weight: 600;
-}}
-background: {t["PANEL_BG"]};
-border: 1px solid {t["SELECTED"]};
-border-radius: 14px;
-}}
-background: transparent; width: 8px; margin: 2px;
-}}
-background: rgba(120,140,170,0.35); border-radius: 3px; min-height: 24px;
-}}
-background: rgba(120,140,170,0.60);
-}}
 /* ================= 属性面板专属样式 ================= */
 #propertyPanel {{
-background: {t["PANEL_BG"]};
-border: 1px solid {t["PANEL_BORDER"]};
-border-radius: 12px;
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 12px;
 }}
 #propertyPanel QScrollArea {{
-background: transparent;
-border: none;
+    background: transparent;
+    border: none;
 }}
 #propertyPanel QScrollArea > QWidget > QWidget {{
-background: transparent;
+    background: transparent;
 }}
 #propertyPanel QWidget {{
-background: transparent;
+    background: transparent;
 }}
 #propertyPanel QLabel {{
-color: {t["INK"]};
-background: transparent;
+    color: {t["INK"]};
+    background: transparent;
 }}
 #propertyPanel #panelTitle {{
-font-size: 15px;
-font-weight: 700;
-color: {t["INK"]};
-background: transparent;
+    font-size: 15px;
+    font-weight: 700;
+    color: {t["INK"]};
+    background: transparent;
 }}
 #propertyPanel #panelSubtitle {{
-font-size: 11px;
-color: {t["SUBINK"]};
-background: transparent;
+    font-size: 11px;
+    color: {t["SUBINK"]};
+    background: transparent;
 }}
 #propertyPanel QLineEdit,
 #propertyPanel QDoubleSpinBox,
 #propertyPanel QComboBox {{
-background: {t["WINDOW_BG"]};
-color: {t["INK"]};
-border: 1px solid {t["PANEL_BORDER"]};
-border-radius: 6px;
-padding: 3px 6px;
-font-size: 12px;
+    background: {t["WINDOW_BG"]};
+    color: {t["INK"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 6px;
+    padding: 3px 6px;
+    font-size: 12px;
 }}
 #propertyPanel QCheckBox {{
-color: {t["INK"]};
-background: transparent;
+    color: {t["INK"]};
+    background: transparent;
 }}
 #propertyPanel QPushButton {{
-background: {t["PANEL_HOVER"]};
-color: {t["INK"]};
-border: 1px solid {t["PANEL_BORDER"]};
-border-radius: 6px;
-padding: 4px 10px;
-font-size: 12px;
+    background: {t["PANEL_HOVER"]};
+    color: {t["INK"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 6px;
+    padding: 4px 10px;
+    font-size: 12px;
 }}
 #propertyPanel QPushButton:hover {{
-background: {t["PANEL_CHECKED"]};
+    background: {t["PANEL_CHECKED"]};
 }}
 #propertyPanel #collapseBtn,
 #propertyPanel #expandBtn {{
-background: transparent;
-border: 1px solid rgba(120,140,170,0.5);
-border-radius: 4px;
-color: {t["SUBINK"]};
-font-size: 13px;
-font-weight: bold;
-padding: 2px;
+    background: transparent;
+    border: 1px solid rgba(120,140,170,0.5);
+    border-radius: 4px;
+    color: {t["SUBINK"]};
+    font-size: 13px;
+    font-weight: bold;
+    padding: 2px;
 }}
 #propertyPanel #collapseBtn:hover,
 #propertyPanel #expandBtn:hover {{
-background: {t["PANEL_HOVER"]};
-border-color: {t["ACCENT"]};
-color: {t["ACCENT"]};
+    background: {t["PANEL_HOVER"]};
+    border-color: {t["ACCENT"]};
+    color: {t["ACCENT"]};
+}}
+/* ================= 工具栏 ================= */
+#toolRail {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 14px;
+}}
+#toolRail QToolButton {{
+    border: none;
+    background: transparent;
+    border-radius: 9px;
+    color: {t["INK"]};
+    font-weight: 600;
+}}
+#toolRail QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+#toolRail QToolButton:checked {{
+    background: {t["ACCENT"]};
+    color: #ffffff;
+}}
+/* ================= 缩放栏 ================= */
+#zoomBar {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 14px;
+}}
+#zoomBar QLabel {{
+    color: {t["SUBINK"]};
+    font-weight: 600;
+}}
+#zoomBar QToolButton {{
+    border: none;
+    background: transparent;
+    border-radius: 9px;
+    color: {t["INK"]};
+    font-weight: 600;
+}}
+#zoomBar QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+/* ================= 文本编辑器 ================= */
+#textEditor {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["SELECTED"]};
+    border-radius: 14px;
+}}
+/* ================= 滑杆（限定在属性面板内） ================= */
+#propertyPanel QSlider::groove:horizontal {{
+    background: transparent;
+    height: 8px;
+}}
+#propertyPanel QSlider::sub-page:horizontal {{
+    background: {t["PANEL_BG"]};
+    border-radius: 3px;
+}}
+#propertyPanel QSlider::add-page:horizontal {{
+    background: rgba(120,140,170,0.35);
+    border-radius: 3px;
+}}
+#propertyPanel QSlider::handle:horizontal {{
+    background: rgba(120,140,170,0.60);
+    width: 8px;
+    margin: 2px;
+    border-radius: 3px;
 }}
 /* ===================================================== */
 """
