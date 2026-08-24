@@ -148,10 +148,55 @@ def app_stylesheet() -> str:
     """
 
 def canvas_qss() -> str:
-    """画布内所有悬浮面板的样式（磨砂玻璃）——面板都是 canvas 子控件，必须放这里。"""
     t = THEMES[_active]
     return f"""
-/* ================= 属性面板专属样式 ================= */
+/* ================= 工具栏 ================= */
+#toolRail {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 14px;
+}}
+#toolRail QToolButton {{
+    border: none;
+    background: transparent;
+    border-radius: 10px;
+    color: {t["INK"]};
+    font-weight: 600;
+}}
+#toolRail QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+#toolRail QToolButton:checked {{
+    background: {t["PANEL_CHECKED"]};
+    color: {t["ACCENT"]};
+}}
+/* ================= 缩放栏 ================= */
+#zoomBar {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 14px;
+}}
+#zoomBar QLabel {{
+    color: {t["SUBINK"]};
+    font-weight: 600;
+}}
+#zoomBar QToolButton {{
+    border: none;
+    background: transparent;
+    border-radius: 9px;
+    color: {t["INK"]};
+    font-weight: 600;
+}}
+#zoomBar QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+/* ================= 文本编辑器 ================= */
+#textEditor {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["SELECTED"]};
+    border-radius: 14px;
+}}
+/* ================= 属性面板 ================= */
 #propertyPanel {{
     background: {t["PANEL_BG"]};
     border: 1px solid {t["PANEL_BORDER"]};
@@ -223,53 +268,7 @@ def canvas_qss() -> str:
     border-color: {t["ACCENT"]};
     color: {t["ACCENT"]};
 }}
-/* ================= 工具栏 ================= */
-#toolRail {{
-    background: {t["PANEL_BG"]};
-    border: 1px solid {t["PANEL_BORDER"]};
-    border-radius: 14px;
-}}
-#toolRail QToolButton {{
-    border: none;
-    background: transparent;
-    border-radius: 9px;
-    color: {t["INK"]};
-    font-weight: 600;
-}}
-#toolRail QToolButton:hover {{
-    background: {t["PANEL_HOVER"]};
-}}
-#toolRail QToolButton:checked {{
-    background: {t["ACCENT"]};
-    color: #ffffff;
-}}
-/* ================= 缩放栏 ================= */
-#zoomBar {{
-    background: {t["PANEL_BG"]};
-    border: 1px solid {t["PANEL_BORDER"]};
-    border-radius: 14px;
-}}
-#zoomBar QLabel {{
-    color: {t["SUBINK"]};
-    font-weight: 600;
-}}
-#zoomBar QToolButton {{
-    border: none;
-    background: transparent;
-    border-radius: 9px;
-    color: {t["INK"]};
-    font-weight: 600;
-}}
-#zoomBar QToolButton:hover {{
-    background: {t["PANEL_HOVER"]};
-}}
-/* ================= 文本编辑器 ================= */
-#textEditor {{
-    background: {t["PANEL_BG"]};
-    border: 1px solid {t["SELECTED"]};
-    border-radius: 14px;
-}}
-/* ================= 滑杆（限定在属性面板内） ================= */
+/* ================= 滑杆 ================= */
 #propertyPanel QSlider::groove:horizontal {{
     background: transparent;
     height: 8px;
@@ -288,7 +287,6 @@ def canvas_qss() -> str:
     margin: 2px;
     border-radius: 3px;
 }}
-/* ===================================================== */
 """
 
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
