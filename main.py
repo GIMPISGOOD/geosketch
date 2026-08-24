@@ -42,7 +42,6 @@ def main() -> None:
     font.setPointSize(10)
     app.setFont(font)
     app.setStyleSheet(theme.app_stylesheet())
-    # ★ 应用退出前安全终止所有后台采样线程
     app.aboutToQuit.connect(_shutdown_all_threads)
     app.aboutToQuit.connect(lambda: win.doc._cleanup_temp_images())
     win = MainWindow()
