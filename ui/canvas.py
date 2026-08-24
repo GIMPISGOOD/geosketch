@@ -154,6 +154,7 @@ class Canvas(QWidget):
                 traceback.print_exc()
             finally:
                 p.restore()
+
             if getattr(self, "_snow_active", False):
                 p.save()
                 try:
@@ -162,6 +163,7 @@ class Canvas(QWidget):
                     pass
                 finally:
                     p.restore()
+
             p.save()
             try:
                 self._draw_snap_indicator(p)
@@ -169,6 +171,7 @@ class Canvas(QWidget):
                 pass
             finally:
                 p.restore()
+
             if self.tool is not None:
                 p.save()
                 try:
@@ -176,6 +179,47 @@ class Canvas(QWidget):
                 except Exception:
                     import traceback
                     traceback.print_exc()
+                finally:
+                    p.restore()
+
+            # ★ 约束参考线覆盖层（原 constraints/ui/overlay 猴子补丁）
+            if hasattr(self.doc, 'constraints') and self.doc.constraints:
+                p.save()
+                try:
+                    p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                    pen = theme.dashed_pen(theme.MEASURE, 1.5)
+                    p.setPen(pen)
+                    p.setBrush(theme.brush(theme.MEASURE))
+                    for c in self.doc.constraints:
+                        if not getattr(c, 'enabled', True):
+                            continue
+                        pts = c.involved_points()
+                        if not pts:
+                            continue
+                        screen_pts = []
+                        for pt in pts:
+                            if hasattr(pt, 'x') and hasattr(pt, 'y'):
+                                screen_pts.append(
+                                    self.to_screen(pt.x, pt.y))
+                            elif hasattr(pt, 'a') and hasattr(pt, 'b'):
+                                mx = (pt.a.x + pt.b.x) / 2
+                                my = (pt.a.y + pt.b.y) / 2
+                                screen_pts.append(
+                                    self.to_screen(mx, my))
+                        if len(screen_pts) >= 2:
+                            if (len(screen_pts) == 3
+                                    and c.type_name == "angle"):
+                                p.drawLine(screen_pts[0], screen_pts[1])
+                                p.drawLine(screen_pts[1], screen_pts[2])
+                            else:
+                                for i in range(len(screen_pts) - 1):
+                                    p.drawLine(screen_pts[i],
+                                               screen_pts[i + 1])
+                        r = 3.0
+                        for sp in screen_pts:
+                            p.drawEllipse(sp, r, r)
+                except Exception:
+                    pass
                 finally:
                     p.restore()
         finally:

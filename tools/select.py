@@ -1,8 +1,12 @@
-"""选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。"""
+"""选择工具：点选/拖动/缩放/编辑；支持智能参考线（对齐吸附+红色虚线）。
+★ 原生集成约束求解（原 constraints/select_ext 猴子补丁已移除）。
+"""
 from typing import Optional, Tuple, List
+
 from PySide6.QtGui import QColor
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
+
 from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject
 from media.base import MediaObject
@@ -28,7 +32,7 @@ def _free_points_of(obj, acc, seen):
 class SelectTool(Tool):
     def __init__(self):
         self._reset()
-        self._script_timer = None          # ★ 脚本按钮单击延迟运行定时器
+        self._script_timer = None
 
     def _reset(self):
         self.drag_pts: list[FreePoint] = []
@@ -36,41 +40,32 @@ class SelectTool(Tool):
         self.drag_media: Optional[MediaObject] = None
         self.resize_media: Optional[MediaObject] = None
         self.rotate_media: Optional[MediaObject] = None
-
         self._media_orig: Tuple[float, float] = (0.0, 0.0)
         self._orig_pos: list[Tuple[FreePoint, float, float]] = []
         self._grab_wpt: Optional[Tuple[float, float]] = None
         self._drag_undo_begun = False
-        self._guides: List[Tuple[str, float]] = [] 
-            # ★ 脚本按钮点击/拖动判断
+        self._guides: List[Tuple[str, float]] = []
         self._click_media = None
         self._press_wpt = None
-        self._moved = False# ★ 智能参考线
-        
+        self._moved = False
+
     def cancel_pending_script(self):
-        """取消待运行的脚本按钮单击（双击编辑时调用）。"""
         if self._script_timer is not None:
             self._script_timer.stop()
             self._script_timer = None
-            
-    def _detect_snap(self, canvas, x, y) -> Tuple[float, float, List[Tuple[str, float]]]:
-        """检测对齐吸附：坐标轴 / 其他点。返回 (吸附后x, 吸附后y, 参考线列表)。"""
+
+    def _detect_snap(self, canvas, x, y):
         THRESHOLD_PX = 12.0
         thresh_w = THRESHOLD_PX / canvas.scale
-        
         best_dx, best_dy = thresh_w, thresh_w
         snap_x, snap_y = None, None
         guides = []
-        
-        # 1. 坐标轴吸附
         if abs(x) < best_dx:
             best_dx = abs(x)
             snap_x = 0.0
         if abs(y) < best_dy:
             best_dy = abs(y)
             snap_y = 0.0
-            
-        # 2. 其他点对齐
         for obj in canvas.doc.objects:
             if isinstance(obj, AbstractPoint) and obj.visible and obj.exists:
                 if obj in self.drag_pts:
@@ -83,101 +78,71 @@ class SelectTool(Tool):
                 if dy < best_dy:
                     best_dy = dy
                     snap_y = obj.y
-                    
         if snap_x is not None:
             guides.append(('v', snap_x))
         if snap_y is not None:
             guides.append(('h', snap_y))
-            
         return (snap_x if snap_x is not None else x,
                 snap_y if snap_y is not None else y,
                 guides)
 
     def press(self, canvas, wpt, hit):
         self._reset()
-
         target = snap_target(canvas, wpt, hit)
-
         if target is None:
             canvas.doc.set_selection([])
             return
-
-        # ★ 延迟导入，避免循环依赖
         from media.script_button import ScriptButtonObject
-
         if isinstance(target, MediaObject):
             was_selected = target.selected
             canvas.doc.set_selection([target])
-
             if was_selected:
                 sp = canvas.to_screen(wpt[0], wpt[1])
-
-                # ★ 旋转手柄
                 if getattr(target, "rotatable", False):
                     rr = target.rotate_handle_rect(canvas)
                     if rr.width() > 0 and rr.contains(sp):
                         self.rotate_media = target
                         self._grab_wpt = wpt
                         return
-
-                # ★ 编辑按钮
                 if target.edit_button_rect(canvas).contains(sp):
                     target.edit(canvas)
                     self._reset()
                     return
-
-                # ★ 缩放手柄
                 if target.resize_handle_rect(canvas).contains(sp):
                     self.resize_media = target
                     self._grab_wpt = wpt
                     return
-
-            # ★ 媒体对象本体可拖动
             self.drag_media = target
             self._media_orig = (target.x, target.y)
             self._grab_wpt = wpt
-
-            # ★ 脚本按钮：如果没有明显拖动，则视为单击运行
             if isinstance(target, ScriptButtonObject):
                 self._click_media = target
                 self._press_wpt = wpt
                 self._moved = False
-
             return
-
         selected = [o for o in canvas.doc.objects if o.selected]
         multi = (len(selected) > 1) and (target in selected)
-
         if multi:
             canvas.doc.set_selection(selected)
-
             pts: list[FreePoint] = []
             seen = set()
-
             for o in selected:
                 _free_points_of(o, pts, seen)
-
             self.drag_pts = pts
-
         elif isinstance(target, PointOnObject):
             canvas.doc.set_selection([target])
             self.drag_poo = target
-
         elif isinstance(target, FreePoint):
             canvas.doc.set_selection([target])
             self.drag_pts = [target]
-
         elif isinstance(target, AbstractPoint):
             canvas.doc.set_selection([target])
-
         else:
             canvas.doc.set_selection([target])
-
             pts = []
             seen = set()
             _free_points_of(target, pts, seen)
             self.drag_pts = pts
-
         self._grab_wpt = wpt
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
 
@@ -186,82 +151,75 @@ class SelectTool(Tool):
                 and self.drag_media is None and self.resize_media is None
                 and self.rotate_media is None):
             return
-
-        # ★ 判断脚本按钮是单击还是拖动
         if self._click_media is not None and self._press_wpt is not None:
             dx = wpt[0] - self._press_wpt[0]
             dy = wpt[1] - self._press_wpt[1]
-
             if math.hypot(dx, dy) > 5.0 / canvas.scale:
                 self._moved = True
             elif not self._moved:
-                #  ainda 没超过阈值，不启动拖动
                 return
-
         if not self._drag_undo_begun:
             canvas.doc.begin_action()
             self._drag_undo_begun = True
-
         self._guides = []
-
-        # ★ 旋转媒体对象
         if self.rotate_media is not None:
             center = self.rotate_media.screen_rect(canvas).center()
             cur = canvas.to_screen(wpt[0], wpt[1])
-
             ang = math.degrees(
-                math.atan2(cur.y() - center.y(), cur.x() - center.x())
-            )
-
+                math.atan2(cur.y() - center.y(), cur.x() - center.x()))
             ang += 90.0
-
             self.rotate_media.rotation = (ang + 360.0) % 360.0
             canvas.doc.changed.emit()
             return
-
         if self.resize_media is not None:
             self.resize_media.resize_to(wpt)
             canvas.doc.changed.emit()
-
         elif self.drag_media is not None and self._grab_wpt is not None:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
-
             nx = self._media_orig[0] + dx
             ny = self._media_orig[1] + dy
-
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
-
             self.drag_media.x = nx
             self.drag_media.y = ny
-
             canvas.doc.changed.emit()
-
         elif self.drag_poo is not None:
             self.drag_poo.drag_to(wpt)
             canvas.doc.recompute_from(self.drag_poo)
-
         elif self._grab_wpt is not None and self.drag_pts:
             dx = wpt[0] - self._grab_wpt[0]
             dy = wpt[1] - self._grab_wpt[1]
-
             base_p, base_ox, base_oy = self._orig_pos[0]
-
             nx = base_ox + dx
             ny = base_oy + dy
-
             nx, ny, self._guides = self._detect_snap(canvas, nx, ny)
-
             actual_dx = nx - base_ox
             actual_dy = ny - base_oy
-
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
-
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
+        # ★ 拖动时触发约束求解（原 constraints/select_ext._new_move）
+        doc = canvas.doc
+        if hasattr(doc, 'constraints') and doc.constraints:
+            pinned = []
+            if self.drag_poo is not None:
+                pinned.append(self.drag_poo)
+            for p in self.drag_pts:
+                pinned.append(p)
+            if self.drag_media is not None:
+                pinned.append(self.drag_media)
+            if pinned:
+                try:
+                    doc.solve_constraints(
+                        trigger_points=pinned,
+                        pinned_points=pinned,
+                        quick=True,
+                    )
+                except Exception:
+                    pass
+
     def release(self, canvas, wpt, hit):
-        # ★ 脚本按钮单击运行（延迟以区分双击编辑）
         if self._click_media is not None and not self._moved:
             from media.script_button import ScriptButtonObject
             if isinstance(self._click_media, ScriptButtonObject):
@@ -271,11 +229,10 @@ class SelectTool(Tool):
                 self._script_timer.setSingleShot(True)
                 interval = max(200, QApplication.doubleClickInterval())
                 self._script_timer.setInterval(interval)
-                self._script_timer.timeout.connect(lambda: btn.run(canvas))
+                self._script_timer.timeout.connect(
+                    lambda: btn.run(canvas))
                 self._script_timer.start()
-
         if self._drag_undo_begun:
-            # 宏录制：记录拖动结果
             from core.macro import get_macro_manager
             mm = get_macro_manager()
             if mm is not None and mm.is_recording():
@@ -290,25 +247,35 @@ class SelectTool(Tool):
                 if self.rotate_media is not None:
                     mm.recorder.record_move(self.rotate_media)
             canvas.doc.end_action()
-        self._reset()
-        
-    def activated(self, canvas):
-        self.cancel_pending_script()       # ★ 切回选择工具时也清理
+
+        # ★ 松手后完整求解（原 constraints/select_ext._new_release）
+        doc = canvas.doc
+        if hasattr(doc, 'constraints') and doc.constraints:
+            try:
+                doc.solve_constraints(quick=False)
+            except Exception:
+                pass
+
         self._reset()
 
-    def deactivated(self, canvas):         # ★ 新增：切离选择工具时清理
+    def activated(self, canvas):
         self.cancel_pending_script()
         self._reset()
-        
+
+    def deactivated(self, canvas):
+        self.cancel_pending_script()
+        self._reset()
+
     def cancel(self, canvas):
         self._reset()
 
     def draw_overlay(self, p, view):
-        # ★ 绘制智能参考线（红色虚线）
         if self._guides:
             p.setPen(theme.dashed_pen(QColor("#e03131"), 1.5))
             for g_type, val in self._guides:
-                if g_type == 'v':  # 垂直线 (x = val)
-                    p.drawLine(view.to_screen(val, -1000), view.to_screen(val, 1000))
-                elif g_type == 'h':  # 水平线 (y = val)
-                    p.drawLine(view.to_screen(-1000, val), view.to_screen(1000, val))
+                if g_type == 'v':
+                    p.drawLine(view.to_screen(val, -1000),
+                               view.to_screen(val, 1000))
+                elif g_type == 'h':
+                    p.drawLine(view.to_screen(-1000, val),
+                               view.to_screen(1000, val))

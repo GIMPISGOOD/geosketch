@@ -48,11 +48,80 @@ class MainWindow(QMainWindow):
         self._build_menubar()
         self._build_statusbar()
         self._build_var_menu()
-        self._build_advanced_menu()  # ★ 宏与脚本库移入高级菜单
+        self._build_advanced_menu() 
+        self._build_constraint_menu()# ★ 宏与脚本库移入高级菜单
+        self._build_animation_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
+        
+    def _build_constraint_menu(self):
+        """原生构建约束菜单。"""
+        try:
+            from core.registry import TOOL_REGISTRY
+            mb = self.menuBar()
+            cm = mb.addMenu("约束(&C)")
+            constraint_specs = sorted(
+                [s for s in TOOL_REGISTRY if s.get("panel") == "constraint"],
+                key=lambda s: s.get("order", 99)
+            )
+            for spec in constraint_specs:
+                cm.addAction(self._actions[spec["cls"]])
+            if not constraint_specs:
+                e = cm.addAction("（暂无约束工具）")
+                e.setEnabled(False)
+            for i, action in enumerate(mb.actions()):
+                if action.text() in ("构造(&C)", "工具(&T)"):
+                    mb.removeAction(cm.menuAction())
+                    mb.insertMenu(mb.actions()[i + 1], cm)
+                    break
+        except Exception:
+            pass
 
+
+    def _build_animation_menu(self):
+        """原生构建动画菜单。"""
+        try:
+            from animation.controller import AnimationController
+            from animation.ui.timeline import TimelineDock
+            from PySide6.QtGui import QAction, QKeySequence
+            from PySide6.QtCore import Qt
+
+            mb = self.menuBar()
+            am = mb.addMenu("动画(&A)")
+
+            play_act = QAction("▶ 播放动画", self)
+            play_act.setShortcut(QKeySequence("Ctrl+Shift+A"))
+            play_act.triggered.connect(lambda: self._anim_play())
+            am.addAction(play_act)
+
+            stop_act = QAction("■ 停止动画", self)
+            stop_act.triggered.connect(lambda: self._anim_stop())
+            am.addAction(stop_act)
+
+            am.addSeparator()
+            timeline_act = QAction("时间轴面板", self)
+            timeline_act.triggered.connect(
+                lambda: self._anim_toggle_timeline())
+            am.addAction(timeline_act)
+
+            self._anim_controller = AnimationController(
+                self.doc, self.canvas)
+            self._timeline_dock = TimelineDock(
+                self._anim_controller, self.canvas, self)
+            self.addDockWidget(
+                Qt.DockWidgetArea.BottomDockWidgetArea,
+                self._timeline_dock)
+            self._timeline_dock.setVisible(False)
+
+            self._anim_play = lambda: self._anim_controller.play()
+            self._anim_stop = lambda: self._anim_controller.stop()
+            self._anim_toggle_timeline = lambda: \
+                self._timeline_dock.setVisible(
+                    not self._timeline_dock.isVisible())
+        except Exception:
+            pass
+                
     def _create_tool_actions(self) -> None:
         for spec in TOOL_REGISTRY:
             act = QAction(spec["name"], self, checkable=True)

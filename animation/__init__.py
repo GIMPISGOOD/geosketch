@@ -1,17 +1,20 @@
 """动画系统顶层包。
 删除本包即可完全卸载动画功能，不影响原有系统。
+★ 不再做猴子补丁。动画序列化已原生集成到 core/document.py。
 """
 import logging
+
 logger = logging.getLogger(__name__)
 
 
 def inject():
     try:
-        from . import serialization
-        serialization.patch_document()
-        patch_main_window()
+        # ★ 不再调用 serialization.patch_document()
+        # ★ 不再调用 patch_main_window()
+
         from . import tracks  # noqa: F401
         from . import recorder  # noqa: F401
+
         logger.info("✔ 动画系统已加载（含录制、预设、中文翻译）")
         return True
     except Exception as e:
@@ -19,54 +22,6 @@ def inject():
         import traceback
         traceback.print_exc()
         return False
-
-
-def patch_main_window():
-    from ui.main_window import MainWindow
-    original_init = MainWindow.__init__
-
-    def new_init(self, *args, **kwargs):
-        original_init(self, *args, **kwargs)
-        mb = self.menuBar()
-        am = mb.addMenu("动画(&A)")
-        from PySide6.QtGui import QAction, QKeySequence
-
-        play_act = QAction("▶ 播放动画", self)
-        play_act.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        play_act.triggered.connect(lambda: self._anim_play())
-        am.addAction(play_act)
-
-        stop_act = QAction("■ 停止动画", self)
-        stop_act.triggered.connect(lambda: self._anim_stop())
-        am.addAction(stop_act)
-
-        am.addSeparator()
-
-        timeline_act = QAction("时间轴面板", self)
-        timeline_act.triggered.connect(
-            lambda: self._anim_toggle_timeline())
-        am.addAction(timeline_act)
-
-        from .controller import AnimationController
-        self._anim_controller = AnimationController(self.doc, self.canvas)
-
-        from .ui.timeline import TimelineDock
-        self._timeline_dock = TimelineDock(
-            self._anim_controller, self.canvas, self)
-        self.addDockWidget(
-            __import__("PySide6.QtCore",
-                       fromlist=["Qt"]).Qt.DockWidgetArea.BottomDockWidgetArea,
-            self._timeline_dock
-        )
-        self._timeline_dock.setVisible(False)
-
-        self._anim_play = lambda: self._anim_controller.play()
-        self._anim_stop = lambda: self._anim_controller.stop()
-        self._anim_toggle_timeline = lambda: self._timeline_dock.setVisible(
-            not self._timeline_dock.isVisible()
-        )
-
-    setattr(MainWindow, "__init__", new_init)
 
 
 inject()
