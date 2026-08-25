@@ -248,14 +248,28 @@ class SelectTool(Tool):
                     mm.recorder.record_move(self.rotate_media)
             canvas.doc.end_action()
 
-        # ★ 松手后完整求解（原 constraints/select_ext._new_release）
         doc = canvas.doc
         if hasattr(doc, 'constraints') and doc.constraints:
+            # ★ 修复：收集被拖动的点，在最终求解中固定它们
+            pinned = []
+            if self.drag_poo is not None:
+                pinned.append(self.drag_poo)
+            for p in self.drag_pts:
+                pinned.append(p)
+            if self.drag_media is not None:
+                pinned.append(self.drag_media)
             try:
-                doc.solve_constraints(quick=False)
+                if pinned:
+                    # ★ 关键：传入 pinned_points，防止圆心被求解器移走
+                    doc.solve_constraints(
+                        trigger_points=pinned,
+                        pinned_points=pinned,
+                        quick=False
+                    )
+                else:
+                    doc.solve_constraints(quick=False)
             except Exception:
                 pass
-
         self._reset()
 
     def activated(self, canvas):
