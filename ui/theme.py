@@ -76,6 +76,7 @@ THEMES = {
     },
 }
 
+
 _active = "纸白"
 
 _color_cache: dict[tuple, QColor] = {}

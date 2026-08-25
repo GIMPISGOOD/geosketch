@@ -81,67 +81,80 @@ class MainWindow(QMainWindow):
 
 # ui/main_window.py 修复片段
 
+# ui/main_window.py 中替换 _build_animation_menu 方法，并新增两个方法
+
     def _build_animation_menu(self):
-        """原生构建动画菜单。"""
+        """原生构建动画菜单（含轨迹功能）。"""
         try:
             from animation.controller import AnimationController
             from animation.ui.timeline import TimelineDock
             from PySide6.QtGui import QAction, QKeySequence
             from PySide6.QtCore import Qt
-            
+
             mb = self.menuBar()
             am = mb.addMenu("动画(&A)")
-            
+
             play_act = QAction("▶ 播放动画", self)
             play_act.setShortcut(QKeySequence("Ctrl+Shift+A"))
-            play_act.triggered.connect(lambda: self._anim_play())
+            play_act.triggered.connect(self._anim_play)
             am.addAction(play_act)
-            
+
             stop_act = QAction("■ 停止动画", self)
-            stop_act.triggered.connect(lambda: self._anim_stop())
+            stop_act.triggered.connect(self._anim_stop)
             am.addAction(stop_act)
-            
+
             am.addSeparator()
-            
-            # ★ 修复 1：补全轨迹相关的菜单 Action
+
+            # ★ 修复：补全轨迹菜单
             trail_act = QAction("🎯 显示轨迹…", self)
             trail_act.setShortcut(QKeySequence("Ctrl+Shift+T"))
             trail_act.triggered.connect(self._anim_pick_trail)
             am.addAction(trail_act)
-            
+
             clear_trail_act = QAction("🗑 清除轨迹", self)
             clear_trail_act.triggered.connect(self._anim_clear_trails)
             am.addAction(clear_trail_act)
-            
+
             am.addSeparator()
-            
+
             timeline_act = QAction("时间轴面板", self)
-            timeline_act.triggered.connect(lambda: self._anim_toggle_timeline())
+            timeline_act.triggered.connect(self._anim_toggle_timeline)
             am.addAction(timeline_act)
-            
+
             self._anim_controller = AnimationController(self.doc, self.canvas)
-            
-            # ★ 修复 2：将 controller 注入到 canvas，解决 _draw_trails 找不到 controller 的 Bug
-            self.canvas._anim_controller = self._anim_controller  # pyright: ignore[reportAttributeAccessIssue]
-            
-            self._timeline_dock = TimelineDock(self._anim_controller, self.canvas, self)
-            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self._timeline_dock)
+
+
+            self.canvas._anim_controller = self._anim_controller
+
+            self._timeline_dock = TimelineDock(
+                self._anim_controller, self.canvas, self)
+            self.addDockWidget(
+                Qt.DockWidgetArea.BottomDockWidgetArea,
+                self._timeline_dock)
             self._timeline_dock.setVisible(False)
-            
-            self._anim_play = lambda: self._anim_controller.play()
-            self._anim_stop = lambda: self._anim_controller.stop()
-            self._anim_toggle_timeline = lambda: self._timeline_dock.setVisible(not self._timeline_dock.isVisible())
-            
-        except Exception as e:
+
+        except Exception:
             import traceback
             traceback.print_exc()
 
-    # ★ 修复 3：补全 MainWindow 缺失的轨迹交互方法
+    def _anim_play(self):
+        if hasattr(self, '_anim_controller'):
+            self._anim_controller.play()
+
+    def _anim_stop(self):
+        if hasattr(self, '_anim_controller'):
+            self._anim_controller.stop()
+
+    def _anim_toggle_timeline(self):
+        if hasattr(self, '_timeline_dock'):
+            self._timeline_dock.setVisible(
+                not self._timeline_dock.isVisible())
+
+    # ★ 修复：补全缺失的轨迹交互方法
     def _anim_pick_trail(self):
         """进入轨迹选点模式"""
         if hasattr(self, '_anim_controller'):
             self._anim_controller.start_trail_picking()
-            self.canvas.cursor_info.emit("🎯 点击画布上的点以添加轨迹…")
 
     def _anim_clear_trails(self):
         """清除所有轨迹"""

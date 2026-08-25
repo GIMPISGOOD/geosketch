@@ -70,6 +70,7 @@ class Document(QObject):
         self.constraints = []
         # ★ 动画系统（原 animation/serialization）
         self.animations = []
+        self._trail_config: list = []
 
     # ──────────────────────────────────────────────────────
     #  临时图片管理
@@ -480,6 +481,8 @@ class Document(QObject):
                     pass
             if a_data:
                 data.append({"__animations__": a_data})
+        if hasattr(self, '_trail_config') and self._trail_config:
+            data.append({"__trail_config__": self._trail_config})
         return data
 
     def _full_state(self):

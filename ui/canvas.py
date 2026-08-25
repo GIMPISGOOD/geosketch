@@ -1,5 +1,6 @@
 import math
 import os
+from typing import Any
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot
 from PySide6.QtGui import QPainter, QImage, QColor
 from PySide6.QtWidgets import QWidget, QToolButton
@@ -80,7 +81,7 @@ class Canvas(QWidget):
         self._implicit_sampler = get_implicit_sampler()
         self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
         self._egg_data = None 
-        self._anim_controller = None  # 由 MainWindow 设置
+        self._anim_controller : Any = None  # 由 MainWindow 设置
 
     def _on_implicit_sampled(self, curve_id, segments):
         from geo.implicit_curve import ImplicitCurve
@@ -226,8 +227,10 @@ class Canvas(QWidget):
             p.end()
         self._place_trash()
 
+# 替换 Canvas._draw_trails 方法
+
     def _draw_trails(self, p: QPainter) -> None:
-        """绘制动画轨迹。"""
+        """绘制动画轨迹（含降采样优化）。"""
         controller = getattr(self, "_anim_controller", None)
         if controller is None:
             return
@@ -235,7 +238,10 @@ class Canvas(QWidget):
             return
         from PySide6.QtGui import QPainterPath
         for trail in controller.trails:
+            # ★ 性能优化：超过 200 点时降采样
             pts = trail.points
+            if len(pts) > 200:
+                pts = trail.simplified(tolerance=1.5)
             if len(pts) < 2:
                 continue
             p.setPen(theme.pen(trail.color, 1.8))
@@ -246,7 +252,6 @@ class Canvas(QWidget):
             for x, y in pts[1:]:
                 path.lineTo(self.to_screen(x, y))
             p.drawPath(path)
-            # 末端小圆点
             last = self.to_screen(pts[-1][0], pts[-1][1])
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(theme.brush(trail.color))
