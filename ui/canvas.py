@@ -1,9 +1,9 @@
 import math
 import os
 from typing import Any
-from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot
-from PySide6.QtGui import QPainter, QImage, QColor
-from PySide6.QtWidgets import QWidget, QToolButton
+from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot, QEvent, QPoint
+from PySide6.QtGui import QPainter, QImage, QColor, QTouchEvent
+from PySide6.QtWidgets import QWidget, QToolButton, QGestureEvent, QScroller, QScrollerProperties
 from PySide6.QtSvg import QSvgGenerator
 
 from core.registry import find_renderer
@@ -50,6 +50,35 @@ class Canvas(QWidget):
         self._pan_anchor = QPointF()
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        # ── 触屏支持 ──────────────────────────────────
+        self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
+        self.grabGesture(Qt.GestureType.PinchGesture)
+        self.grabGesture(Qt.GestureType.PanGesture)
+
+        self._touch_mode = False          # 当前是否为触摸输入
+        self._touch_points: dict = {}     # 活跃触摸点 {touchId: QPointF}
+        self._touch_start_pos = None      # 单指起始位置
+        self._touch_start_time = 0        # 单指起始时间戳
+        self._touch_moved = False         # 单指是否已移动超过阈值
+        self._pinch_active = False        # 双指缩放进行中
+        self._pan_active = False          # 双指/单指平移进行中
+
+        # 长按检测（替代右键菜单）
+        self._long_press_timer = QTimer(self)
+        self._long_press_timer.setSingleShot(True)
+        self._long_press_timer.setInterval(500)
+        self._long_press_timer.timeout.connect(self._on_long_press)
+        self._long_press_pos = None
+
+        # 惯性滚动
+        QScroller.grabGesture(self, QScroller.ScrollerGestureType.TouchGesture)
+        scroller = QScroller.scroller(self)
+        sp = scroller.scrollerProperties()
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.DecelerationFactor, 0.05)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MaximumVelocity, 1.5)
+        sp.setScrollMetric(QScrollerProperties.ScrollMetric.MousePressEventDelay, 0.2)
+        scroller.setScrollerProperties(sp)
+        # ── 触屏支持结束 ──────────────────────────────
         self.rail = ToolRail(self)
         self.rail.tool_chosen.connect(self.set_tool)
         self.tool_activated.connect(self.rail.sync)
@@ -176,7 +205,150 @@ class Canvas(QWidget):
 
     def _emit_zoom(self) -> None:
         self.zoom_changed.emit(self.scale / BASE_SCALE * 100.0)
+        
+    def event(self, ev) -> bool:
+        """分发手势事件（Pinch / Pan），其余走默认流程。"""
+        if ev.type() == QEvent.Type.Gesture:
+            return self._handle_gesture(ev)
+        return super().event(ev)
 
+    def _handle_gesture(self, ev: QGestureEvent) -> bool:
+        pinch = ev.gesture(Qt.GestureType.PinchGesture)
+        pan = ev.gesture(Qt.GestureType.PanGesture)
+
+        if pinch is not None:
+            self._handle_pinch(pinch)
+            return True
+        if pan is not None:
+            self._handle_pan(pan)
+            return True
+        return False
+
+    def _handle_pinch(self, pinch) -> None:
+        """双指捏合 → 以两指中心为锚点缩放。"""
+        state = pinch.state()
+        if state == Qt.GestureState.GestureStarted:
+            self._pinch_active = True
+            self._long_press_timer.stop()
+        elif state == Qt.GestureState.GestureUpdated and self._pinch_active:
+            factor = pinch.scaleFactor()
+            center = pinch.centerPoint().toPoint()
+            anchor = QPointF(float(center.x()), float(center.y()))
+            if abs(factor - 1.0) > 0.001:
+                self.zoom_at(factor, anchor)
+        elif state in (Qt.GestureState.GestureFinished,
+                       Qt.GestureState.GestureCanceled):
+            self._pinch_active = False
+
+    def _handle_pan(self, pan) -> None:
+        """双指平移 → 画布平移（单指由 touchEvent 处理）。"""
+        state = pan.state()
+        if state == Qt.GestureState.GestureStarted:
+            self._pan_active = True
+            self._long_press_timer.stop()
+        elif state == Qt.GestureState.GestureUpdated and self._pan_active:
+            delta = pan.delta()
+            self.origin += QPointF(float(delta.x()), float(delta.y()))
+            self.update()
+        elif state in (Qt.GestureState.GestureFinished,
+                       Qt.GestureState.GestureCanceled):
+            self._pan_active = False
+            
+    def touchEvent(self, ev: QTouchEvent) -> None:
+        """处理原始触摸事件：单指点击/拖动/长按。"""
+        points = ev.points()
+        touch_count = len(points)
+
+        if ev.type() == QEvent.Type.TouchBegin:
+            self._touch_mode = True
+            self._touch_points = {p.id(): p.position() for p in points}
+
+            if touch_count == 1:
+                pos = points[0].position()
+                self._touch_start_pos = pos
+                self._touch_start_time = ev.timestamp()
+                self._touch_moved = False
+                self._long_press_pos = pos
+                self._long_press_timer.start()
+            ev.accept()
+
+        elif ev.type() == QEvent.Type.TouchUpdate:
+            self._touch_points = {p.id(): p.position() for p in points}
+
+            if touch_count == 1 and self._touch_start_pos is not None:
+                pos = points[0].position()
+                dx = pos.x() - self._touch_start_pos.x()
+                dy = pos.y() - self._touch_start_pos.y()
+                dist = (dx * dx + dy * dy) ** 0.5
+
+                # 超过 12px 视为移动，取消长按
+                if dist > 12.0 and not self._touch_moved:
+                    self._touch_moved = True
+                    self._long_press_timer.stop()
+                    # 模拟鼠标按下，启动工具交互
+                    wpt = self.to_world(pos)
+                    hit = self.pick(pos, tol_px=self._touch_tol())
+                    self.doc._arm_undo()
+                    if self.tool is not None:
+                        self.tool.press(self, wpt, hit)
+                elif self._touch_moved and self.tool is not None:
+                    wpt = self.to_world(pos)
+                    hit = self.pick(pos, tol_px=self._touch_tol())
+                    self.tool.move(self, wpt, hit)
+                    self.cursor_wpt = wpt
+                    self.update()
+            ev.accept()
+
+        elif ev.type() in (QEvent.Type.TouchEnd, QEvent.Type.TouchCancel):
+            self._long_press_timer.stop()
+
+            if touch_count <= 1 and self._touch_start_pos is not None:
+                if not self._touch_moved:
+                    # 未移动 → 视为点击
+                    pos = self._touch_start_pos
+                    elapsed = ev.timestamp() - self._touch_start_time
+                    if elapsed < 400:  # 短按 → 点击
+                        wpt = self.to_world(pos)
+                        hit = self.pick(pos, tol_px=self._touch_tol())
+                        self.doc._arm_undo()
+                        if self.tool is not None:
+                            self.tool.press(self, wpt, hit)
+                            self.tool.release(self, wpt, hit)
+                        self.doc._commit_undo_if_changed()
+                else:
+                    # 已移动 → 释放拖拽
+                    pos = points[0].position() if points else self._touch_start_pos
+                    wpt = self.to_world(pos)
+                    hit = self.pick(pos, tol_px=self._touch_tol())
+                    if self.tool is not None:
+                        self.tool.release(self, wpt, hit)
+                    self.doc._commit_undo_if_changed()
+
+            self._touch_start_pos = None
+            self._touch_moved = False
+            self._touch_points.clear()
+            if touch_count <= 1:
+                self._touch_mode = False
+            ev.accept()
+    def _touch_tol(self) -> float:
+        """触屏模式下增大命中容差（9px → 26px）。"""
+        return 26.0 if self._touch_mode else 9.0
+
+    def _on_long_press(self) -> None:
+        """长按 500ms → 触发右键上下文菜单。"""
+        if self._long_press_pos is None:
+            return
+        pos = self._long_press_pos
+        self._long_press_pos = None
+        # 构造一个等效的右键菜单事件位置
+        from PySide6.QtGui import QContextMenuEvent
+        ev_pos = pos.toPoint() if hasattr(pos, 'toPoint') else QPoint(int(pos.x()), int(pos.y()))
+        # 直接调用画布右键菜单逻辑
+        from PySide6.QtCore import QEvent as _QE
+        from PySide6.QtGui import QContextMenuEvent as _CME
+        ctx_ev = _CME(_CME.Reason.Mouse, ev_pos, self.mapToGlobal(ev_pos))
+        self.contextMenuEvent(ctx_ev)
+                               
     def paintEvent(self, ev) -> None:
         p = QPainter(self)
         try:
@@ -421,7 +593,9 @@ class Canvas(QWidget):
             x0, y0 = qpt.x() + dx * r, qpt.y() + dy * r
             p.drawLine(QPointF(x0, y0), QPointF(x0 - dx * tick, y0 - dy * tick))
 
-    def pick(self, screen_pt: QPointF, tol_px: float = 9.0):
+    def pick(self, screen_pt: QPointF, tol_px: float = None): # pyright: ignore[reportArgumentType]
+        if tol_px is None:
+            tol_px = self._touch_tol()
         wx, wy = self.to_world(screen_pt)
         tol = tol_px / self.scale
         best, best_d = None, tol
@@ -439,9 +613,12 @@ class Canvas(QWidget):
             self._origin_ready = True
 
     def resizeEvent(self, ev) -> None:
-        self.rail.move(14, 14)
+        # ★ 触屏模式：增大边距，避免误触
+        margin = 20 if self._touch_mode else 14
+        self.rail.move(margin, margin)
         zb = self.zoom_bar
-        zb.move(self.width() - zb.width() - 16, self.height() - zb.height() - 16)
+        zb.move(self.width() - zb.width() - margin,
+                self.height() - zb.height() - margin)
         self.info_panel.reposition()
         self._bg_cache = None
         if self._snow_active and not self._snowflakes:
@@ -505,16 +682,33 @@ class Canvas(QWidget):
     def keyPressEvent(self, ev) -> None:
         if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.doc.remove_selected()
-        elif ev.key() == Qt.Key.Key_Escape and self.tool is not None:
-            self.tool.cancel(self)
+        elif ev.key() == Qt.Key.Key_Escape:
+            # ★ 触屏优化：Escape 同时取消轨迹拾取
+            ctrl = getattr(self, "_anim_controller", None)
+            if ctrl is not None and ctrl.is_trail_picking:
+                ctrl.cancel_trail_picking()
+                self.cursor_info.emit("已取消轨迹拾取")
+                return
+            if self.tool is not None:
+                self.tool.cancel(self)
         else:
             super().keyPressEvent(ev)
 
     def _place_trash(self) -> None:
         sel = [o for o in self.doc.objects if o.selected]
-        if (len(sel) == 1 and isinstance(sel[0], AbstractPoint) and isinstance(self.tool, SelectTool)):
+        if (len(sel) == 1 and isinstance(sel[0], AbstractPoint)
+                and isinstance(self.tool, SelectTool)):
             qpt = self.to_screen(sel[0].x, sel[0].y)
-            self._trash.move(int(qpt.x()) + 12, int(qpt.y()) - 36)
+            # ★ 触屏模式：增大按钮尺寸和偏移
+            if self._touch_mode:
+                self._trash.setFixedSize(40, 40)
+                self._trash.setIconSize(QSize(22, 22))
+                offset_x, offset_y = 16, -50
+            else:
+                self._trash.setFixedSize(28, 28)
+                self._trash.setIconSize(QSize(15, 15))
+                offset_x, offset_y = 12, -36
+            self._trash.move(int(qpt.x()) + offset_x, int(qpt.y()) + offset_y)
             self._trash.show()
             self._trash.raise_()
         else:
