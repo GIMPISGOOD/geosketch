@@ -611,7 +611,7 @@ class Document(QObject):
         self.history_changed.emit()
 
     def _load_state(self, data):
-        """★ 整合约束 + 动画恢复。"""
+        """★ 整合约束 + 动画恢复。修复：拓扑排序防止 KeyError。"""
         vars_state = None
         if isinstance(data, dict):
             vars_state = data.get("vars")
@@ -626,6 +626,8 @@ class Document(QObject):
                 c_data = item["__constraints__"]
             elif isinstance(item, dict) and "__animations__" in item:
                 a_data = item["__animations__"]
+            elif isinstance(item, dict) and "__trail_config__" in item:
+                pass  # 旧格式兼容，静默忽略
             else:
                 geo_data.append(item)
 
@@ -636,31 +638,44 @@ class Document(QObject):
                 self.vars.load_dict(vars_state)
             finally:
                 self.vars.blockSignals(False)
-        # 恢复几何对象
-        # ★ 修复：清空命名注册表与类型缓存，防止旧对象残留
+
+        # ★ 修复：清空所有缓存，防止旧对象残留
         self.names.clear()
         self._name_counters.clear()
         self._type_cache.clear()
         self._type_cache_version = -1
-
         self.objects.clear()
         self.expr_objects.clear()
         self._mutation_count += 1
         self._objects_version += 1
+
+        # ★ 修复：多遍拓扑扫描重建对象
         pool = {}
         self._macro_suppress = True
         try:
-            for item in geo_data:
-                cls = GEO_REGISTRY[item["type"]]
-                parents = [pool[pid] for pid in item["parents"]]
-                obj = cls.build(parents, item["params"])
-                obj.id = item["id"]
-            obj.name = item.get("name", "")
-            obj.visible = item.get("visible", True)
-            pool[item["id"]] = self._add(obj)
-            # ★ 修复：恢复后重新注册名字，保证 names 字典与对象同步
-            if obj.name:
-                self.names[obj.name] = obj
+            remaining = list(geo_data)
+            max_passes = len(remaining) + 1
+            for _pass in range(max_passes):
+                if not remaining:
+                    break
+                next_remaining = []
+                for item in remaining:
+                    if all(pid in pool for pid in item["parents"]):
+                        cls = GEO_REGISTRY[item["type"]]
+                        parents = [pool[pid] for pid in item["parents"]]
+                        obj = cls.build(parents, item["params"])
+                        obj.id = item["id"]
+                        obj.name = item.get("name", "")
+                        obj.visible = item.get("visible", True)
+                        pool[item["id"]] = self._add(obj)
+                        if obj.name:
+                            self.names[obj.name] = obj
+                    else:
+                        next_remaining.append(item)
+                if len(next_remaining) == len(remaining):
+                    break  # 无法继续，跳过孤立项
+                remaining = next_remaining
+
             if geo_data:
                 GeoObject.bump_ids(max(item["id"] for item in geo_data))
         finally:
@@ -698,7 +713,6 @@ class Document(QObject):
         self._assign_point_labels()
         self.vars.update_bindings(self)
         self.changed.emit()
-
     # ──────────────────────────────────────────────────────
     #  保存 / 加载（★ 整合约束 + 动画文件级序列化）
     # ──────────────────────────────────────────────────────

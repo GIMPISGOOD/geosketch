@@ -383,8 +383,12 @@ class MainWindow(QMainWindow):
     def _new_document(self):
         """新建文档：停止动画 → 清空文档 → 重置 UI。"""
         # 1. 停止动画播放
+        # 1. 停止动画并重置控制器
         if hasattr(self, '_anim_controller'):
-            self._anim_controller.reset_for_new_document()
+            self._anim_controller.stop()
+            self._anim_controller.clip = None
+            self._anim_controller._current_time = 0.0
+            self._anim_controller._bound_version = -1
 
         # 2. 停止宏录制（如果正在录制）
         if hasattr(self, 'macro_manager') and self.macro_manager.is_recording():
