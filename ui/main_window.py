@@ -278,7 +278,7 @@ class MainWindow(QMainWindow):
         # ================= 1. 文件 =================
         fm = mb.addMenu("文件(&F)")
         for text, slot, key in (
-            ("新建(&N)", self.doc.clear, QKeySequence.StandardKey.New),
+            ("新建(&N)", self._new_document, QKeySequence.StandardKey.New),
             ("打开(&O)…", self._open, QKeySequence.StandardKey.Open),
             ("保存(&S)…", self._save, QKeySequence.StandardKey.Save),
         ):
@@ -411,6 +411,33 @@ class MainWindow(QMainWindow):
         from ui.script_library_manager import ScriptLibraryManager
         ScriptLibraryManager(self.doc, self).exec()
         
+    def _new_document(self):
+        """新建文档：停止动画 → 清空文档 → 重置 UI。"""
+        # 1. 停止动画播放
+        if hasattr(self, '_anim_controller'):
+            self._anim_controller.reset_for_new_document()
+
+        # 2. 停止宏录制（如果正在录制）
+        if hasattr(self, 'macro_manager') and self.macro_manager.is_recording():
+            self.macro_manager.toggle_recording()
+            self._update_macro_actions()
+
+        # 3. 清空文档（已修复的 clear）
+        self.doc.clear()
+
+        # 4. 重置窗口标题
+        self.setWindowTitle("GeoSketch · 几何画板")
+
+        # 5. 重置宏管理器状态
+        if hasattr(self, 'macro_manager'):
+            self.macro_manager.changed.emit()
+
+        # 6. 刷新函数面板
+        self.function_dock.refresh()
+
+        # 7. 更新雪花彩蛋状态
+        self.canvas.update_snow_state()    
+           
     def _show_help_gallery(self):
         """全屏显示帮助浏览视图。"""
         from ui.help_gallery import HelpGalleryWidget

@@ -316,10 +316,39 @@ class Document(QObject):
         if self.objects:
             self._push_undo()
         self._cleanup_temp_images()
+
+        # ★ 修复①：打破所有对象的双向依赖引用，防止循环引用阻止 GC
+        for obj in self.objects:
+            obj.parents.clear()
+            obj.children.clear()
+            obj.selected = False
+
+        # ★ 修复②：清空命名注册表，解除对旧对象的强引用
+        self.names.clear()
+        self._name_counters.clear()
+
+        # ★ 修复③：清空对象列表
         self.objects.clear()
         self.expr_objects.clear()
         self.constraints.clear()
+
+        # ★ 修复④：清空动画与轨迹配置
+        self.animations.clear()
+        if hasattr(self, '_trail_config'):
+            self._trail_config.clear()
+
+        # ★ 修复⑤：清空类型缓存，防止后续查询返回幽灵对象
+        self._type_cache.clear()
+        self._type_cache_version = -1
+
+        # ★ 修复⑥：递增 _mutation_count，强制画布渲染缓存失效
+        self._mutation_count += 1
         self._objects_version += 1
+
+        # ★ 修复⑦：清空剪贴板与待处理的撤销快照
+        self._clipboard = None
+        self._pending = None
+
         if not getattr(self, "_macro_suppress", False):
             self.cleared.emit()
         self._assign_point_labels()

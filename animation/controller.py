@@ -203,7 +203,17 @@ class AnimationController(QObject):
             self._timer.stop()
             self._playing = False
             self.stopped.emit()
-
+            
+    def reset_for_new_document(self):
+        """新建文档时彻底重置控制器状态。"""
+        self.stop()
+        self.clip = None
+        self._current_time = 0.0
+        self._bound_version = -1
+        self.clear_trails()
+        self._trail_picking = False
+        self._trail_recording = False
+        
     def stop(self) -> None:
         self._timer.stop()
         self._playing = False

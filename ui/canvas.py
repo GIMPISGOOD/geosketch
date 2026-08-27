@@ -39,6 +39,7 @@ class Canvas(QWidget):
         super().__init__(parent)
         self.doc = doc
         doc.changed.connect(self.update)
+        doc.cleared.connect(self._on_doc_cleared)  
         self.scale = BASE_SCALE
         self.origin = QPointF(0.0, 0.0)
         self._origin_ready = False
@@ -93,7 +94,39 @@ class Canvas(QWidget):
                 obj.update_cache(segments, store.version, domain)
                 self.update()
                 break
+            
+    def _on_doc_cleared(self):
+        """文档清空时，重置画布侧所有缓存与交互状态。"""
+        # 强制渲染列表失效
+        self._render_list.clear()
+        self._render_list_version = -1
 
+        # 清除磁吸目标（可能指向已销毁的旧对象）
+        self.snap_target = None
+
+        # 如果当前工具持有临时状态，取消之
+        if self.tool is not None:
+            try:
+                self.tool.cancel(self)
+            except Exception:
+                pass
+
+        # 停止动画轨迹绘制
+        ctrl = getattr(self, "_anim_controller", None)
+        if ctrl is not None:
+            ctrl.stop()
+            ctrl.clear_trails()
+            ctrl.clip = None
+            ctrl._bound_version = -1
+
+        # 隐藏垃圾桶按钮
+        self._trash.hide()
+
+        # 重置背景缓存
+        self._bg_cache = None
+
+        self.update()
+        
     def _on_function_sampled(self, curve_id, points):
         from geo.function_curve import FunctionCurve
         from core.variables import get_store
