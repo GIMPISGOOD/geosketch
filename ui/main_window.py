@@ -81,12 +81,8 @@ class MainWindow(QMainWindow):
             pass
 
 
-# ui/main_window.py 修复片段
-
-# ui/main_window.py 中替换 _build_animation_menu 方法，并新增两个方法
-
     def _build_animation_menu(self):
-        """原生构建动画菜单（含轨迹功能）。"""
+        """原生构建动画菜单（★ 轨迹已移至插件）。"""
         try:
             from animation.controller import AnimationController
             from animation.ui.timeline import TimelineDock
@@ -107,34 +103,17 @@ class MainWindow(QMainWindow):
 
             am.addSeparator()
 
-            # ★ 修复：补全轨迹菜单
-            trail_act = QAction("🎯 显示轨迹…", self)
-            trail_act.setShortcut(QKeySequence("Ctrl+Shift+T"))
-            trail_act.triggered.connect(self._anim_pick_trail)
-            am.addAction(trail_act)
-
-            clear_trail_act = QAction("🗑 清除轨迹", self)
-            clear_trail_act.triggered.connect(self._anim_clear_trails)
-            am.addAction(clear_trail_act)
-
-            am.addSeparator()
-
             timeline_act = QAction("时间轴面板", self)
             timeline_act.triggered.connect(self._anim_toggle_timeline)
             am.addAction(timeline_act)
 
             self._anim_controller = AnimationController(self.doc, self.canvas)
-
-
-            self.canvas._anim_controller = self._anim_controller
-
             self._timeline_dock = TimelineDock(
                 self._anim_controller, self.canvas, self)
             self.addDockWidget(
                 Qt.DockWidgetArea.BottomDockWidgetArea,
                 self._timeline_dock)
             self._timeline_dock.setVisible(False)
-
         except Exception:
             import traceback
             traceback.print_exc()
@@ -152,18 +131,6 @@ class MainWindow(QMainWindow):
             self._timeline_dock.setVisible(
                 not self._timeline_dock.isVisible())
 
-    # ★ 修复：补全缺失的轨迹交互方法
-    def _anim_pick_trail(self):
-        """进入轨迹选点模式"""
-        if hasattr(self, '_anim_controller'):
-            self._anim_controller.start_trail_picking()
-
-    def _anim_clear_trails(self):
-        """清除所有轨迹"""
-        if hasattr(self, '_anim_controller'):
-            self._anim_controller.clear_trails()
-            self.canvas.update()
-                
     def _create_tool_actions(self) -> None:
         for spec in TOOL_REGISTRY:
             act = QAction(spec["name"], self, checkable=True)

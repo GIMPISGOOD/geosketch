@@ -111,7 +111,6 @@ class Canvas(QWidget):
         self._implicit_sampler = get_implicit_sampler()
         self._implicit_sampler.sampled.connect(self._on_implicit_sampled)
         self._egg_data = None 
-        self._anim_controller : Any = None  # 由 MainWindow 设置
 
     def _on_implicit_sampled(self, curve_id, segments):
         from geo.implicit_curve import ImplicitCurve
@@ -389,9 +388,6 @@ class Canvas(QWidget):
                 finally:
                     p.restore()
 
-            # ★ 绘制动画轨迹
-            self._draw_trails(p)
-
             # 约束参考线覆盖层
             if hasattr(self.doc, 'constraints') and self.doc.constraints:
                 p.save()
@@ -431,36 +427,6 @@ class Canvas(QWidget):
         finally:
             p.end()
         self._place_trash()
-
-# 替换 Canvas._draw_trails 方法
-
-    def _draw_trails(self, p: QPainter) -> None:
-        """绘制动画轨迹（含降采样优化）。"""
-        controller = getattr(self, "_anim_controller", None)
-        if controller is None:
-            return
-        if not controller.trails:
-            return
-        from PySide6.QtGui import QPainterPath
-        for trail in controller.trails:
-            # ★ 性能优化：超过 200 点时降采样
-            pts = trail.points
-            if len(pts) > 200:
-                pts = trail.simplified(tolerance=1.5)
-            if len(pts) < 2:
-                continue
-            p.setPen(theme.pen(trail.color, 1.8))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            path = QPainterPath()
-            sp0 = self.to_screen(pts[0][0], pts[0][1])
-            path.moveTo(sp0)
-            for x, y in pts[1:]:
-                path.lineTo(self.to_screen(x, y))
-            p.drawPath(path)
-            last = self.to_screen(pts[-1][0], pts[-1][1])
-            p.setPen(Qt.PenStyle.NoPen)
-            p.setBrush(theme.brush(trail.color))
-            p.drawEllipse(last, 3.0, 3.0)
 
     def _get_render_list(self):
         ver = self.doc._mutation_count
@@ -630,12 +596,6 @@ class Canvas(QWidget):
             self._pan_anchor = ev.position() - self.origin
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        if ev.button() == Qt.MouseButton.LeftButton:
-            ctrl = getattr(self, "_anim_controller", None)
-            if ctrl is not None and ctrl.is_trail_picking:
-                hit = self.pick(ev.position())
-                if ctrl.try_pick_trail(hit):
-                    return  # 消费掉这次点击
         if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
             self.doc._arm_undo()
             self.tool.press(self, self.to_world(ev.position()), self.pick(ev.position()))

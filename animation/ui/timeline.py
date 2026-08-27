@@ -60,27 +60,6 @@ class TimelineDock(QDockWidget):
         self._time_slider.setValue(0)
         layout.addWidget(self._time_slider)
 
-        # ★ 修复：添加轨迹管理行
-        trail_row = QHBoxLayout()
-        trail_row.addWidget(QLabel("轨迹:"))
-        self._trail_record_btn = QPushButton("● 录制轨迹")
-        self._trail_record_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._trail_record_btn.setToolTip(
-            "开启后，播放时记录点的运动轨迹")
-        trail_row.addWidget(self._trail_record_btn)
-
-        self._trail_add_btn = QPushButton("🎯 添加轨迹点")
-        self._trail_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._trail_add_btn.setToolTip("点击画布上的点以添加轨迹")
-        trail_row.addWidget(self._trail_add_btn)
-
-        self._trail_clear_btn = QPushButton("🗑 清除")
-        self._trail_clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        trail_row.addWidget(self._trail_clear_btn)
-
-        trail_row.addStretch(1)
-        layout.addLayout(trail_row)
-
         track_row = QHBoxLayout()
         track_row.addWidget(QLabel("轨道列表:"))
         add_btn = QPushButton("＋ 添加轨道")
@@ -120,28 +99,6 @@ class TimelineDock(QDockWidget):
         self.controller.started.connect(self._on_started)
         self.controller.stopped.connect(self._on_stopped)
 
-        # ★ 新增：轨迹按钮信号
-        self._trail_record_btn.clicked.connect(self._on_toggle_trail_record)
-        self._trail_add_btn.clicked.connect(self._on_add_trail_point)
-        self._trail_clear_btn.clicked.connect(self._on_clear_trails)
-
-    # ★ 新增：轨迹管理方法
-    def _on_toggle_trail_record(self):
-        recording = self.controller.toggle_trail_recording()
-        if recording:
-            self._trail_record_btn.setText("■ 停止录制")
-            self._trail_record_btn.setStyleSheet(
-                "color: #e03131; font-weight: bold;")
-        else:
-            self._trail_record_btn.setText("● 录制轨迹")
-            self._trail_record_btn.setStyleSheet("")
-
-    def _on_add_trail_point(self):
-        self.controller.start_trail_picking()
-
-    def _on_clear_trails(self):
-        self.controller.clear_trails()
-        self.canvas.update()
 
     def _on_play(self):
         if self.controller.is_playing:

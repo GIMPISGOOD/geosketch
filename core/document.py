@@ -70,7 +70,7 @@ class Document(QObject):
         self.constraints = []
         # ★ 动画系统（原 animation/serialization）
         self.animations = []
-        self._trail_config: list = []
+
 
     # ──────────────────────────────────────────────────────
     #  临时图片管理
@@ -350,11 +350,6 @@ class Document(QObject):
         self.expr_objects.clear()
         self.constraints.clear()
 
-        # ★ 修复④：清空动画与轨迹配置
-        self.animations.clear()
-        if hasattr(self, '_trail_config'):
-            self._trail_config.clear()
-
         # ★ 修复⑤：清空类型缓存，防止后续查询返回幽灵对象
         self._type_cache.clear()
         self._type_cache_version = -1
@@ -528,8 +523,7 @@ class Document(QObject):
                     pass
             if a_data:
                 data.append({"__animations__": a_data})
-        if hasattr(self, '_trail_config') and self._trail_config:
-            data.append({"__trail_config__": self._trail_config})
+
         return data
 
     def _full_state(self):
