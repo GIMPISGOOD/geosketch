@@ -34,8 +34,6 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(self.canvas)  
         # ★ 触屏优化：全局启用触摸合成与手势
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
-        QApplication.setAttribute(Qt.AA_SynthesizeTouchForMouseEvent, False) # type: ignore[attr-defined]
-        QApplication.setAttribute(Qt.AA_SynthesizeMouseForTouchEvent, False)  # type: ignore[attr-defined]
         # ★ 宏系统
         from core.macro import MacroManager, set_macro_manager
 
