@@ -233,22 +233,40 @@ class Document(QObject):
             return
         self.begin_action()
         id_map, new_objs = {}, []
-        for item in self._clipboard:
-            cls = GEO_REGISTRY[item["type"]]
-            parents = [id_map[pid] for pid in item["parents"]]
-            obj = cls.build(parents, item["params"])
-            obj.name = ""
-            if isinstance(obj, FreePoint):
-                obj.x += offset[0]
-                obj.y += offset[1]
-            id_map[item["id"]] = obj
-            self._add(obj)
-            new_objs.append(obj)
+        try:
+            for item in self._clipboard:
+                type_name = item["type"]
+                cls = GEO_REGISTRY.get(type_name)
+                if cls is None:
+                    continue
+                # ★ 修复：安全获取父对象，跳过缺失依赖的项
+                parents = []
+                skip = False
+                for pid in item["parents"]:
+                    p = id_map.get(pid)
+                    if p is None:
+                        skip = True
+                        break
+                    parents.append(p)
+                if skip:
+                    continue
+                obj = cls.build(parents, item["params"])
+                obj.name = ""
+                if isinstance(obj, FreePoint):
+                    obj.x += offset[0]
+                    obj.y += offset[1]
+                id_map[item["id"]] = obj
+                self._add(obj)
+                new_objs.append(obj)
+        except Exception:
+            # ★ 修复：粘贴过程中任何异常不应导致文档状态损坏
+            pass
+        finally:
+            self.end_action()
         for o in self.objects:
             o.selected = False
         for o in new_objs:
             o.selected = True
-        self.end_action()
         self.vars.update_bindings(self)
         self.changed.emit()
 
@@ -624,10 +642,16 @@ class Document(QObject):
                 self.vars.load_dict(vars_state)
             finally:
                 self.vars.blockSignals(False)
-
         # 恢复几何对象
+        # ★ 修复：清空命名注册表与类型缓存，防止旧对象残留
+        self.names.clear()
+        self._name_counters.clear()
+        self._type_cache.clear()
+        self._type_cache_version = -1
+
         self.objects.clear()
         self.expr_objects.clear()
+        self._mutation_count += 1
         self._objects_version += 1
         pool = {}
         self._macro_suppress = True
@@ -637,9 +661,12 @@ class Document(QObject):
                 parents = [pool[pid] for pid in item["parents"]]
                 obj = cls.build(parents, item["params"])
                 obj.id = item["id"]
-                obj.name = item.get("name", "")
-                obj.visible = item.get("visible", True)
-                pool[item["id"]] = self._add(obj)
+            obj.name = item.get("name", "")
+            obj.visible = item.get("visible", True)
+            pool[item["id"]] = self._add(obj)
+            # ★ 修复：恢复后重新注册名字，保证 names 字典与对象同步
+            if obj.name:
+                self.names[obj.name] = obj
             if geo_data:
                 GeoObject.bump_ids(max(item["id"] for item in geo_data))
         finally:

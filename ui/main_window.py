@@ -526,15 +526,50 @@ class MainWindow(QMainWindow):
         self._redo_act.setEnabled(self.doc.can_redo)
 
     def _open(self) -> None:
+        # ★ 修复：打开前检查是否有未保存的更改
+        if self.doc.objects and not self._confirm_discard():
+            return
+
         path, _ = QFileDialog.getOpenFileName(
             self, "打开", "", "GeoSketch 文件 (*.wgeo)")
         if path:
+            # ★ 修复：打开前停止动画与宏录制
+            if hasattr(self, '_anim_controller'):
+                self._anim_controller.stop()
+            if hasattr(self, 'macro_manager') and self.macro_manager.is_recording():
+                self.macro_manager.toggle_recording()
+                self._update_macro_actions()
+
             self.doc.load(path)
             self.canvas.update_snow_state()
-
+            self.setWindowTitle(
+                f"{os.path.basename(path)} — GeoSketch")
             # ★ 刷新宏菜单
             if hasattr(self, "macro_manager"):
                 self.macro_manager.changed.emit()
+
+    def _confirm_discard(self) -> bool:
+        """★ 新增：询问用户是否放弃当前未保存的更改。
+        返回 True 表示可以继续（丢弃或已保存），False 表示取消操作。
+        """
+        if not self.doc.objects:
+            return True
+        reply = QMessageBox.question(
+            self,
+            "未保存的更改",
+            "当前文档包含未保存的更改。\n是否放弃并继续？",
+            QMessageBox.StandardButton.Yes |
+            QMessageBox.StandardButton.No |
+            QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            return True
+        if reply == QMessageBox.StandardButton.No:
+            # 先保存再继续
+            self._save()
+            return True
+        return False  # Cancel
                 
     # ================= 宏系统 =================
 
