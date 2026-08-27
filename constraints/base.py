@@ -83,14 +83,28 @@ class GeometricConstraint:
             finally:
                 p.y = old_y
 
-            if isinstance(p, FreePoint):
-                if id(p) in vars_map:
-                    idx = vars_map[id(p)]
-                    for i in range(n_res):
-                        jac[i][idx * 2] = dC_dpx[i]
-                        jac[i][idx * 2 + 1] = dC_dpy[i]
+        if isinstance(p, FreePoint):
+            if id(p) in vars_map:
+                idx = vars_map[id(p)]
+                for i in range(n_res):
+                    jac[i][idx * 2] = dC_dpx[i]
+                    jac[i][idx * 2 + 1] = dC_dpy[i]
+        else:
+            # ★ 修复：对 IntersectPoint，dC_dpx/dC_dpy 通过扰动从动点坐标
+            # 获得，但链式法则需要的是"自由点移动 → 从动点移动 → 残差变化"。
+            # get_coordinate_derivatives 现在对 IntersectPoint 返回正确的
+            # 解析偏导（隐函数定理），所以此处逻辑不变。
+            derivs = get_coordinate_derivatives(p)
+            if not derivs:
+                # 回退：直接数值差分（扰动从动点坐标）
+                for fp_id, d_matrix in _numeric_chain_fallback(
+                        self, p, vars_map, n_res).items():
+                    if fp_id in vars_map:
+                        idx = vars_map[fp_id]
+                        for i in range(n_res):
+                            jac[i][idx * 2] += d_matrix[0]
+                            jac[i][idx * 2 + 1] += d_matrix[1]
             else:
-                derivs = get_coordinate_derivatives(p)
                 for fp_id, d_matrix in derivs.items():
                     if fp_id in vars_map:
                         idx = vars_map[fp_id]
@@ -145,3 +159,98 @@ def register_constraint(name: str):
         CONSTRAINT_REGISTRY[name] = cls
         return cls
     return deco
+
+def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
+    """数值回退：直接扰动自由点，观察残差变化。"""
+    from geo.points import FreePoint
+    result = {}
+    eps = 1e-7
+
+    # 找到所有相关的自由点
+    free_ids = set(vars_map.keys())
+    for parent in dep_point.parents:
+        for fp in _collect_free_from(parent):
+            if id(fp) in free_ids and id(fp) not in result:
+                result[id(fp)] = [0.0] * (2 * n_res)
+
+    for fp_id, acc in result.items():
+        # 找到对应的 FreePoint 对象
+        fp = None
+        for parent in dep_point.parents:
+            for p in _collect_free_from(parent):
+                if id(p) == fp_id:
+                    fp = p
+                    break
+        if fp is None:
+            continue
+
+        old_x, old_y = fp.x, fp.y
+        # +x
+        fp.x = old_x + eps
+        try:
+            dep_point.recompute()
+            r_px = constraint.residual()
+        except Exception:
+            r_px = [0.0] * n_res
+        # -x
+        fp.x = old_x - eps
+        try:
+            dep_point.recompute()
+            r_mx = constraint.residual()
+        except Exception:
+            r_mx = [0.0] * n_res
+        fp.x = old_x
+
+        # +y
+        fp.y = old_y + eps
+        try:
+            dep_point.recompute()
+            r_py = constraint.residual()
+        except Exception:
+            r_py = [0.0] * n_res
+        # -y
+        fp.y = old_y - eps
+        try:
+            dep_point.recompute()
+            r_my = constraint.residual()
+        except Exception:
+            r_my = [0.0] * n_res
+        fp.y = old_y
+
+        try:
+            dep_point.recompute()
+        except Exception:
+            pass
+
+        for i in range(n_res):
+            acc[2 * i] = (r_px[i] - r_mx[i]) / (2 * eps)
+            acc[2 * i + 1] = (r_py[i] - r_my[i]) / (2 * eps)
+
+    # 转换为元组格式
+    return {k: tuple(v) for k, v in result.items()}
+
+
+def _collect_free_from(obj):
+    """从几何对象中收集自由点。"""
+    from geo.points import FreePoint
+    pts = []
+    if isinstance(obj, FreePoint):
+        pts.append(obj)
+    elif hasattr(obj, 'a') and hasattr(obj, 'b'):
+        for attr in ('a', 'b'):
+            p = getattr(obj, attr)
+            if isinstance(p, FreePoint):
+                pts.append(p)
+    elif hasattr(obj, 'center'):
+        c = obj.center
+        if isinstance(c, FreePoint):
+            pts.append(c)
+        t = getattr(obj, 'through', None)
+        if t is not None and isinstance(t, FreePoint):
+            pts.append(t)
+    elif hasattr(obj, 'origin') and hasattr(obj, 'through'):
+        for attr in ('origin', 'through'):
+            p = getattr(obj, attr)
+            if isinstance(p, FreePoint):
+                pts.append(p)
+    return pts
