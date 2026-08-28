@@ -41,16 +41,13 @@ class GeometricConstraint:
     def _chain_rule_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
         from geo.points import FreePoint
         from .chain_rule import get_coordinate_derivatives
-
         n_cols = 2 * len(vars_map)
         pts = self.involved_points()
-
         try:
             r = self.residual()
             n_res = len(r)
         except Exception:
             return []
-
         jac = [[0.0] * n_cols for _ in range(n_res)]
         eps = 1e-7
 
@@ -83,35 +80,37 @@ class GeometricConstraint:
             finally:
                 p.y = old_y
 
-        if isinstance(p, FreePoint):
-            if id(p) in vars_map:
+            if isinstance(p, FreePoint):
+                if id(p) in vars_map:
+                    idx = vars_map[id(p)]
+                    for i in range(n_res):
+                        jac[i][idx * 2] = dC_dpx[i]
+                        jac[i][idx * 2 + 1] = dC_dpy[i]
+
+            elif id(p) in vars_map:
+                # ★ 修复：从动点本身在优化变量中，直接使用数值偏导
                 idx = vars_map[id(p)]
                 for i in range(n_res):
                     jac[i][idx * 2] = dC_dpx[i]
                     jac[i][idx * 2 + 1] = dC_dpy[i]
-        else:
-            # ★ 修复：对 IntersectPoint，dC_dpx/dC_dpy 通过扰动从动点坐标
-            # 获得，但链式法则需要的是"自由点移动 → 从动点移动 → 残差变化"。
-            # get_coordinate_derivatives 现在对 IntersectPoint 返回正确的
-            # 解析偏导（隐函数定理），所以此处逻辑不变。
-            derivs = get_coordinate_derivatives(p)
-            if not derivs:
-                # 回退：直接数值差分（扰动从动点坐标）
-                for fp_id, d_matrix in _numeric_chain_fallback(
-                        self, p, vars_map, n_res).items():
-                    if fp_id in vars_map:
-                        idx = vars_map[fp_id]
-                        for i in range(n_res):
-                            jac[i][idx * 2] += d_matrix[0]
-                            jac[i][idx * 2 + 1] += d_matrix[1]
-            else:
-                for fp_id, d_matrix in derivs.items():
-                    if fp_id in vars_map:
-                        idx = vars_map[fp_id]
-                        for i in range(n_res):
-                            jac[i][idx * 2] += dC_dpx[i] * d_matrix[0] + dC_dpy[i] * d_matrix[2]
-                            jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] + dC_dpy[i] * d_matrix[3]
 
+            else:
+                derivs = get_coordinate_derivatives(p)
+                if not derivs:
+                    for fp_id, d_matrix in _numeric_chain_fallback(
+                            self, p, vars_map, n_res).items():
+                        if fp_id in vars_map:
+                            idx = vars_map[fp_id]
+                            for i in range(n_res):
+                                jac[i][idx * 2] += d_matrix[0]
+                                jac[i][idx * 2 + 1] += d_matrix[1]
+                else:
+                    for fp_id, d_matrix in derivs.items():
+                        if fp_id in vars_map:
+                            idx = vars_map[fp_id]
+                            for i in range(n_res):
+                                jac[i][idx * 2] += dC_dpx[i] * d_matrix[0] + dC_dpy[i] * d_matrix[2]
+                                jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] + dC_dpy[i] * d_matrix[3]
         return jac
 
     def _numeric_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:

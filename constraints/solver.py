@@ -28,10 +28,7 @@ def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
 
 
 class ConstraintSolver:
-    """LM 求解器。
-    quick=True 时降低迭代次数和精度，用于拖动帧。
-    quick=False 时完整精度，用于松手后收敛。
-    """
+    """LM 求解器。"""
 
     def __init__(self, max_iter=50, tol=1e-9):
         self.max_iter = max_iter
@@ -73,7 +70,6 @@ class ConstraintSolver:
             norm = math.sqrt(sum(f * f for f in F))
             if norm < self.tol:
                 return True
-
             if no_improve >= 5:
                 return norm < 1e-3
 
@@ -96,16 +92,27 @@ class ConstraintSolver:
                     return False
                 continue
 
-            old_coords = [(p.x, p.y) for p in free_points]
+            # ★ 修复：保存旧坐标（含从动点参数 t）
+            old_coords = []
+            for p in free_points:
+                if hasattr(p, 't'):
+                    old_coords.append((p.x, p.y, p.t))
+                else:
+                    old_coords.append((p.x, p.y, None))
+
             for i, p in enumerate(free_points):
                 p.x += delta[2 * i]
                 p.y += delta[2 * i + 1]
+                # ★ 修复：吸附点投影回宿主曲线
+                if hasattr(p, 'host') and hasattr(p, 't'):
+                    p.t = p.host.project(p.x, p.y)
+                    p.x, p.y = p.host.point_at(p.t)
 
             new_F = []
             for c in valid:
                 try:
                     new_F.extend(c.residual())
-                except:
+                except Exception:
                     continue
             new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
 
@@ -115,8 +122,11 @@ class ConstraintSolver:
                 if new_norm < self.tol:
                     return True
             else:
+                # ★ 修复：回退时同时恢复 t
                 for i, p in enumerate(free_points):
-                    p.x, p.y = old_coords[i]
+                    p.x, p.y = old_coords[i][0], old_coords[i][1]
+                    if old_coords[i][2] is not None:
+                        p.t = old_coords[i][2]
                 lam *= lam_up
                 no_improve += 1
                 if lam > 1e10:

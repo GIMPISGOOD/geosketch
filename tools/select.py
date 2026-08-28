@@ -198,7 +198,8 @@ class SelectTool(Tool):
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
-        # ★ 拖动时触发约束求解（修复：拖动点钉死，其余自由点由求解器驱动）
+    # ★ 拖动时触发约束求解
+    # 修复：钉住被拖动的点，让求解器驱动其余自由点/从动点
         doc = canvas.doc
         if hasattr(doc, 'constraints') and doc.constraints:
             dragged = set()
@@ -211,9 +212,9 @@ class SelectTool(Tool):
             if dragged:
                 try:
                     doc.solve_constraints(
-                        trigger_points=list(dragged),
-                        pinned_points=list(dragged),   # ← 修复：钉住被拖动的点
-                        quick=True,
+                    trigger_points=list(dragged),
+                    pinned_points=list(dragged),
+                    quick=True,
                     )
                 except Exception:
                     pass
@@ -260,7 +261,7 @@ class SelectTool(Tool):
                 if dragged:
                     doc.solve_constraints(
                         trigger_points=list(dragged),
-                        pinned_points=list(dragged),   # ← 修复：同上
+                        pinned_points=list(dragged),
                         quick=False,
                     )
                 else:

@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Signal
 
 from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
-from geo.points import FreePoint, AbstractPoint, _index_to_letters, _index_to_subscript
+from geo.points import FreePoint, AbstractPoint, PointOnObject ,_index_to_letters, _index_to_subscript
 from core.variables import get_store
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
@@ -465,14 +465,21 @@ class Document(QObject):
             affected = [c for c in self.constraints if c.enabled]
         if not affected:
             return True
+
         pinned_set = set(pinned_points or [])
         free_set = set()
         for c in affected:
             for p in c.involved_points():
-                if isinstance(p, FreePoint) and p not in pinned_set:
+                if p in pinned_set:
+                    continue
+                if isinstance(p, FreePoint):
                     free_set.add(p)
+                elif isinstance(p, PointOnObject):
+                    free_set.add(p)
+
         if not free_set:
             return True
+
         if quick:
             solver = ConstraintSolver(max_iter=12, tol=1e-6)
         else:
