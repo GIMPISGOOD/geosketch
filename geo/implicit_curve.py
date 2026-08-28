@@ -9,7 +9,7 @@ import math
 from typing import List, Tuple, Optional
 
 from PySide6.QtCore import QPointF, Qt
-from PySide6.QtGui import QPainterPath
+from PySide6.QtGui import QPainterPath, QPen, QColor
 
 from core.registry import register_geo, register_renderer
 from core.variables import evaluate, get_store
@@ -146,11 +146,17 @@ class ImplicitCurve(GeoObject):
 
     # ── 渲染路径缓存 ────────────────────────────────────
 
+
     def _invalidate_path(self):
         self._path = None
         self._path_seg_count = -1
 
-    def get_path(self, view) -> Optional[QPainterPath]:
+    def get_world_path(self) -> Optional[QPainterPath]:
+        """获取世界坐标渲染路径（带缓存）。
+
+        路径中存储世界坐标，不受画布缩放/平移影响。
+        仅在 _segments 数据变化时重建。
+        """
         if (self._path is not None
                 and self._path_seg_count == len(self._segments)):
             return self._path
@@ -158,10 +164,8 @@ class ImplicitCurve(GeoObject):
             return None
         path = QPainterPath()
         for x1, y1, x2, y2 in self._segments:
-            sp1 = view.to_screen(x1, y1)
-            sp2 = view.to_screen(x2, y2)
-            path.moveTo(sp1)
-            path.lineTo(sp2)
+            path.moveTo(x1, y1)       # ← 世界坐标
+            path.lineTo(x2, y2)
         self._path = path
         self._path_seg_count = len(self._segments)
         return path
@@ -221,9 +225,21 @@ def draw_implicit(p, obj, view):
     obj.ensure_fresh(view)
     if not obj.exists or not obj._segments:
         return
+
+    world_path = obj.get_world_path()
+    if world_path is None or world_path.elementCount() == 0:
+        return
+
     color = theme.SELECTED if obj.selected else obj.color
-    p.setPen(theme.pen(color, 2.0))
+
+    p.save()
+    p.translate(view.origin.x(), view.origin.y())
+    p.scale(view.scale, -view.scale)
+
+    pen = QPen(QColor(color))
+    pen.setWidthF(2.0)
+    pen.setCosmetic(True)
+    p.setPen(pen)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    path = obj.get_path(view)
-    if path is not None and path.elementCount() > 0:
-        p.drawPath(path)
+    p.drawPath(world_path)
+    p.restore()
