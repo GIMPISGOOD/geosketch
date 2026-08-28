@@ -1,39 +1,28 @@
-"""Levenberg-Marquardt 约束求解器。纯 Python，无外部依赖。"""
-import math
+"""Levenberg-Marquardt 约束求解器。NumPy 向量化实现。"""
+
+from numpy import asarray, concatenate, vstack, float64, diag_indices
+from numpy.linalg import solve as np_solve, norm as np_norm, LinAlgError
 from typing import List, Any, Dict
+
 from .base import GeometricConstraint
 
 
-def _solve_linear(A: List[List[float]], b: List[float]) -> List[float]:
-    n = len(b)
-    if n == 0:
-        return []
-    M = [row[:] + [b[i]] for i, row in enumerate(A)]
-    for col in range(n):
-        pivot = max(range(col, n), key=lambda r: abs(M[r][col]))
-        if abs(M[pivot][col]) < 1e-15:
-            return None
-        M[col], M[pivot] = M[pivot], M[col]
-        for row in range(col + 1, n):
-            f = M[row][col] / M[col][col]
-            for j in range(col, n + 1):
-                M[row][j] -= f * M[col][j]
-    x = [0.0] * n
-    for i in range(n - 1, -1, -1):
-        x[i] = M[i][n]
-        for j in range(i + 1, n):
-            x[i] -= M[i][j] * x[j]
-        x[i] /= M[i][i]
-    return x
-
-
 class ConstraintSolver:
-    """LM 求解器。"""
+    """LM 非线性最小二乘求解器（NumPy 向量化）。
 
-    def __init__(self, max_iter=50, tol=1e-9):
+    参数
+    ----
+    max_iter : int
+        最大迭代次数（quick 模式 12，精确模式 50）。
+    tol : float
+        残差范数收敛阈值。
+    """
+
+    def __init__(self, max_iter: int = 50, tol: float = 1e-9):
         self.max_iter = max_iter
         self.tol = tol
 
+    # ------------------------------------------------------------------
     def solve(self, constraints: List[GeometricConstraint],
               free_points: List[Any], pinned_points: List[Any]) -> bool:
         valid = [c for c in constraints if c.enabled]
@@ -42,57 +31,62 @@ class ConstraintSolver:
 
         vars_map: Dict[int, int] = {id(p): i for i, p in enumerate(free_points)}
         n_vars = 2 * len(free_points)
+
         lam = 1e-3
         lam_up, lam_down = 10.0, 0.1
         no_improve = 0
 
         for _ in range(self.max_iter):
-            F: List[float] = []
-            J: List[List[float]] = []
+            # ── 1. 组装残差向量 F 与雅可比矩阵 J ──
+            F_parts: list = []
+            J_parts: list = []
+
             for c in valid:
                 try:
                     r = c.residual()
                     jac = c.jacobian(vars_map)
-                    if not isinstance(r, list) or not isinstance(jac, list):
+                    if r is None or jac is None:
                         continue
-                    if len(r) != len(jac):
+                    r_arr = asarray(r, dtype=float64).ravel()
+                    J_arr = asarray(jac, dtype=float64)
+                    if J_arr.ndim == 1:
+                        J_arr = J_arr.reshape(len(r_arr), -1)
+                    if J_arr.shape[0] != len(r_arr) or J_arr.shape[1] != n_vars:
                         continue
-                    if len(jac) > 0 and len(jac[0]) != n_vars:
-                        continue
-                    F.extend(r)
-                    J.extend(jac)
+                    F_parts.append(r_arr)
+                    J_parts.append(J_arr)
                 except Exception:
                     continue
 
-            if not F:
+            if not F_parts:
                 return True
 
-            norm = math.sqrt(sum(f * f for f in F))
-            if norm < self.tol:
+            F = concatenate(F_parts)       # (m,)
+            J = vstack(J_parts)            # (m, n_vars)
+
+            # ── 2. 收敛判定 ──
+            norm_val = float(np_norm(F))
+            if norm_val < self.tol:
                 return True
             if no_improve >= 5:
-                return norm < 1e-3
+                return norm_val < 1e-3
 
-            JtJ = [[0.0] * n_vars for _ in range(n_vars)]
-            JtF = [0.0] * n_vars
-            for i in range(len(F)):
-                for j in range(n_vars):
-                    JtF[j] += J[i][j] * F[i]
-                    for k in range(n_vars):
-                        JtJ[j][k] += J[i][j] * J[i][k]
+            # ── 3. 正规方程 (JᵀJ + λI)δ = −JᵀF ──
+            JtJ = J.T @ J                  # (n_vars, n_vars)
+            JtF = J.T @ F                  # (n_vars,)
+            JtJ[diag_indices(n_vars)] += lam
 
-            for i in range(n_vars):
-                JtJ[i][i] += lam
-
-            delta = _solve_linear(JtJ, [-f for f in JtF])
-            if delta is None:
+            try:
+                delta = np_solve(JtJ, -JtF)
+            except LinAlgError:
                 lam *= lam_up
                 no_improve += 1
                 if lam > 1e10:
                     return False
                 continue
 
-            old_coords = []
+            # ── 4. 保存旧状态 & 应用步长 ──
+            old_coords: list = []
             for p in free_points:
                 if hasattr(p, 't') and hasattr(p, 'host'):
                     old_coords.append((p.x, p.y, p.t))
@@ -100,28 +94,29 @@ class ConstraintSolver:
                     old_coords.append((p.x, p.y, None))
 
             for i, p in enumerate(free_points):
-                p.x += delta[2 * i]
-                p.y += delta[2 * i + 1]
-                # ★ 修复：吸附点投影回宿主曲线
+                p.x += float(delta[2 * i])
+                p.y += float(delta[2 * i + 1])
                 if hasattr(p, 'host') and hasattr(p, 't'):
                     p.t = p.host.project(p.x, p.y)
                     p.x, p.y = p.host.point_at(p.t)
 
-            new_F = []
+            # ── 5. 评估新残差 ──
+            new_F_parts: list = []
             for c in valid:
                 try:
-                    new_F.extend(c.residual())
-                except:
+                    new_F_parts.extend(c.residual())
+                except Exception:
                     continue
-            new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
 
-            if new_norm < norm:
+            new_norm = float(np_norm(new_F_parts)) if new_F_parts else 0.0
+
+            # ── 6. 接受 / 拒绝 ──
+            if new_norm < norm_val:
                 lam = max(lam * lam_down, 1e-12)
                 no_improve = 0
                 if new_norm < self.tol:
                     return True
             else:
-                # ★ 修复：回退时同步恢复 t
                 for i, p in enumerate(free_points):
                     p.x, p.y = old_coords[i][0], old_coords[i][1]
                     if old_coords[i][2] is not None:

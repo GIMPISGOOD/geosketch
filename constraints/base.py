@@ -1,4 +1,6 @@
-"""约束基类与注册表。"""
+"""约束基类与注册表。雅可比统一返回 np.ndarray。"""
+
+from numpy import asarray, zeros, float64
 from typing import List, Any, Dict, Type
 
 
@@ -11,14 +13,17 @@ class GeometricConstraint:
         self.enabled = True
         self.status = "ok"
 
+    # ── 子类必须实现 ──────────────────────────────────
     def involved_points(self) -> List[Any]:
         raise NotImplementedError
 
     def residual(self) -> List[float]:
         raise NotImplementedError
 
-    def jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
-        """雅可比矩阵。
+    # ── 雅可比入口（统一返回 np.ndarray）────────────────
+    def jacobian(self, vars_map: Dict[int, int]):
+        """返回 shape=(n_res, 2*len(vars_map)) 的雅可比矩阵。
+
         快速路径：不涉及从动点 → 解析雅可比或局部数值差分。
         慢速路径：涉及从动点 → 链式法则解析雅可比。
         """
@@ -31,38 +36,41 @@ class GeometricConstraint:
             analytic = getattr(self, '_jacobian_analytic', None)
             if analytic is not None:
                 try:
-                    return analytic(vars_map)
+                    return asarray(analytic(vars_map), dtype=float64)
                 except Exception:
                     pass
             return self._numeric_jacobian(vars_map)
 
         return self._chain_rule_jacobian(vars_map)
 
-    def _chain_rule_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
+    # ── 链式法则雅可比（含从动点）──────────────────────
+    def _chain_rule_jacobian(self, vars_map: Dict[int, int]):
         from geo.points import FreePoint
         from .chain_rule import get_coordinate_derivatives
+
         n_cols = 2 * len(vars_map)
         pts = self.involved_points()
+
         try:
             r = self.residual()
             n_res = len(r)
         except Exception:
-            return []
-        jac = [[0.0] * n_cols for _ in range(n_res)]
+            return zeros((0, n_cols), dtype=float64)
+
+        jac = zeros((n_res, n_cols), dtype=float64)
         eps = 1e-7
 
         for p in pts:
-            dC_dpx = [0.0] * n_res
-            dC_dpy = [0.0] * n_res
+            dC_dpx = zeros(n_res, dtype=float64)
+            dC_dpy = zeros(n_res, dtype=float64)
             old_x, old_y = p.x, p.y
 
             try:
                 p.x = old_x + eps
-                r_px = self.residual()
+                r_px = asarray(self.residual(), dtype=float64)
                 p.x = old_x - eps
-                r_mx = self.residual()
-                for i in range(n_res):
-                    dC_dpx[i] = (r_px[i] - r_mx[i]) / (2 * eps)
+                r_mx = asarray(self.residual(), dtype=float64)
+                dC_dpx = (r_px - r_mx) / (2.0 * eps)
             except Exception:
                 pass
             finally:
@@ -70,79 +78,84 @@ class GeometricConstraint:
 
             try:
                 p.y = old_y + eps
-                r_py = self.residual()
+                r_py = asarray(self.residual(), dtype=float64)
                 p.y = old_y - eps
-                r_my = self.residual()
-                for i in range(n_res):
-                    dC_dpy[i] = (r_py[i] - r_my[i]) / (2 * eps)
+                r_my = asarray(self.residual(), dtype=float64)
+                dC_dpy = (r_py - r_my) / (2.0 * eps)
             except Exception:
                 pass
             finally:
                 p.y = old_y
 
-            if isinstance(p, FreePoint):
-                if id(p) in vars_map:
-                    idx = vars_map[id(p)]
-                    for i in range(n_res):
-                        jac[i][idx * 2]     = dC_dpx[i]
-                        jac[i][idx * 2 + 1] = dC_dpy[i]
+            # 三级分发
+            if isinstance(p, FreePoint) and id(p) in vars_map:
+                idx = vars_map[id(p)]
+                jac[:, idx * 2] = dC_dpx
+                jac[:, idx * 2 + 1] = dC_dpy
 
-            # ★ 修复：从动点本身在优化变量中 → 直接用数值偏导
             elif id(p) in vars_map:
                 idx = vars_map[id(p)]
-                for i in range(n_res):
-                    jac[i][idx * 2]     = dC_dpx[i]
-                    jac[i][idx * 2 + 1] = dC_dpy[i]
+                jac[:, idx * 2] = dC_dpx
+                jac[:, idx * 2 + 1] = dC_dpy
 
             else:
                 derivs = get_coordinate_derivatives(p)
                 if not derivs:
-                    for fp_id, d_matrix in _numeric_chain_fallback(
-                            self, p, vars_map, n_res).items():
+                    fallback = _numeric_chain_fallback(
+                        self, p, vars_map, n_res)
+                    for fp_id, d_arr in fallback.items():
                         if fp_id in vars_map:
                             idx = vars_map[fp_id]
-                            for i in range(n_res):
-                                jac[i][idx * 2]     += d_matrix[0]
-                                jac[i][idx * 2 + 1] += d_matrix[1]
+                            n = min(n_res, len(d_arr) // 2)
+                            jac[:n, idx * 2] += d_arr[:2 * n:2]
+                            jac[:n, idx * 2 + 1] += d_arr[1:2 * n:2]
                 else:
-                    for fp_id, d_matrix in derivs.items():
+                    for fp_id, dm in derivs.items():
                         if fp_id in vars_map:
                             idx = vars_map[fp_id]
-                            for i in range(n_res):
-                                jac[i][idx * 2]     += dC_dpx[i] * d_matrix[0] \
-                                                       + dC_dpy[i] * d_matrix[2]
-                                jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] \
-                                                       + dC_dpy[i] * d_matrix[3]
+                            jac[:, idx * 2] += dC_dpx * dm[0] + dC_dpy * dm[2]
+                            jac[:, idx * 2 + 1] += dC_dpx * dm[1] + dC_dpy * dm[3]
+
         return jac
 
-    def _numeric_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:
+    # ── 纯数值差分雅可比（无从动点，无解析式）──────────
+    def _numeric_jacobian(self, vars_map: Dict[int, int]):
         eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
-        jac = [[0.0] * n_cols for _ in range(n_res)]
+        jac = zeros((n_res, n_cols), dtype=float64)
+
         for p in pts:
             if id(p) not in vars_map:
                 continue
             idx = vars_map[id(p)]
             for axis in range(2):
                 old = p.x if axis == 0 else p.y
-                r_plus = r_minus = None
                 try:
-                    if axis == 0: p.x = old + eps
-                    else: p.y = old + eps
-                    r_plus = self.residual()
-                    if axis == 0: p.x = old - eps
-                    else: p.y = old - eps
-                    r_minus = self.residual()
+                    if axis == 0:
+                        p.x = old + eps
+                    else:
+                        p.y = old + eps
+                    r_plus = asarray(self.residual(), dtype=float64)
+
+                    if axis == 0:
+                        p.x = old - eps
+                    else:
+                        p.y = old - eps
+                    r_minus = asarray(self.residual(), dtype=float64)
                 finally:
-                    if axis == 0: p.x = old
-                    else: p.y = old
-                if r_plus is not None and r_minus is not None:
-                    for j in range(min(n_res, len(r_plus), len(r_minus))):
-                        jac[j][idx * 2 + axis] = (r_plus[j] - r_minus[j]) / (2 * eps)
+                    if axis == 0:
+                        p.x = old
+                    else:
+                        p.y = old
+
+                n = min(n_res, len(r_plus), len(r_minus))
+                jac[:n, idx * 2 + axis] = (r_plus[:n] - r_minus[:n]) / (2.0 * eps)
+
         return jac
 
+    # ── 序列化 ──────────────────────────────────────
     def dump(self) -> dict:
         raise NotImplementedError
 
@@ -151,6 +164,7 @@ class GeometricConstraint:
         raise NotImplementedError
 
 
+# ── 注册表 ──────────────────────────────────────────
 CONSTRAINT_REGISTRY: Dict[str, Type[GeometricConstraint]] = {}
 
 
@@ -161,21 +175,26 @@ def register_constraint(name: str):
         return cls
     return deco
 
-def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
-    """数值回退：直接扰动自由点，观察残差变化。"""
-    from geo.points import FreePoint
-    result = {}
-    eps = 1e-7
 
-    # 找到所有相关的自由点
+# ── 数值链式法则回退 ────────────────────────────────
+def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
+    """直接扰动自由点，观察从动点引起的残差变化。
+
+    返回 {fp_id: ndarray(2*n_res)}，
+    布局 [dr0_dx, dr0_dy, dr1_dx, dr1_dy, ...]。
+    """
+    from geo.points import FreePoint
+
+    result: Dict[int, Any] = {}
+    eps = 1e-7
     free_ids = set(vars_map.keys())
+
     for parent in dep_point.parents:
         for fp in _collect_free_from(parent):
             if id(fp) in free_ids and id(fp) not in result:
-                result[id(fp)] = [0.0] * (2 * n_res)
+                result[id(fp)] = zeros(2 * n_res, dtype=float64)
 
     for fp_id, acc in result.items():
-        # 找到对应的 FreePoint 对象
         fp = None
         for parent in dep_point.parents:
             for p in _collect_free_from(parent):
@@ -186,49 +205,47 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
             continue
 
         old_x, old_y = fp.x, fp.y
-        # +x
+
         fp.x = old_x + eps
         try:
             dep_point.recompute()
-            r_px = constraint.residual()
+            r_px = asarray(constraint.residual(), dtype=float64)
         except Exception:
-            r_px = [0.0] * n_res
-        # -x
+            r_px = zeros(n_res, dtype=float64)
+
         fp.x = old_x - eps
         try:
             dep_point.recompute()
-            r_mx = constraint.residual()
+            r_mx = asarray(constraint.residual(), dtype=float64)
         except Exception:
-            r_mx = [0.0] * n_res
-        fp.x = old_x
+            r_mx = zeros(n_res, dtype=float64)
 
-        # +y
+        fp.x = old_x
         fp.y = old_y + eps
         try:
             dep_point.recompute()
-            r_py = constraint.residual()
+            r_py = asarray(constraint.residual(), dtype=float64)
         except Exception:
-            r_py = [0.0] * n_res
-        # -y
+            r_py = zeros(n_res, dtype=float64)
+
         fp.y = old_y - eps
         try:
             dep_point.recompute()
-            r_my = constraint.residual()
+            r_my = asarray(constraint.residual(), dtype=float64)
         except Exception:
-            r_my = [0.0] * n_res
-        fp.y = old_y
+            r_my = zeros(n_res, dtype=float64)
 
+        fp.y = old_y
         try:
             dep_point.recompute()
         except Exception:
             pass
 
-        for i in range(n_res):
-            acc[2 * i] = (r_px[i] - r_mx[i]) / (2 * eps)
-            acc[2 * i + 1] = (r_py[i] - r_my[i]) / (2 * eps)
+        n = min(n_res, len(r_px), len(r_mx), len(r_py), len(r_my))
+        acc[:n] = (r_px[:n] - r_mx[:n]) / (2.0 * eps)
+        acc[n:2 * n] = (r_py[:n] - r_my[:n]) / (2.0 * eps)
 
-    # 转换为元组格式
-    return {k: tuple(v) for k, v in result.items()}
+    return result
 
 
 def _collect_free_from(obj):
