@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
 from geo.function_curve import FunctionCurve, PALETTE
 from ui import theme
 from ui.math import draw_math
+from geo.implicit_curve import ImplicitCurve, parse_equation , validate_implicit_expr
 
 
 class MathPreview(QWidget):
@@ -317,10 +318,6 @@ class FormulaEditor(QDialog):
         if kind == "implicit":
             if not e1:
                 return None
-
-            from geo.implicit_curve import (
-                ImplicitCurve, parse_equation, validate_implicit_expr,
-            )
 
             # 表达式验证
             err = validate_implicit_expr(e1)
