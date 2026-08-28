@@ -1,6 +1,8 @@
 import math
 import os
+import time
 from typing import Any
+
 from PySide6.QtCore import QPointF, QSize, Qt, Signal, QTimer, Slot, QEvent, QPoint
 from PySide6.QtGui import QPainter, QImage, QColor, QTouchEvent
 from PySide6.QtWidgets import QWidget, QToolButton, QGestureEvent, QScroller, QScrollerProperties
@@ -48,6 +50,16 @@ class Canvas(QWidget):
         self.snap_target = None
         self._panning = False
         self._pan_anchor = QPointF()
+        
+        self._pan_velocity = QPointF(0.0, 0.0)
+        self._pan_last_pos = QPointF()
+        self._pan_last_time = 0.0
+        self._inertia_timer = QTimer(self)
+        self._inertia_timer.setInterval(16)
+        self._inertia_timer.timeout.connect(self._tick_inertia)
+        self._inertia_vx = 0.0
+        self._inertia_vy = 0.0
+        
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # ── 触屏支持 ──────────────────────────────────
@@ -240,18 +252,21 @@ class Canvas(QWidget):
             self._pinch_active = False
 
     def _handle_pan(self, pan) -> None:
-        """双指平移 → 画布平移（单指由 touchEvent 处理）。"""
         state = pan.state()
         if state == Qt.GestureState.GestureStarted:
             self._pan_active = True
             self._long_press_timer.stop()
+            self._stop_inertia()
         elif state == Qt.GestureState.GestureUpdated and self._pan_active:
             delta = pan.delta()
             self.origin += QPointF(float(delta.x()), float(delta.y()))
+            self._pan_velocity = QPointF(
+                float(delta.x()) * 60.0, float(delta.y()) * 60.0)
             self.update()
         elif state in (Qt.GestureState.GestureFinished,
                        Qt.GestureState.GestureCanceled):
             self._pan_active = False
+            self._start_inertia()
             
     def touchEvent(self, ev: QTouchEvent) -> None:
         """处理原始触摸事件：单指点击/拖动/长按。"""
@@ -591,15 +606,36 @@ class Canvas(QWidget):
             init_snow(self)
 
     def mousePressEvent(self, ev) -> None:
+        # 停止可能正在进行的惯性动画
+        self._stop_inertia()
+
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = True
             self._pan_anchor = ev.position() - self.origin
+            self._pan_last_pos = ev.position()
+            self._pan_last_time = time.perf_counter()
+            self._pan_velocity = QPointF(0.0, 0.0)
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
-            self.doc._arm_undo()
-            self.tool.press(self, self.to_world(ev.position()), self.pick(ev.position()))
-            self.doc._commit_undo_if_changed()
+
+        if ev.button() == Qt.MouseButton.LeftButton:
+            hit = self.pick(ev.position())
+
+            # 选择工具 + 空白区域 → 左键平移
+            if isinstance(self.tool, SelectTool) and hit is None:
+                self._panning = True
+                self._pan_anchor = ev.position() - self.origin
+                self._pan_last_pos = ev.position()
+                self._pan_last_time = time.perf_counter()
+                self._pan_velocity = QPointF(0.0, 0.0)
+                self.setCursor(Qt.CursorShape.ClosedHandCursor)
+                return
+
+            # 正常工具交互
+            if self.tool is not None:
+                self.doc._arm_undo()
+                self.tool.press(self, self.to_world(ev.position()), hit)
+                self.doc._commit_undo_if_changed()
 
     def mouseDoubleClickEvent(self, ev):
         hit = self.pick(ev.position())
@@ -610,17 +646,37 @@ class Canvas(QWidget):
 
     def mouseMoveEvent(self, ev) -> None:
         self.cursor_wpt = self.to_world(ev.position())
-        self.cursor_info.emit(f"( {self.cursor_wpt[0]:7.2f} , {self.cursor_wpt[1]:7.2f} )")
+        self.cursor_info.emit(
+            f"( {self.cursor_wpt[0]:7.2f} , {self.cursor_wpt[1]:7.2f} )")
+
         if self._panning:
             self.origin = ev.position() - self._pan_anchor
+            # 速度追踪（指数移动平均，平滑抖动）
+            now = time.perf_counter()
+            dt = now - self._pan_last_time
+            if dt > 1e-4:
+                dx = ev.position().x() - self._pan_last_pos.x()
+                dy = ev.position().y() - self._pan_last_pos.y()
+                inst_vx = dx / dt
+                inst_vy = dy / dt
+                alpha = 0.25
+                self._pan_velocity.setX(
+                    alpha * inst_vx + (1 - alpha) * self._pan_velocity.x())
+                self._pan_velocity.setY(
+                    alpha * inst_vy + (1 - alpha) * self._pan_velocity.y())
+                self._pan_last_pos = ev.position()
+                self._pan_last_time = now
             self.update()
             return
+
         hit = self.pick(ev.position())
         self.snap_target = nearest_point(self.doc, self.scale, self.cursor_wpt)
         if self.tool is not None:
             self.tool.move(self, self.cursor_wpt, hit)
         hover = getattr(hit, "draggable", False) or self.snap_target is not None
-        self.setCursor(Qt.CursorShape.SizeAllCursor if hover else Qt.CursorShape.ArrowCursor)
+        self.setCursor(
+            Qt.CursorShape.SizeAllCursor if hover
+            else Qt.CursorShape.ArrowCursor)
         self.update()
 
     def contextMenuEvent(self, ev):
@@ -631,11 +687,65 @@ class Canvas(QWidget):
         if ev.button() == Qt.MouseButton.MiddleButton:
             self._panning = False
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._start_inertia()
             return
-        if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
-            self.tool.release(self, self.to_world(ev.position()), self.pick(ev.position()))
 
+        if ev.button() == Qt.MouseButton.LeftButton and self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._start_inertia()
+            return
+
+        if ev.button() == Qt.MouseButton.LeftButton and self.tool is not None:
+            self.tool.release(
+                self, self.to_world(ev.position()), self.pick(ev.position()))
+            
+    # ──────────────────────────────────────────────────────
+    #  惯性平移动画
+    # ──────────────────────────────────────────────────────
+
+    def _start_inertia(self) -> None:
+        """释放后根据末速度启动惯性滑动。"""
+        vx = self._pan_velocity.x()
+        vy = self._pan_velocity.y()
+        # 速度过低不启动（避免微抖）
+        speed = (vx * vx + vy * vy) ** 0.5
+        if speed < 80.0:
+            return
+        # 限速（防止猛甩飞出）
+        max_speed = 1800.0
+        if speed > max_speed:
+            scale = max_speed / speed
+            vx *= scale
+            vy *= scale
+        dt = 1.0 / 60.0
+        self._inertia_vx = vx * dt  # 转换为每帧位移 (≈60fps)
+        self._inertia_vy = vy * dt
+        self._inertia_timer.start()
+
+    def _tick_inertia(self) -> None:
+        """每帧衰减速度并平移画布。"""
+        friction = 0.92
+        self._inertia_vx *= friction
+        self._inertia_vy *= friction
+
+        if (abs(self._inertia_vx) < 0.15
+                and abs(self._inertia_vy) < 0.15):
+            self._inertia_timer.stop()
+            return
+
+        self.origin += QPointF(self._inertia_vx, self._inertia_vy)
+        self.update()
+
+    def _stop_inertia(self) -> None:
+        """立即停止惯性动画（新的交互开始时调用）。"""
+        if self._inertia_timer.isActive():
+            self._inertia_timer.stop()
+        self._inertia_vx = 0.0
+        self._inertia_vy = 0.0
+        
     def wheelEvent(self, ev) -> None:
+        self._stop_inertia()
         k = 1.15 if ev.angleDelta().y() > 0 else 1.0 / 1.15
         self.zoom_at(k, ev.position())
 
