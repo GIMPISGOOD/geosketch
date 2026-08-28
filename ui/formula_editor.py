@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
 from geo.function_curve import FunctionCurve, PALETTE
 from ui import theme
 from ui.math import draw_math
-from geo.implicit_curve import ImplicitCurve, parse_equation
+
 
 class MathPreview(QWidget):
     def __init__(self, parent=None):
@@ -260,6 +260,7 @@ class FormulaEditor(QDialog):
                 w = item.widget()
                 if w is not None:
                     w.setVisible(is_param)
+
         if kind == "explicit":
             self._expr1_lbl.setText("y =")
             self._auto_dom.setVisible(True)
@@ -271,8 +272,10 @@ class FormulaEditor(QDialog):
             self._auto_dom.setVisible(False)
         elif kind == "implicit":
             self._expr1_lbl.setText("F(x,y) =")
-            self._expr1.setPlaceholderText("如 x^2+y^2=1 或 sin(x)*cos(y)=0.5")
+            self._expr1.setPlaceholderText(
+                "如 x^2+y^2=1 或 sin(x)*cos(y)=0.5")
             self._auto_dom.setVisible(False)
+
         self._on_auto_toggled()
         self._update_preview()
 
@@ -306,7 +309,6 @@ class FormulaEditor(QDialog):
             f"border:1px solid rgba(0,0,0,0.3);border-radius:5px;")
 
     def build_function(self):
-        from geo.implicit_curve import ImplicitCurve
         kind = self._current_kind()
         e1 = self._expr1.text().strip()
         e2 = self._expr2.text().strip()
@@ -315,24 +317,37 @@ class FormulaEditor(QDialog):
         if kind == "implicit":
             if not e1:
                 return None
-            from geo.implicit_curve import ImplicitCurve, parse_equation
 
-            # ★ 修复：读取用户设置的域，构造方形域 (x0, x1, y0, y1)
+            from geo.implicit_curve import (
+                ImplicitCurve, parse_equation, validate_implicit_expr,
+            )
+
+            # 表达式验证
+            err = validate_implicit_expr(e1)
+            if err is not None:
+                from PySide6.QtWidgets import QMessageBox
+                QMessageBox.warning(self, "表达式错误", err)
+                return None
+
+            # 独立 x/y 域（当前 UI 只有一组域控件，x 和 y 共用）
             a, b = self._dom_a.value(), self._dom_b.value()
             if a > b:
                 a, b = b, a
             domain = (a, b, a, b)
-            
+
             if self.func and isinstance(self.func, ImplicitCurve):
                 self.func.expr = e1
                 self.func._resolved_expr = parse_equation(e1)
                 self.func.color = self._color.name()
-                self.func.domain = domain  
+                self.func.domain = domain
                 self.func.invalidate_cache()
+                self.func._invalidate_path()
                 return self.func
-            return ImplicitCurve(e1, domain=domain, color=self._color.name())
 
-        # 其他类型
+            return ImplicitCurve(e1, domain=domain,
+                                 color=self._color.name())
+
+        # 其他类型（保持不变）
         if not e1 or (kind == "parametric" and not e2):
             return None
         if self._auto_dom.isChecked() and kind == "explicit":
@@ -347,4 +362,6 @@ class FormulaEditor(QDialog):
             f.kind, f.expr, f.expr2, f.domain = kind, e1, e2, domain
             f.color = self._color.name()
             return f
+
+        from geo.function_curve import FunctionCurve
         return FunctionCurve(kind, e1, e2, domain, self._color.name())

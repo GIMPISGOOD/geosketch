@@ -17,29 +17,28 @@ _OPS = {
     ast.USub: operator.neg, ast.UAdd: operator.pos,
 }
 _FUNCS = {
-    "sin": math.sin,
-    "cos": math.cos,
-    "tan": math.tan,
-    "arcsin": math.asin,
-    "arccos": math.acos,
-    "arctan": math.atan,
-    "asin": math.asin,
-    "acos": math.acos,
-    "atan": math.atan,
-    "sinh": math.sinh,
-    "cosh": math.cosh,
-    "tanh": math.tanh,
-    "sqrt": math.sqrt,
-    "abs": abs,
-    "ln": math.log,
-    "log": math.log10,
-    "exp": math.exp,
+    # 基础三角
+    "sin": math.sin, "cos": math.cos, "tan": math.tan,
     "cot": lambda x: 1.0 / math.tan(x),
     "sec": lambda x: 1.0 / math.cos(x),
     "csc": lambda x: 1.0 / math.sin(x),
+    # 反三角
+    "arcsin": math.asin, "arccos": math.acos, "arctan": math.atan,
+    "asin": math.asin, "acos": math.acos, "atan": math.atan,
+    # 双曲
+    "sinh": math.sinh, "cosh": math.cosh, "tanh": math.tanh,
+    # 指数与对数
+    "sqrt": math.sqrt, "abs": abs, "ln": math.log,
+    "log": math.log10, "exp": math.exp,
+    # 取整与符号
+    "floor": math.floor, "ceil": math.ceil, "round": round,
+    "sign": lambda x: (x > 0) - (x < 0),
+    # 极值
+    "min": min, "max": max,
 }
 
-FUNCS = dict(_FUNCS)
+FUNCS = _FUNCS  # 直接引用，不再拷贝
+_FUNC_NAMES = set(_FUNCS)
 CONSTS = {"pi": math.pi, "π": math.pi, "e": math.e}
 RESERVED = set(FUNCS) | set(CONSTS)
 
@@ -91,19 +90,20 @@ def _is_value_start(tok):
 
 
 def _preprocess(expr):
-    """词法级隐式乘法补全：2x→2*x、x(x+1)→x*(x+1)、(a)(b)→(a)*(b)，
-    但 sin(x) 保持函数调用不拆。逐 token 判断，杜绝正则子串误伤。"""
-    toks = _TOKEN_RE.findall(expr.replace("^", "**").replace(" ", ""))
+    expr = expr.replace("**", "\x00")  # 保护已有 **
+    expr = expr.replace("^", "**")
+    expr = expr.replace("\x00", "**")  # 还原
+    toks = _TOKEN_RE.findall(expr.replace("  ", " "))
     out = []
     for i, tok in enumerate(toks):
         out.append(tok)
         if i + 1 < len(toks):
             nxt = toks[i + 1]
             if tok in _FUNC_NAMES and nxt == "(":
-                continue                        # 函数应用，不补 *
+                continue
             if _is_value_end(tok) and _is_value_start(nxt):
                 out.append("*")
-    return "".join(out)
+    return " ".join(out)
 
 def _eval(node: ast.AST, vars: dict[str, float]) -> float:
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
@@ -124,13 +124,22 @@ def _eval(node: ast.AST, vars: dict[str, float]) -> float:
     raise ValueError("不支持的语法")
 
 
-def evaluate(expr: str, variables: dict[str, float]) -> Optional[float]:
-    """安全求值（AST 白名单，绝不执行任意代码）；非法返回 None。"""
+_compile_cache: dict = {}
+_CACHE_LIMIT = 512
+
+
+def evaluate(expr: str, variables: dict) -> Optional[float]:
+    """安全求值（AST 白名单 + 编译缓存）；非法返回 None。"""
     try:
-        return _eval(ast.parse(_preprocess(expr), mode="eval").body, variables)
+        tree = _compile_cache.get(expr)
+        if tree is None:
+            if len(_compile_cache) >= _CACHE_LIMIT:
+                _compile_cache.clear()
+            tree = ast.parse(_preprocess(expr), mode="eval").body
+            _compile_cache[expr] = tree
+        return _eval(tree, variables)
     except Exception:
         return None
-
 
 
 class Variable:
