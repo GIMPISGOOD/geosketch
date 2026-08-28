@@ -84,14 +84,14 @@ class GeometricConstraint:
                 if id(p) in vars_map:
                     idx = vars_map[id(p)]
                     for i in range(n_res):
-                        jac[i][idx * 2] = dC_dpx[i]
+                        jac[i][idx * 2]     = dC_dpx[i]
                         jac[i][idx * 2 + 1] = dC_dpy[i]
 
+            # ★ 修复：从动点本身在优化变量中 → 直接用数值偏导
             elif id(p) in vars_map:
-                # ★ 修复：从动点本身在优化变量中，直接使用数值偏导
                 idx = vars_map[id(p)]
                 for i in range(n_res):
-                    jac[i][idx * 2] = dC_dpx[i]
+                    jac[i][idx * 2]     = dC_dpx[i]
                     jac[i][idx * 2 + 1] = dC_dpy[i]
 
             else:
@@ -102,15 +102,17 @@ class GeometricConstraint:
                         if fp_id in vars_map:
                             idx = vars_map[fp_id]
                             for i in range(n_res):
-                                jac[i][idx * 2] += d_matrix[0]
+                                jac[i][idx * 2]     += d_matrix[0]
                                 jac[i][idx * 2 + 1] += d_matrix[1]
                 else:
                     for fp_id, d_matrix in derivs.items():
                         if fp_id in vars_map:
                             idx = vars_map[fp_id]
                             for i in range(n_res):
-                                jac[i][idx * 2] += dC_dpx[i] * d_matrix[0] + dC_dpy[i] * d_matrix[2]
-                                jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] + dC_dpy[i] * d_matrix[3]
+                                jac[i][idx * 2]     += dC_dpx[i] * d_matrix[0] \
+                                                       + dC_dpy[i] * d_matrix[2]
+                                jac[i][idx * 2 + 1] += dC_dpx[i] * d_matrix[1] \
+                                                       + dC_dpy[i] * d_matrix[3]
         return jac
 
     def _numeric_jacobian(self, vars_map: Dict[int, int]) -> List[List[float]]:

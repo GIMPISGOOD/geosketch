@@ -474,6 +474,7 @@ class Document(QObject):
                     continue
                 if isinstance(p, FreePoint):
                     free_set.add(p)
+                # ★ 修复：吸附点也作为可优化对象（自由度=2，投影保持曲线约束）
                 elif isinstance(p, PointOnObject):
                     free_set.add(p)
 

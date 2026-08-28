@@ -92,10 +92,9 @@ class ConstraintSolver:
                     return False
                 continue
 
-            # ★ 修复：保存旧坐标（含从动点参数 t）
             old_coords = []
             for p in free_points:
-                if hasattr(p, 't'):
+                if hasattr(p, 't') and hasattr(p, 'host'):
                     old_coords.append((p.x, p.y, p.t))
                 else:
                     old_coords.append((p.x, p.y, None))
@@ -112,7 +111,7 @@ class ConstraintSolver:
             for c in valid:
                 try:
                     new_F.extend(c.residual())
-                except Exception:
+                except:
                     continue
             new_norm = math.sqrt(sum(f * f for f in new_F)) if new_F else 0.0
 
@@ -122,7 +121,7 @@ class ConstraintSolver:
                 if new_norm < self.tol:
                     return True
             else:
-                # ★ 修复：回退时同时恢复 t
+                # ★ 修复：回退时同步恢复 t
                 for i, p in enumerate(free_points):
                     p.x, p.y = old_coords[i][0], old_coords[i][1]
                     if old_coords[i][2] is not None:
