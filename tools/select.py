@@ -198,10 +198,7 @@ class SelectTool(Tool):
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
-
-        # ★ 拖动时触发约束求解
-        # 修复：不固定被拖动的点，而是固定其他自由点，
-        # 让求解器将被拖动的点投影到约束流形上（如圆弧）
+        # ★ 拖动时触发约束求解（修复：拖动点钉死，其余自由点由求解器驱动）
         doc = canvas.doc
         if hasattr(doc, 'constraints') and doc.constraints:
             dragged = set()
@@ -213,17 +210,9 @@ class SelectTool(Tool):
                 dragged.add(self.drag_media)
             if dragged:
                 try:
-                    # 收集未被拖动的自由点，固定它们
-                    other_free = []
-                    for c in doc.constraints:
-                        if not c.enabled:
-                            continue
-                        for p in c.involved_points():
-                            if isinstance(p, FreePoint) and p not in dragged:
-                                other_free.append(p)
                     doc.solve_constraints(
                         trigger_points=list(dragged),
-                        pinned_points=other_free,
+                        pinned_points=list(dragged),   # ← 修复：钉住被拖动的点
                         quick=True,
                     )
                 except Exception:
@@ -269,17 +258,9 @@ class SelectTool(Tool):
                 dragged.add(self.drag_media)
             try:
                 if dragged:
-                    # 固定未被拖动的自由点，让求解器收敛被拖动的点
-                    other_free = []
-                    for c in doc.constraints:
-                        if not c.enabled:
-                            continue
-                        for p in c.involved_points():
-                            if isinstance(p, FreePoint) and p not in dragged:
-                                other_free.append(p)
                     doc.solve_constraints(
                         trigger_points=list(dragged),
-                        pinned_points=other_free,
+                        pinned_points=list(dragged),   # ← 修复：同上
                         quick=False,
                     )
                 else:
