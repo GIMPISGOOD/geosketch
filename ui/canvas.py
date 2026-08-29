@@ -41,8 +41,12 @@ class Canvas(QWidget):
         super().__init__(parent)
         self.doc = doc
         doc.changed.connect(self.update)
-        doc.cleared.connect(self._on_doc_cleared)  
-        self.scale = BASE_SCALE
+        doc.cleared.connect(self._on_doc_cleared)
+
+        # ── 从设置读取基础缩放（替代硬编码 BASE_SCALE）──
+        self._base_scale = float(doc.settings.get("canvas.base_scale", BASE_SCALE))
+        self.scale = self._base_scale
+
         self.origin = QPointF(0.0, 0.0)
         self._origin_ready = False
         self.tool = None
@@ -50,7 +54,6 @@ class Canvas(QWidget):
         self.snap_target = None
         self._panning = False
         self._pan_anchor = QPointF()
-        
         self._pan_velocity = QPointF(0.0, 0.0)
         self._pan_last_pos = QPointF()
         self._pan_last_time = 0.0
@@ -59,26 +62,24 @@ class Canvas(QWidget):
         self._inertia_timer.timeout.connect(self._tick_inertia)
         self._inertia_vx = 0.0
         self._inertia_vy = 0.0
-        
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         # ── 触屏支持 ──────────────────────────────────
         self.setAttribute(Qt.WidgetAttribute.WA_AcceptTouchEvents, True)
         self.grabGesture(Qt.GestureType.PinchGesture)
         self.grabGesture(Qt.GestureType.PanGesture)
-
-        self._touch_mode = False          # 当前是否为触摸输入
-        self._touch_points: dict = {}     # 活跃触摸点 {touchId: QPointF}
-        self._touch_start_pos = None      # 单指起始位置
-        self._touch_start_time = 0        # 单指起始时间戳
-        self._touch_moved = False         # 单指是否已移动超过阈值
-        self._pinch_active = False        # 双指缩放进行中
-        self._pan_active = False          # 双指/单指平移进行中
-
+        self._touch_mode = False
+        self._touch_points: dict = {}
+        self._touch_start_pos = None
+        self._touch_start_time = 0
+        self._touch_moved = False
+        self._pinch_active = False
+        self._pan_active = False
         # 长按检测（替代右键菜单）
         self._long_press_timer = QTimer(self)
         self._long_press_timer.setSingleShot(True)
-        self._long_press_timer.setInterval(500)
+        self._long_press_timer.setInterval(
+            int(doc.settings.get("interaction.long_press_ms", 500)))  # ← 改
         self._long_press_timer.timeout.connect(self._on_long_press)
         self._long_press_pos = None
 
@@ -209,13 +210,15 @@ class Canvas(QWidget):
         self.zoom_at(1.25 ** n)
 
     def reset_view(self) -> None:
-        self.scale = BASE_SCALE
+        self._base_scale = float(
+            self.doc.settings.get("canvas.base_scale", BASE_SCALE))
+        self.scale = self._base_scale
         self.origin = QPointF(self.width() / 2, self.height() / 2)
         self._emit_zoom()
         self.update()
 
     def _emit_zoom(self) -> None:
-        self.zoom_changed.emit(self.scale / BASE_SCALE * 100.0)
+        self.zoom_changed.emit(self.scale / self._base_scale * 100.0)
         
     def event(self, ev) -> bool:
         """分发手势事件（Pinch / Pan），其余走默认流程。"""
@@ -344,9 +347,12 @@ class Canvas(QWidget):
             if touch_count <= 1:
                 self._touch_mode = False
             ev.accept()
+            
     def _touch_tol(self) -> float:
-        """触屏模式下增大命中容差（9px → 26px）。"""
-        return 26.0 if self._touch_mode else 9.0
+        """触屏模式下增大命中容差。"""
+        if self._touch_mode:
+            return float(self.doc.settings.get("interaction.touch_hit_tol", 26.0))
+        return float(self.doc.settings.get("interaction.mouse_hit_tol", 9.0))
 
     def _on_long_press(self) -> None:
         """长按 500ms → 触发右键上下文菜单。"""
@@ -569,7 +575,8 @@ class Canvas(QWidget):
         p.setPen(theme.pen(theme.ACCENT, 1.6))
         p.setBrush(Qt.BrushStyle.NoBrush)
         p.drawEllipse(qpt, 9.0, 9.0)
-        r, tick = SNAP_PX, 5.0
+        r = float(self.doc.settings.get("interaction.snap_radius_px", SNAP_PX))
+        tick = 5.0
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             x0, y0 = qpt.x() + dx * r, qpt.y() + dy * r
             p.drawLine(QPointF(x0, y0), QPointF(x0 - dx * tick, y0 - dy * tick))
@@ -648,10 +655,8 @@ class Canvas(QWidget):
         self.cursor_wpt = self.to_world(ev.position())
         self.cursor_info.emit(
             f"( {self.cursor_wpt[0]:7.2f} , {self.cursor_wpt[1]:7.2f} )")
-
         if self._panning:
             self.origin = ev.position() - self._pan_anchor
-            # 速度追踪（指数移动平均，平滑抖动）
             now = time.perf_counter()
             dt = now - self._pan_last_time
             if dt > 1e-4:
@@ -668,9 +673,14 @@ class Canvas(QWidget):
                 self._pan_last_time = now
             self.update()
             return
-
         hit = self.pick(ev.position())
-        self.snap_target = nearest_point(self.doc, self.scale, self.cursor_wpt)
+        # ── 磁吸：从设置读取半径，传入 nearest_point ──
+        snap_px = float(self.doc.settings.get("interaction.snap_radius_px", SNAP_PX))
+        if self.doc.settings.get("interaction.snap_enabled", True):
+            self.snap_target = nearest_point(
+                self.doc, self.scale, self.cursor_wpt, snap_px=snap_px)
+        else:
+            self.snap_target = None
         if self.tool is not None:
             self.tool.move(self, self.cursor_wpt, hit)
         hover = getattr(hit, "draggable", False) or self.snap_target is not None
@@ -706,34 +716,33 @@ class Canvas(QWidget):
 
     def _start_inertia(self) -> None:
         """释放后根据末速度启动惯性滑动。"""
+        # ── 设置中关闭惯性则直接返回 ──
+        if not self.doc.settings.get("effects.canvas_inertia", True):
+            return
         vx = self._pan_velocity.x()
         vy = self._pan_velocity.y()
-        # 速度过低不启动（避免微抖）
         speed = (vx * vx + vy * vy) ** 0.5
         if speed < 80.0:
             return
-        # 限速（防止猛甩飞出）
         max_speed = 1800.0
         if speed > max_speed:
             scale = max_speed / speed
             vx *= scale
             vy *= scale
         dt = 1.0 / 60.0
-        self._inertia_vx = vx * dt  # 转换为每帧位移 (≈60fps)
+        self._inertia_vx = vx * dt
         self._inertia_vy = vy * dt
         self._inertia_timer.start()
 
     def _tick_inertia(self) -> None:
         """每帧衰减速度并平移画布。"""
-        friction = 0.92
+        friction = float(self.doc.settings.get("effects.canvas_friction", 0.825))
         self._inertia_vx *= friction
         self._inertia_vy *= friction
-
         if (abs(self._inertia_vx) < 0.15
                 and abs(self._inertia_vy) < 0.15):
             self._inertia_timer.stop()
             return
-
         self.origin += QPointF(self._inertia_vx, self._inertia_vy)
         self.update()
 
@@ -746,9 +755,11 @@ class Canvas(QWidget):
         
     def wheelEvent(self, ev) -> None:
         self._stop_inertia()
-        k = 1.15 if ev.angleDelta().y() > 0 else 1.0 / 1.15
+        k = float(self.doc.settings.get("interaction.zoom_speed", 1.15))
+        if ev.angleDelta().y() <= 0:
+            k = 1.0 / k
         self.zoom_at(k, ev.position())
-
+        
     def keyPressEvent(self, ev) -> None:
         if ev.key() in (Qt.Key.Key_Delete, Qt.Key.Key_Backspace):
             self.doc.remove_selected()

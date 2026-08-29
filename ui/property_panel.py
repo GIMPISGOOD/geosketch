@@ -94,8 +94,9 @@ class PropertyPanel(QWidget):
 
         self._collapsed_label = QLabel("属\n性")
         self._collapsed_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        sz = self._ui_size()
         self._collapsed_label.setStyleSheet(
-            "font-size: 11px; letter-spacing: 2px; background: transparent;"
+            f"font-size: {max(8, sz - 1)}px; letter-spacing: 2px; background: transparent;"
         )
         self._collapsed_layout.addWidget(self._collapsed_label)
         self._collapsed_layout.addStretch(1)
@@ -115,7 +116,13 @@ class PropertyPanel(QWidget):
         theme.bus.changed.connect(self._on_theme_changed)
 
         self.hide()
-
+        
+    def _ui_size(self) -> int:
+        """获取当前 UI 字号，用于内联样式。"""
+        try:
+            return int(self.canvas.doc.settings.get("appearance.ui_font_size", 10))
+        except Exception:
+            return 10
     # ──────────────────────────────────────────────────────
     #  主题切换
     # ──────────────────────────────────────────────────────
@@ -193,9 +200,10 @@ class PropertyPanel(QWidget):
 
     def _add_section(self, title_text: str) -> None:
         lbl = QLabel(title_text)
+        sz = self._ui_size()
         lbl.setStyleSheet(
             f"color: {theme.ACCENT.name()}; font-weight: bold; "
-            f"font-size: 12px; margin-top: 6px; background: transparent;"
+            f"font-size: {sz}px; margin-top: 6px; background: transparent;"
         )
         self.form.addWidget(lbl)
 
@@ -207,8 +215,9 @@ class PropertyPanel(QWidget):
         label.setAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        sz = self._ui_size()
         label.setStyleSheet(
-            f"color: {theme.SUBINK.name()}; font-size: 12px; background: transparent;"
+            f"color: {theme.SUBINK.name()}; font-size: {sz}px; background: transparent;"
         )
         row.addWidget(label)
         row.addWidget(widget, 1)

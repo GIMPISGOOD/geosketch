@@ -1,8 +1,8 @@
 import datetime
 import os
 
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence
-from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QActionGroup, QFont, QKeySequence
+from PySide6.QtCore import Qt , QTimer
 from PySide6.QtWidgets import (QApplication, QFileDialog, QLabel,
                                QMainWindow, QStatusBar)
 from PySide6.QtWidgets import QInputDialog
@@ -22,6 +22,7 @@ from ui.icons import build_tool_icon
 from ui.variable_widgets import VariableWizard
 from plugins.expr_tools import ExprSegmentTool, ExprAngleTool
 from ui.function_panel import FunctionEditorDock
+from ui.settings_dialog import SettingsDialog        # ← 新增
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -30,6 +31,8 @@ class MainWindow(QMainWindow):
         self.resize(1240, 780)
 
         self.doc = Document()
+        self.doc = Document()
+        theme.set_settings(self.doc.settings)   # ← 新增：注入设置到主题模块
         self.canvas = Canvas(self.doc)
         self.setCentralWidget(self.canvas)  
         # ★ 触屏优化：全局启用触摸合成与手势
@@ -56,7 +59,13 @@ class MainWindow(QMainWindow):
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
-        
+        self._current_path: str | None = None       # 跟踪当前文件路径（自动保存用）
+        self._autosave_timer = QTimer(self)
+        self._autosave_timer.timeout.connect(self._do_autosave)
+        self.doc.settings.changed.connect(self._on_settings_changed)
+        self._apply_ui_font()
+        self._restart_autosave()
+                
     def _build_constraint_menu(self):
         """原生构建约束菜单。"""
         try:
@@ -307,6 +316,14 @@ class MainWindow(QMainWindow):
         del_act.setShortcut(QKeySequence.StandardKey.Delete)
         del_act.triggered.connect(self.doc.remove_selected)
         em.addAction(del_act)
+        
+        em.addAction(del_act)
+
+        em.addSeparator()                              # ← 新增分隔线
+        settings_act = QAction("偏好设置(&P)…", self)  # ← 新增
+        settings_act.setShortcut(QKeySequence("Ctrl+,"))
+        settings_act.triggered.connect(self._open_settings)
+        em.addAction(settings_act)
 
         # ================= 3. 视图 =================
         vm = mb.addMenu("视图(&V)")
@@ -490,9 +507,13 @@ class MainWindow(QMainWindow):
 
     def _save(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
-            self, "保存", f"sketch_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wgeo", "GeoSketch 文件 (*.wgeo)")
+            self, "保存",
+            self._current_path                          # ← 改：优先用上次路径
+            or f"sketch_{datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.wgeo",
+            "GeoSketch 文件 (*.wgeo)")
         if path:
             self.doc.save(path)
+            self._current_path = path                   # ← 新增
 
     def _update_history_actions(self) -> None:
         self._undo_act.setEnabled(self.doc.can_undo)
@@ -514,6 +535,8 @@ class MainWindow(QMainWindow):
                 self._update_macro_actions()
 
             self.doc.load(path)
+            self._current_path = path                   # ← 新增
+            self.canvas.update_snow_state()
             self.canvas.update_snow_state()
             self.setWindowTitle(
                 f"{os.path.basename(path)} — GeoSketch")
@@ -623,7 +646,83 @@ class MainWindow(QMainWindow):
             else:
                 self._rec_label.setText("")
                 self._rec_label.setStyleSheet("")
-                           
+    # ══════════════════════════════════════════════════
+    #  偏好设置（P2 新增）
+    # ══════════════════════════════════════════════════
+
+    def _open_settings(self) -> None:
+        dlg = SettingsDialog(self.doc.settings, self)
+        dlg.exec()
+
+    def _on_settings_changed(self, key: str) -> None:
+        """``SettingsStore.changed`` 信号分发。"""
+        section = key.split(".")[0] if "." in key else key
+
+        if key == "*":
+            # 全量刷新（load / reset）
+            self._apply_ui_font()
+            self.canvas._bg_cache = None
+            self.canvas.update()
+            self._restart_autosave()
+            return
+
+        if section == "appearance":
+            self._apply_ui_font()
+            self.canvas._bg_cache = None
+            self.canvas.update()
+
+        elif section == "canvas":
+            self.canvas._bg_cache = None
+            self.canvas.update()
+
+        elif section == "effects":
+            pass  # 动效参数在下次交互/渲染时自动生效
+
+        elif section == "interaction":
+            pass  # 磁吸/缩放等参数在下次事件时自动生效
+
+        elif section == "workflow":
+            self._restart_autosave()
+
+    def _apply_ui_font(self) -> None:
+        """从设置读取字体 → 应用到 QApplication + 主题 + 状态栏。"""
+        s = self.doc.settings
+        font = QFont()
+        families = s.get("appearance.ui_font_family",
+                         ["Segoe UI", "PingFang SC", "Microsoft YaHei",
+                          "sans-serif"])
+        if isinstance(families, list):
+            font.setFamilies(families)
+        else:
+            font.setFamilies([str(families)])
+        font.setPointSize(int(s.get("appearance.ui_font_size", 10)))
+
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)          # ← 类型缩窄，消除 Pylance 警告
+
+        app.setFont(font)
+        theme.set_settings(s)
+        theme.refresh_fonts(s)
+        app.setStyleSheet(theme.app_stylesheet())
+        self.canvas.setStyleSheet(theme.canvas_qss())
+
+        if hasattr(self, "_coord_label"):
+            self._coord_label.setFont(theme.LABEL_FONT)
+
+    def _restart_autosave(self) -> None:
+        minutes = self.doc.settings.get("workflow.autosave_minutes", 0)
+        if minutes > 0:
+            self._autosave_timer.start(int(minutes * 60 * 1000))
+        else:
+            self._autosave_timer.stop()
+
+    def _do_autosave(self) -> None:
+        if self._current_path and os.path.isfile(self._current_path):
+            try:
+                self.doc.save(self._current_path)
+            except Exception:
+                pass
+                                       
     def _doc_info(self) -> None:
         title, ok = QInputDialog.getText(
             self, "文档信息", "标题（可留空）：", text=self.doc.meta.get("title", ""))

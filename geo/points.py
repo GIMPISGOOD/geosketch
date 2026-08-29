@@ -95,38 +95,59 @@ def _index_to_subscript(n):
     return ''.join(chr(0x2080 + int(d)) for d in str(n))
 
 
-# ───────────────────────────── 渲染 ─────────────────────────────
 @register_renderer(AbstractPoint)
 def draw_point(p, obj, view):
     """两种点共用：选中时放大换色，标签用数学排版（斜体大写字母）。"""
     qpt = view.to_screen(obj.x, obj.y)
-    r = 6.0 if obj.selected else 4.0
+
+    # ── 从设置读取点半径 ──
+    s = getattr(view.doc, 'settings', None)
+    if s is not None:
+        r_sel = float(s.get("appearance.selected_point_radius", 6.0))
+        r_def = float(s.get("appearance.default_point_radius", 4.0))
+    else:
+        r_sel, r_def = 6.0, 4.0
+    r = r_sel if obj.selected else r_def
+
     p.setPen(theme.pen(theme.POINT_RING, 2))
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
-    
-    # ★ 优化：优先使用用户自定义名称，其次使用 Document 缓存的 _auto_label
+
     label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "")
     if not label:
-        label = f"P{obj.id}"  # 最终 Fallback
-        
+        label = f"P{obj.id}"
+
+    # ── 标签字号受 math_scale 控制 ──
+    if s is not None:
+        math_scale = float(s.get("appearance.math_scale", 1.0))
+    else:
+        math_scale = 1.0
+    label_size = int(13 * math_scale)
+
     draw_math(
         p,
         qpt.x() + 9,
         qpt.y() - 8,
         label,
-        13,
+        label_size,
         theme.SELECTED if obj.selected else theme.LABEL
     )
 
 
-# ───────────────────────────── 磁吸 ─────────────────────────────
-SNAP_PX = 18.0        # 磁吸半径（屏幕像素）：手感恒定，世界半径 = SNAP_PX / scale
+SNAP_PX = 18.0        # 磁吸半径默认值（屏幕像素）
 
 
-def nearest_point(doc, scale, wpt):
-    """磁吸半径内离光标最近的点；无则返回 None。"""
-    tol = SNAP_PX / scale
+def nearest_point(doc, scale, wpt, snap_px=None):
+    """磁吸半径内离光标最近的点；无则返回 None。
+
+    参数
+    ----
+    snap_px : float | None
+        磁吸半径（屏幕像素）。为 None 时使用模块级 SNAP_PX。
+    """
+    if snap_px is None:
+        snap_px = SNAP_PX
+    tol = snap_px / scale
     best, best_d = None, tol
     for obj in doc.objects:
         if isinstance(obj, AbstractPoint) and obj.visible and obj.exists:

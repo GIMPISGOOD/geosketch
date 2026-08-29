@@ -26,21 +26,30 @@ def arrow_path(tip: QPointF, angle_deg: float) -> QPainterPath:
     return path
 
 def draw_background_cached(canvas, p: QPainter) -> None:
+    # ── 缓存 key 加入 settings.version ──
+    s_ver = canvas.doc.settings.version if hasattr(canvas.doc, 'settings') else 0
     key = (canvas.width(), canvas.height(),
            round(canvas.origin.x(), 2), round(canvas.origin.y(), 2),
-           round(canvas.scale, 2), theme.active_name())
+           round(canvas.scale, 2), theme.active_name(), s_ver)
     if canvas._bg_cache is not None and canvas._bg_cache_key == key:
         p.drawPixmap(0, 0, canvas._bg_cache)
         return
     dpr = canvas.devicePixelRatioF()
-    canvas._bg_cache = QPixmap(int(canvas.width() * dpr), int(canvas.height() * dpr))
+    canvas._bg_cache = QPixmap(int(canvas.width() * dpr),
+                               int(canvas.height() * dpr))
     canvas._bg_cache.setDevicePixelRatio(dpr)
     canvas._bg_cache.fill(Qt.GlobalColor.transparent)
     bg_p = QPainter(canvas._bg_cache)
     bg_p.setRenderHint(QPainter.RenderHint.Antialiasing)
     draw_background(canvas, bg_p)
-    draw_grid(canvas, bg_p)
-    draw_axes(canvas, bg_p)
+
+    # ── 根据设置决定是否绘制网格和轴 ──
+    s = canvas.doc.settings if hasattr(canvas.doc, 'settings') else None
+    if s is None or s.get("canvas.grid_visible", True):
+        draw_grid(canvas, bg_p)
+    if s is None or s.get("canvas.axis_visible", True):
+        draw_axes(canvas, bg_p)
+
     bg_p.end()
     canvas._bg_cache_key = key
     p.drawPixmap(0, 0, canvas._bg_cache)
@@ -101,6 +110,11 @@ def draw_axes(canvas, p: QPainter) -> None:
     if 0.0 <= ox <= w:
         p.drawLine(QPointF(ox, 0.0), QPointF(ox, h))
         p.drawPath(arrow_path(QPointF(ox, 2.0), 90.0))
+
+    # ── 轴标注（受设置控制）──
+    s = canvas.doc.settings if hasattr(canvas.doc, 'settings') else None
+    if s is not None and not s.get("canvas.axis_labels_visible", True):
+        return
     p.setPen(theme.pen(theme.LABEL, 1.0))
     p.setFont(theme.AXIS_FONT)
     if 0.0 <= oy <= h:
@@ -402,8 +416,15 @@ def find_label_offset(p, sp, label, view, screen_segments):
 def draw_publication_point(p, obj, view, screen_segments):
     from PySide6.QtGui import QFont, QPen
     label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "") or f"P{obj.id}"
-    font = QFont("Times New Roman", 16)
+
+    # ── 从设置读取出版字体 ──
+    s = view.doc.settings if hasattr(view.doc, 'settings') else None
+    pub_family = s.get("appearance.publication_font_family",
+                       "Times New Roman") if s else "Times New Roman"
+    pub_size = int(s.get("appearance.publication_font_size", 16)) if s else 16
+    font = QFont(pub_family, max(1, pub_size))
     font.setItalic(True)
+
     p.setFont(font)
     p.setPen(QPen(QColor("#000000"), 1.0))
     sp = view.to_screen(obj.x, obj.y)

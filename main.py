@@ -1,10 +1,11 @@
 import sys
 import os
+from PySide6.QtCore import qInstallMessageHandler, QtMsgType
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import QApplication
 from ui.main_window import MainWindow
 from ui import theme
-
+from core.settings import DEFAULTS  
 
 def _shutdown_all_threads():
     """程序退出前安全终止所有后台线程。"""
@@ -16,7 +17,14 @@ def _shutdown_all_threads():
         shutdown_implicit_sampler()
     except ImportError:
         pass
-
+    
+def _qt_message_filter(msg_type, context, message):
+    """过滤 Qt 内部的无害字体警告，避免控制台刷屏。"""
+    # 过滤 DirectWrite 位图字体加载失败（Windows 遗留字体）
+    if msg_type == QtMsgType.QtWarningMsg and "CreateFontFaceFromHDC" in message:
+        return
+    # 其余消息正常输出
+    print(message)
 
 def load_constraints() -> None:
     """加载几何约束求解器扩展"""
@@ -37,9 +45,11 @@ def load_animation() -> None:
 def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
+    # ── 使用 DEFAULTS 中的默认值初始化全局字体 ──
     font = QFont()
-    font.setFamilies(["Segoe UI", "PingFang SC", "Microsoft YaHei", "sans-serif"])
-    font.setPointSize(10)
+    families = DEFAULTS["appearance"]["ui_font_family"]
+    font.setFamilies(families if isinstance(families, list) else [families])
+    font.setPointSize(int(DEFAULTS["appearance"]["ui_font_size"]))
     app.setFont(font)
     app.setStyleSheet(theme.app_stylesheet())
     app.aboutToQuit.connect(_shutdown_all_threads)

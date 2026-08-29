@@ -150,6 +150,15 @@ def app_stylesheet() -> str:
 
 def canvas_qss() -> str:
     t = THEMES[_active]
+    
+    # ── 动态字号计算 ──
+    base_sz = 10
+    if _active_settings is not None:
+        base_sz = int(_active_settings.get("appearance.ui_font_size", 10))
+    
+    def _sz(delta: int = 0) -> int:
+        return max(6, base_sz + delta)
+
     return f"""
 /* ================= 工具栏 ================= */
 #toolRail {{
@@ -158,19 +167,15 @@ def canvas_qss() -> str:
     border-radius: 14px;
 }}
 #toolRail QToolButton {{
-    border: none;
-    background: transparent;
-    border-radius: 10px;
-    color: {t["INK"]};
-    font-weight: 600;
+    border: none; background: transparent; border-radius: 10px;
+    color: {t["INK"]}; font-weight: 600;
+    font-size: {_sz()}px;
 }}
-#toolRail QToolButton:hover {{
-    background: {t["PANEL_HOVER"]};
-}}
+#toolRail QToolButton:hover {{ background: {t["PANEL_HOVER"]}; }}
 #toolRail QToolButton:checked {{
-    background: {t["PANEL_CHECKED"]};
-    color: {t["ACCENT"]};
+    background: {t["PANEL_CHECKED"]}; color: {t["ACCENT"]};
 }}
+
 /* ================= 缩放栏 ================= */
 #zoomBar {{
     background: {t["PANEL_BG"]};
@@ -178,115 +183,88 @@ def canvas_qss() -> str:
     border-radius: 14px;
 }}
 #zoomBar QLabel {{
-    color: {t["SUBINK"]};
-    font-weight: 600;
+    color: {t["SUBINK"]}; font-weight: 600;
+    font-size: {_sz()}px;
 }}
 #zoomBar QToolButton {{
-    border: none;
-    background: transparent;
-    border-radius: 9px;
-    color: {t["INK"]};
-    font-weight: 600;
+    border: none; background: transparent; border-radius: 9px;
+    color: {t["INK"]}; font-weight: 600;
 }}
-#zoomBar QToolButton:hover {{
-    background: {t["PANEL_HOVER"]};
-}}
+#zoomBar QToolButton:hover {{ background: {t["PANEL_HOVER"]}; }}
+
 /* ================= 文本编辑器 ================= */
 #textEditor {{
     background: {t["PANEL_BG"]};
     border: 1px solid {t["SELECTED"]};
     border-radius: 14px;
 }}
+
 /* ================= 属性面板 ================= */
 #propertyPanel {{
     background: {t["PANEL_BG"]};
     border: 1px solid {t["PANEL_BORDER"]};
     border-radius: 12px;
 }}
-#propertyPanel QScrollArea {{
-    background: transparent;
-    border: none;
-}}
-#propertyPanel QScrollArea > QWidget > QWidget {{
-    background: transparent;
-}}
-#propertyPanel QWidget {{
-    background: transparent;
-}}
+#propertyPanel QScrollArea {{ background: transparent; border: none; }}
+#propertyPanel QScrollArea > QWidget > QWidget {{ background: transparent; }}
+#propertyPanel QWidget {{ background: transparent; }}
 #propertyPanel QLabel {{
-    color: {t["INK"]};
-    background: transparent;
+    color: {t["INK"]}; background: transparent;
+    font-size: {_sz()}px;
 }}
 #propertyPanel #panelTitle {{
-    font-size: 15px;
-    font-weight: 700;
-    color: {t["INK"]};
-    background: transparent;
+    font-size: {_sz(3)}px; font-weight: 700;
+    color: {t["INK"]}; background: transparent;
 }}
 #propertyPanel #panelSubtitle {{
-    font-size: 11px;
-    color: {t["SUBINK"]};
-    background: transparent;
+    font-size: {_sz(-1)}px;
+    color: {t["SUBINK"]}; background: transparent;
 }}
 #propertyPanel QLineEdit,
 #propertyPanel QDoubleSpinBox,
 #propertyPanel QComboBox {{
-    background: {t["WINDOW_BG"]};
-    color: {t["INK"]};
-    border: 1px solid {t["PANEL_BORDER"]};
-    border-radius: 6px;
-    padding: 3px 6px;
-    font-size: 12px;
+    background: {t["WINDOW_BG"]}; color: {t["INK"]};
+    border: 1px solid {t["PANEL_BORDER"]}; border-radius: 6px;
+    padding: 3px 6px; font-size: {_sz()}px;
 }}
 #propertyPanel QCheckBox {{
-    color: {t["INK"]};
-    background: transparent;
+    color: {t["INK"]}; background: transparent;
+    font-size: {_sz()}px;
 }}
 #propertyPanel QPushButton {{
-    background: {t["PANEL_HOVER"]};
-    color: {t["INK"]};
-    border: 1px solid {t["PANEL_BORDER"]};
-    border-radius: 6px;
-    padding: 4px 10px;
-    font-size: 12px;
+    background: {t["PANEL_HOVER"]}; color: {t["INK"]};
+    border: 1px solid {t["PANEL_BORDER"]}; border-radius: 6px;
+    padding: 4px 10px; font-size: {_sz()}px;
 }}
-#propertyPanel QPushButton:hover {{
-    background: {t["PANEL_CHECKED"]};
-}}
+#propertyPanel QPushButton:hover {{ background: {t["PANEL_CHECKED"]}; }}
 #propertyPanel #collapseBtn,
 #propertyPanel #expandBtn {{
     background: transparent;
     border: 1px solid rgba(120,140,170,0.5);
     border-radius: 4px;
     color: {t["SUBINK"]};
-    font-size: 13px;
-    font-weight: bold;
+    font-size: {_sz(1)}px; font-weight: bold;
     padding: 2px;
 }}
 #propertyPanel #collapseBtn:hover,
 #propertyPanel #expandBtn:hover {{
     background: {t["PANEL_HOVER"]};
-    border-color: {t["ACCENT"]};
-    color: {t["ACCENT"]};
+    border-color: {t["ACCENT"]}; color: {t["ACCENT"]};
 }}
+
 /* ================= 滑杆 ================= */
 #propertyPanel QSlider::groove:horizontal {{
-    background: transparent;
-    height: 8px;
+    background: transparent; height: 8px;
 }}
 #propertyPanel QSlider::sub-page:horizontal {{
-    background: {t["PANEL_BG"]};
-    border-radius: 3px;
+    background: {t["PANEL_BG"]}; border-radius: 3px;
 }}
 #propertyPanel QSlider::add-page:horizontal {{
-    background: rgba(120,140,170,0.35);
-    border-radius: 3px;
+    background: rgba(120,140,170,0.35); border-radius: 3px;
 }}
 #propertyPanel QSlider::handle:horizontal {{
     background: rgba(120,140,170,0.60);
-    width: 8px;
-    margin: 2px;
-    border-radius: 3px;
+    width: 8px; margin: 2px; border-radius: 3px;
 }}
 """
 
@@ -341,10 +319,29 @@ def brush(color):
 
 LABEL_FONT = QFont("Consolas", 9)
 LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
-
 AXIS_FONT = QFont("Georgia", 11, QFont.Weight.DemiBold)
 AXIS_FONT.setItalic(True)
+_active_settings = None
 
+def set_settings(settings_store) -> None:
+    """注入当前文档的 SettingsStore，供 QSS 生成函数读取字号。"""
+    global _active_settings
+    _active_settings = settings_store
+
+def refresh_fonts(settings) -> None:
+    global LABEL_FONT, AXIS_FONT
+    LABEL_FONT = QFont(
+        settings.get("appearance.label_font_family", "Consolas"),
+        max(1, int(settings.get("appearance.label_font_size", 9))),
+    )
+    LABEL_FONT.setStyleHint(QFont.StyleHint.Monospace)
+    AXIS_FONT = QFont(
+        settings.get("appearance.axis_font_family", "Georgia"),
+        max(1, int(settings.get("appearance.axis_font_size", 11))),
+        QFont.Weight.DemiBold,
+    )
+    AXIS_FONT.setItalic(True)
+    
 # ───────────── 自定义主题 ─────────────
 def save_custom_theme(name, colors_dict):
     """把当前颜色字典保存为自定义主题（写入 THEMES）。"""

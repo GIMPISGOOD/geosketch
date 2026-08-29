@@ -12,9 +12,10 @@ from core.registry import GEO_REGISTRY
 from geo.base import GeoObject
 from geo.points import FreePoint, AbstractPoint, PointOnObject ,_index_to_letters, _index_to_subscript
 from core.variables import get_store
+from core.settings import SettingsStore   
 from geo.constraints import ExprSegment, ExprAngle, ExprCircle, ExprPoint
 
-UNDO_LIMIT = 100
+UNDO_LIMIT = 100  # 默认参考值；运行时由 Document.settings["workflow.undo_limit"] 控制
 
 # ── 可选导入：约束求解器 ──────────────────────────────────
 try:
@@ -46,6 +47,7 @@ class Document(QObject):
 
     def __init__(self):
         super().__init__()
+        self.settings = SettingsStore()    
         self.objects = []
         self._undo = []
         self._redo = []
@@ -542,7 +544,8 @@ class Document(QObject):
 
     def _push_undo(self):
         self._undo.append(self._full_state())
-        if len(self._undo) > UNDO_LIMIT:
+        limit = self.settings.get("workflow.undo_limit", UNDO_LIMIT)
+        if len(self._undo) > limit:
             self._undo.pop(0)
         self._redo.clear()
         self.history_changed.emit()
@@ -590,7 +593,8 @@ class Document(QObject):
     def _commit_undo_if_changed(self):
         if self._pending is not None and self._mutation_count != self._mut_before:
             self._undo.append(self._pending)
-            if len(self._undo) > UNDO_LIMIT:
+            limit = self.settings.get("workflow.undo_limit", UNDO_LIMIT)
+            if len(self._undo) > limit:
                 self._undo.pop(0)
             self._redo.clear()
             self.history_changed.emit()
@@ -748,6 +752,14 @@ class Document(QObject):
                 zf.writestr("script_libs.json",
                             json.dumps(self.script_libs, ensure_ascii=False,
                                        indent=1))
+            try:
+                zf.writestr("settings.json",
+                        json.dumps(self.settings.to_dict(),
+                                   ensure_ascii=False, indent=1))
+            except Exception:
+                zf.writestr("settings.json", "{}")            
+            
+            
             # 内嵌图片
             for obj in self.objects:
                 if type(obj).__name__ == "ImageObject":
@@ -869,7 +881,12 @@ class Document(QObject):
                 self.meta = json.loads(zf.read("meta.data"))
                 if self.meta.get("theme") in _theme.theme_names():
                     _theme.set_theme(self.meta["theme"])
-
+            if "settings.json" in names:
+                try:
+                    self.settings.load_dict(
+                    json.loads(zf.read("settings.json")))
+                except Exception:
+                    pass 
             if "macros.json" in names:
                 try:
                     self.macros = json.loads(zf.read("macros.json"))
