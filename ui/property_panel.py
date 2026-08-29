@@ -110,6 +110,8 @@ class PropertyPanel(QWidget):
         self._timer.setSingleShot(True)
         self._timer.setInterval(80)
         self._timer.timeout.connect(self._do_refresh)
+        self._animating = False          # ← 新增：动画期间抑制刷新
+        self._width_anim = None  
         self.canvas.doc.changed.connect(self._schedule_refresh)
 
         # ★ 主题切换时重新应用样式
@@ -144,23 +146,71 @@ class PropertyPanel(QWidget):
     # ──────────────────────────────────────────────────────
     def _toggle_collapse(self) -> None:
         self._collapsed = not self._collapsed
+
+        # ── 读取动效设置 ──
+        s = self.canvas.doc.settings
+        use_anim = bool(s.get("effects.enabled", True))
+        duration = int(s.get("effects.panel_toggle_ms", 200))
+
+        # ── 无动画：保持原有瞬间切换 ──
+        if not use_anim or duration <= 0:
+            if self._collapsed:
+                self._expanded_widget.hide()
+                self._collapsed_widget.show()
+                self.setFixedWidth(self._collapsed_width)
+                self.setFixedHeight(90)
+                self.reposition()
+            else:
+                self._collapsed_widget.hide()
+                self._expanded_widget.show()
+                self.setFixedWidth(self._expanded_width)
+                self.setMinimumHeight(0)
+                self.setMaximumHeight(16777215)
+                target_h = max(320, min(600, self.canvas.height() - 80))
+                self.resize(self._expanded_width, target_h)
+                self.reposition()
+                self.raise_()
+            return
+
+        # ── 有动画 ──
+        from ui.anim_helpers import slide_width
+
+        self._animating = True
+        start_w = self.width()
+
         if self._collapsed:
-            self._expanded_widget.hide()
-            self._collapsed_widget.show()
-            self.setFixedWidth(self._collapsed_width)
-            self.setFixedHeight(90)
-            self.reposition()          # ★ 折叠后也必须重新定位
+            target_w = self._collapsed_width
+
+            def _on_fold_done():
+                self._expanded_widget.hide()
+                self._collapsed_widget.show()
+                self.setFixedWidth(self._collapsed_width)
+                self.setFixedHeight(90)
+                self.reposition()
+                self._animating = False
+
+            self._width_anim = slide_width(
+                self, start_w, target_w, duration, _on_fold_done)
+
         else:
+            target_w = self._expanded_width
+            # 先切换内容可见性，再展开宽度
             self._collapsed_widget.hide()
             self._expanded_widget.show()
-            self.setFixedWidth(self._expanded_width)
             self.setMinimumHeight(0)
             self.setMaximumHeight(16777215)
             target_h = max(320, min(600, self.canvas.height() - 80))
-            self.resize(self._expanded_width, target_h)
-            self.reposition()
-            self.raise_()
+            self.resize(target_w, target_h)
 
+            def _on_expand_done():
+                self.setFixedWidth(self._expanded_width)
+                self.reposition()
+                self.raise_()
+                self._animating = False
+
+            self._width_anim = slide_width(
+                self, start_w, target_w, duration, _on_expand_done)
+            
     def reposition(self) -> None:
         # ★ 用已知宽度值，不依赖 self.width()（setFixedWidth 是异步的）
         w = self._collapsed_width if self._collapsed else self._expanded_width
@@ -174,7 +224,7 @@ class PropertyPanel(QWidget):
     #  刷新调度
     # ──────────────────────────────────────────────────────
     def _schedule_refresh(self) -> None:
-        if not self._collapsed:
+        if not self._collapsed and not self._animating:   # ← 改
             self._timer.start()
 
     def refresh(self) -> None:

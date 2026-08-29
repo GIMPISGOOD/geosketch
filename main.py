@@ -43,6 +43,7 @@ def load_animation() -> None:
         print("错误信息:", e)
 
 def main() -> None:
+    qInstallMessageHandler(_qt_message_filter)
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
     # ── 使用 DEFAULTS 中的默认值初始化全局字体 ──

@@ -150,14 +150,37 @@ def app_stylesheet() -> str:
 
 def canvas_qss() -> str:
     t = THEMES[_active]
-    
-    # ── 动态字号计算 ──
+
+    # ── 动态字号 ──
     base_sz = 10
     if _active_settings is not None:
         base_sz = int(_active_settings.get("appearance.ui_font_size", 10))
-    
+
     def _sz(delta: int = 0) -> int:
         return max(6, base_sz + delta)
+
+    # ── 悬停规则（受 effects.hover_highlight 控制）──
+    hover_on = True
+    if _active_settings is not None:
+        hover_on = bool(_active_settings.get("effects.hover_highlight", True))
+
+    hover_rules = ""
+    if hover_on:
+        hover_rules = f"""
+#toolRail QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+#zoomBar QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+#propertyPanel QPushButton:hover {{
+    background: {t["PANEL_CHECKED"]};
+}}
+#propertyPanel #collapseBtn:hover,
+#propertyPanel #expandBtn:hover {{
+    background: {t["PANEL_HOVER"]};
+    border-color: {t["ACCENT"]}; color: {t["ACCENT"]};
+}}"""
 
     return f"""
 /* ================= 工具栏 ================= */
@@ -171,7 +194,6 @@ def canvas_qss() -> str:
     color: {t["INK"]}; font-weight: 600;
     font-size: {_sz()}px;
 }}
-#toolRail QToolButton:hover {{ background: {t["PANEL_HOVER"]}; }}
 #toolRail QToolButton:checked {{
     background: {t["PANEL_CHECKED"]}; color: {t["ACCENT"]};
 }}
@@ -190,7 +212,6 @@ def canvas_qss() -> str:
     border: none; background: transparent; border-radius: 9px;
     color: {t["INK"]}; font-weight: 600;
 }}
-#zoomBar QToolButton:hover {{ background: {t["PANEL_HOVER"]}; }}
 
 /* ================= 文本编辑器 ================= */
 #textEditor {{
@@ -236,7 +257,6 @@ def canvas_qss() -> str:
     border: 1px solid {t["PANEL_BORDER"]}; border-radius: 6px;
     padding: 4px 10px; font-size: {_sz()}px;
 }}
-#propertyPanel QPushButton:hover {{ background: {t["PANEL_CHECKED"]}; }}
 #propertyPanel #collapseBtn,
 #propertyPanel #expandBtn {{
     background: transparent;
@@ -245,11 +265,6 @@ def canvas_qss() -> str:
     color: {t["SUBINK"]};
     font-size: {_sz(1)}px; font-weight: bold;
     padding: 2px;
-}}
-#propertyPanel #collapseBtn:hover,
-#propertyPanel #expandBtn:hover {{
-    background: {t["PANEL_HOVER"]};
-    border-color: {t["ACCENT"]}; color: {t["ACCENT"]};
 }}
 
 /* ================= 滑杆 ================= */
@@ -266,8 +281,8 @@ def canvas_qss() -> str:
     background: rgba(120,140,170,0.60);
     width: 8px; margin: 2px; border-radius: 3px;
 }}
+{hover_rules}
 """
-
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
 # ───────────────────────── 绘图工具（带缓存）─────────────────────────
 
@@ -341,6 +356,16 @@ def refresh_fonts(settings) -> None:
         QFont.Weight.DemiBold,
     )
     AXIS_FONT.setItalic(True)
+
+def default_line_width() -> float:
+    """从偏好设置读取几何对象的默认线宽。
+
+    仅用于几何对象渲染（点环、出版模式等），
+    轴线 / 网格线保持各自硬编码线宽。
+    """
+    if _active_settings is not None:
+        return float(_active_settings.get("appearance.default_line_width", 2.0))
+    return 2.0
     
 # ───────────── 自定义主题 ─────────────
 def save_custom_theme(name, colors_dict):

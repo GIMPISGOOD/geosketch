@@ -417,8 +417,7 @@ def draw_publication_point(p, obj, view, screen_segments):
     from PySide6.QtGui import QFont, QPen
     label = getattr(obj, "name", "") or getattr(obj, "_auto_label", "") or f"P{obj.id}"
 
-    # ── 从设置读取出版字体 ──
-    s = view.doc.settings if hasattr(view.doc, 'settings') else None
+    s = getattr(view.doc, 'settings', None)
     pub_family = s.get("appearance.publication_font_family",
                        "Times New Roman") if s else "Times New Roman"
     pub_size = int(s.get("appearance.publication_font_size", 16)) if s else 16
@@ -426,7 +425,7 @@ def draw_publication_point(p, obj, view, screen_segments):
     font.setItalic(True)
 
     p.setFont(font)
-    p.setPen(QPen(QColor("#000000"), 1.0))
+    p.setPen(QPen(QColor("#000000"), theme.default_line_width()))  # ← 改
     sp = view.to_screen(obj.x, obj.y)
     offset = find_label_offset(p, sp, label, view, screen_segments)
     p.drawText(sp + offset, label)

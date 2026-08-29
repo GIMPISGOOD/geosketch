@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
         self.doc.settings.changed.connect(self._on_settings_changed)
         self._apply_ui_font()
         self._restart_autosave()
+
+        from ui import anim_helpers                      # ← 新增
+        anim_helpers.set_settings(self.doc.settings)  
                 
     def _build_constraint_menu(self):
         """原生构建约束菜单。"""

@@ -105,11 +105,13 @@ def draw_point(p, obj, view):
     if s is not None:
         r_sel = float(s.get("appearance.selected_point_radius", 6.0))
         r_def = float(s.get("appearance.default_point_radius", 4.0))
+        ring_w = theme.default_line_width()          # ← 改：点环线宽
+        math_scale = float(s.get("appearance.math_scale", 1.0))
     else:
-        r_sel, r_def = 6.0, 4.0
+        r_sel, r_def, ring_w, math_scale = 6.0, 4.0, 2.0, 1.0
     r = r_sel if obj.selected else r_def
 
-    p.setPen(theme.pen(theme.POINT_RING, 2))
+    p.setPen(theme.pen(theme.POINT_RING, ring_w))    # ← 改
     p.setBrush(theme.brush(theme.SELECTED if obj.selected else theme.POINT_FILL))
     p.drawEllipse(qpt, r, r)
 
@@ -117,13 +119,7 @@ def draw_point(p, obj, view):
     if not label:
         label = f"P{obj.id}"
 
-    # ── 标签字号受 math_scale 控制 ──
-    if s is not None:
-        math_scale = float(s.get("appearance.math_scale", 1.0))
-    else:
-        math_scale = 1.0
-    label_size = int(13 * math_scale)
-
+    label_size = int(13 * math_scale)                # ← 改
     draw_math(
         p,
         qpt.x() + 9,
