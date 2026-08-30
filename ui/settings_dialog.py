@@ -38,6 +38,43 @@ _PAGES = [
     ("🤖 ", "AI"),
 ]
 
+from PySide6.QtCore import QThread, Signal as _Signal
+
+class _ApiTestThread(QThread):
+    """后台测试远程 API 连接，避免阻塞设置对话框。"""
+    finished_ok  = _Signal()
+    finished_err = _Signal(str)
+
+    def __init__(self, url: str, key: str, model: str, parent=None):
+        super().__init__(parent)
+        self._url   = url
+        self._key   = key
+        self._model = model
+
+    def run(self):
+        try:
+            import requests as req
+        except ImportError:
+            self.finished_err.emit("requests 库未安装")
+            return
+        try:
+            r = req.post(
+                self._url,
+                json={
+                    "model": self._model or "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 1,
+                },
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._key}",
+                },
+                timeout=8,
+            )
+            r.raise_for_status()
+            self.finished_ok.emit()
+        except Exception as e:
+            self.finished_err.emit(str(e)[:120])
 
 class SettingsDialog(QDialog):
     """模态偏好设置对话框。
@@ -304,9 +341,20 @@ class SettingsDialog(QDialog):
         dir_row.addWidget(_browse)
         lf.addRow("模型目录", dir_row)
 
+        # 通用模型（回退）
         self._w_ai_model_file = QComboBox()
         self._w_ai_model_file.addItem("自动选择", "")
-        lf.addRow("模型文件", self._w_ai_model_file)
+        lf.addRow("默认模型", self._w_ai_model_file)
+
+        # 补全专用模型
+        self._w_ai_complete_model = QComboBox()
+        self._w_ai_complete_model.addItem("使用默认", "")
+        lf.addRow("补全模型", self._w_ai_complete_model)
+
+        # 生成专用模型
+        self._w_ai_generate_model = QComboBox()
+        self._w_ai_generate_model.addItem("使用默认", "")
+        lf.addRow("生成模型", self._w_ai_generate_model)
 
         self._w_ai_detect_lbl = QLabel("")
         lf.addRow("检测状态", self._w_ai_detect_lbl)
@@ -385,19 +433,30 @@ class SettingsDialog(QDialog):
             self._scan_ai_models()
 
     def _scan_ai_models(self):
-        """扫描模型目录，更新检测状态和启用开关。"""
         try:
             from core.ai_service import AIService
-            # 临时构造一个 AIService 仅用于扫描
-            svc = AIService(self._s)
+            svc = AIService.instance()
+            svc._settings = self._s          # 临时注入用于扫描
             provider_idx = self._w_ai_provider.currentIndex()
 
-            if provider_idx == 0:  # 本地
+            if provider_idx == 0:
                 models = svc.discover_models()
-                self._w_ai_model_file.clear()
-                self._w_ai_model_file.addItem("自动选择", "")
-                for m in models:
-                    self._w_ai_model_file.addItem(m, m)
+                for combo in (self._w_ai_model_file,
+                              self._w_ai_complete_model,
+                              self._w_ai_generate_model):
+                    current = combo.currentData()
+                    combo.clear()
+                    if combo is self._w_ai_model_file:
+                        combo.addItem("自动选择", "")
+                    else:
+                        combo.addItem("使用默认", "")
+                    for m in models:
+                        combo.addItem(m, m)
+                    # 恢复之前的选择
+                    idx = combo.findData(current)
+                    if idx >= 0:
+                        combo.setCurrentIndex(idx)
+
                 if models:
                     self._w_ai_detect_lbl.setText(
                         f"✅ 找到 {len(models)} 个模型")
@@ -408,7 +467,7 @@ class SettingsDialog(QDialog):
                     self._w_ai_detect_lbl.setStyleSheet("color: #e03131;")
                     self._w_ai_enabled.setEnabled(False)
                     self._w_ai_enabled.setChecked(False)
-            else:  # 远程
+            else:
                 url = self._w_ai_api_url.text().strip()
                 key = self._w_ai_api_key.text().strip()
                 if url and key:
@@ -427,7 +486,6 @@ class SettingsDialog(QDialog):
             self._w_ai_enabled.setChecked(False)
 
     def _on_ai_test(self):
-        """测试远程 API 连接（后台线程）。"""
         url = self._w_ai_api_url.text().strip()
         key = self._w_ai_api_key.text().strip()
         model = self._w_ai_api_model.text().strip()
@@ -435,32 +493,25 @@ class SettingsDialog(QDialog):
             self._w_ai_test_lbl.setText("❌ 请先填写 API 地址")
             self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
             return
-        self._w_ai_test_lbl.setText("测试中…")
         self._w_ai_test_btn.setEnabled(False)
-        QApplication.processEvents()
-        try:
-            import requests as req
-            headers = {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {key}",
-            }
-            payload = {
-                "model": model or "gpt-4o-mini",
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 1,
-            }
-            r = req.post(url, json=payload, headers=headers, timeout=5)
-            r.raise_for_status()
-            self._w_ai_test_lbl.setText("✅ 连接成功")
-            self._w_ai_test_lbl.setStyleSheet("color: #2f9e44;")
-        except ImportError:
-            self._w_ai_test_lbl.setText("❌ requests 未安装")
-            self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
-        except Exception as e:
-            self._w_ai_test_lbl.setText(f"❌ {e}")
-            self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
-        finally:
-            self._w_ai_test_btn.setEnabled(True)
+        self._w_ai_test_lbl.setText("测试中…")
+        self._w_ai_test_lbl.setStyleSheet("color: #868e96;")
+
+        # ★ #3 异步测试：QThread 包装
+        self._test_thread = _ApiTestThread(url, key, model, self)
+        self._test_thread.finished_ok.connect(self._on_test_ok)
+        self._test_thread.finished_err.connect(self._on_test_err)
+        self._test_thread.start()
+
+    def _on_test_ok(self):
+        self._w_ai_test_lbl.setText("✅ 连接成功")
+        self._w_ai_test_lbl.setStyleSheet("color: #2f9e44;")
+        self._w_ai_test_btn.setEnabled(True)
+
+    def _on_test_err(self, msg: str):
+        self._w_ai_test_lbl.setText(f"❌ {msg}")
+        self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
+        self._w_ai_test_btn.setEnabled(True)
     # ══════════════════════════════════════════════════
     #  读取 / 写入
     # ══════════════════════════════════════════════════
@@ -542,6 +593,15 @@ class SettingsDialog(QDialog):
         self._on_ai_provider_changed(
             self._w_ai_provider.currentIndex())
         self._scan_ai_models()
+        # 双模型
+        cf = s.get("ai.complete_model_file", "")
+        idx = self._w_ai_complete_model.findData(cf)
+        if idx >= 0:
+            self._w_ai_complete_model.setCurrentIndex(idx)
+        gf = s.get("ai.generate_model_file", "")
+        idx = self._w_ai_generate_model.findData(gf)
+        if idx >= 0:
+            self._w_ai_generate_model.setCurrentIndex(idx)
         
     def _apply(self):
         """从控件读取值 → 批量写入 SettingsStore。"""
@@ -610,6 +670,10 @@ class SettingsDialog(QDialog):
             s.set("ai.max_tokens",   self._w_ai_max_tok.value())
             s.set("ai.temperature",  self._w_ai_temp.value())
             s.set("ai.timeout_ms",   self._w_ai_timeout.value())
+            s.set("ai.complete_model_file",
+              self._w_ai_complete_model.currentData() or "")
+            s.set("ai.generate_model_file",
+              self._w_ai_generate_model.currentData() or "")
     # ══════════════════════════════════════════════════
     #  按钮槽
     # ══════════════════════════════════════════════════

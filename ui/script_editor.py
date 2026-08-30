@@ -412,26 +412,29 @@ class ScriptEditorDialog(QDialog):
     # ── AI 初始化 ──────────────────────────────────
 
     def _init_ai(self):
-        """按设置决定是否初始化 AI 服务。"""
         try:
             from core.ai_service import AIService
-            svc = AIService(self.canvas.doc.settings, self)
+            svc = AIService.instance()
+            svc.acquire(self.canvas.doc.settings)
+            self._ai_service = svc
+
             if not svc.is_configured():
                 self._ai_complete_btn.setEnabled(False)
                 self._ai_generate_btn.setEnabled(False)
                 self._ai_status_lbl.setText("")
                 return
-            self._ai_service = svc
+
             svc.loaded.connect(self._on_ai_loaded)
             svc.load_failed.connect(self._on_ai_load_failed)
             svc.result_ready.connect(self._on_ai_result)
             svc.error.connect(self._on_ai_error)
-            # 后台加载
+
             self._ai_status_lbl.setText("AI 加载中…")
             self._ai_complete_btn.setEnabled(False)
             self._ai_generate_btn.setEnabled(False)
-            svc.ensure_loaded()
+            svc.ensure_loaded("complete")
         except Exception:
+            self._ai_service = None
             self._ai_complete_btn.setEnabled(False)
             self._ai_generate_btn.setEnabled(False)
 
@@ -450,32 +453,57 @@ class ScriptEditorDialog(QDialog):
 
     def _on_ai_error(self, msg: str):
         self._log.log_error(f"AI 错误: {msg}")
-
-    # ── AI 补全 ────────────────────────────────────
-    
+        
     def _ai_complete(self):
         if self._ai_service is None:
             return
         usage = self.canvas.doc.settings.get("ai.usage", "both")
         if usage == "generate":
             return
+
+        # 取光标前的代码上下文
         cursor = self.editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         cursor.setPosition(self.editor.textCursor().position(),
                            QTextCursor.MoveMode.KeepAnchor)
         context = cursor.selectedText()
         max_chars = int(
-            self.canvas.doc.settings.get("ai.context_tokens", 512)) * 4
+            self.canvas.doc.settings.get("ai.context_tokens", 2048)) * 3
         if len(context) > max_chars:
             context = context[-max_chars:]
+
+        # ★ 画布对象摘要（#4 补全上下文增强）
+        env_summary = self._build_env_summary()
+
         prompt = (
             "补全以下 GeoSketch DSL 代码。"
             "只输出需要补全的代码行，不要重复已有代码，"
             "不要解释，不要使用代码块标记。\n"
-            + context
         )
+        if env_summary:
+            prompt += f"当前画布对象：{env_summary}\n"
+        prompt += context
+
         self._ai_status_lbl.setText("AI 思考中…")
         self._ai_service.request(prompt, "complete")
+
+    def _build_env_summary(self) -> str:
+        """构建当前画布对象摘要，限制 20 个对象防止上下文过长。"""
+        try:
+            doc = self.canvas.doc
+            names = getattr(doc, "names", {})
+            if not names:
+                return ""
+            parts = []
+            for i, (name, obj) in enumerate(names.items()):
+                if i >= 20:
+                    parts.append(f"…共{len(names)}个")
+                    break
+                tn = type(obj).__name__
+                parts.append(f"{name}({tn})")
+            return ", ".join(parts)
+        except Exception:
+            return ""
 
     # ── AI 生成 ────────────────────────────────────
 
@@ -500,28 +528,47 @@ class ScriptEditorDialog(QDialog):
         self._log.log_ai(f"生成请求: {desc.strip()}")
         self._ai_service.request(prompt, "generate")
 
-    # ── AI 结果回调 ────────────────────────────────
-
     def _on_ai_result(self, text: str, mode: str):
         self._ai_status_lbl.setText("AI ● 就绪")
         self._ai_status_lbl.setStyleSheet("color: #2f9e44;")
         if not text.strip():
             self._log.log_ai("（无结果）")
             return
+
         if mode == "complete":
-            # 直接插入到光标位置
             self.editor.insertPlainText(text)
             self._log.log_ai(f"补全: {text[:80]}…")
+
         elif mode == "generate":
+            # ★ #2 语法校验：插入前用 parse() 检查
+            try:
+                parse(text)
+                syntax_ok = True
+            except ScriptError as e:
+                syntax_ok = False
+                self._log.log_error(f"AI 生成代码语法错误: {e}")
+            except Exception:
+                syntax_ok = False
+                self._log.log_error("AI 生成代码解析失败")
+
             self._log.log_ai(f"生成结果:\n{text}")
-            # 询问用户是否插入
-            reply = QMessageBox.question(
-                self, "AI 生成结果",
-                "是否将生成的代码插入编辑器？",
-                QMessageBox.StandardButton.Yes
-                | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                self.editor.insertPlainText(text)
+
+            if syntax_ok:
+                reply = QMessageBox.question(
+                    self, "AI 生成结果",
+                    "语法校验通过 ✔\n是否将代码插入编辑器？",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.editor.insertPlainText(text)
+            else:
+                reply = QMessageBox.question(
+                    self, "AI 生成结果（语法有误）",
+                    "⚠ 生成的代码存在语法错误。\n仍然插入编辑器？",
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    self.editor.insertPlainText(text)
 
     # ── 日志回调（注入到 print） ──────────────────
 
@@ -618,7 +665,15 @@ class ScriptEditorDialog(QDialog):
     def _cleanup_ai(self):
         if self._ai_service is not None:
             try:
-                self._ai_service.unload()
+                # 断开信号，防止关闭后仍收到回调
+                self._ai_service.loaded.disconnect(self._on_ai_loaded)
+                self._ai_service.load_failed.disconnect(self._on_ai_load_failed)
+                self._ai_service.result_ready.disconnect(self._on_ai_result)
+                self._ai_service.error.disconnect(self._on_ai_error)
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                self._ai_service.release()   # ★ 不直接 unload，由引用计数管理
             except Exception:
                 pass
             self._ai_service = None

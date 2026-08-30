@@ -499,7 +499,9 @@ class MainWindow(QMainWindow):
         sb.addPermanentWidget(self._count_label)
         sb.addPermanentWidget(self._coord_label)
         sb.addPermanentWidget(self._rec_label)
-
+        self._ai_label = QLabel("")
+        sb.addPermanentWidget(self._ai_label)
+        
         # ★ 宏状态刷新
         if hasattr(self, "macro_manager"):
             self.macro_manager.changed.connect(self._update_macro_actions)
@@ -518,7 +520,7 @@ class MainWindow(QMainWindow):
         if path:
             self.doc.save(path)
             self._current_path = path                   # ← 新增
-
+            
     def _update_history_actions(self) -> None:
         self._undo_act.setEnabled(self.doc.can_undo)
         self._redo_act.setEnabled(self.doc.can_redo)
