@@ -107,7 +107,34 @@ class AIService(QObject):
             return p
         except Exception:
             return None
+    # ── 后处理：清洗模型输出 ─────────────────────────
 
+    @staticmethod
+    def _clean_response(text: str) -> str:
+        """去除 Markdown 代码块标记、引导语，提取纯 DSL 代码。"""
+        if not text:
+            return ""
+        lines = text.strip().split("\n")
+        cleaned = []
+        in_block = False
+        for line in lines:
+            stripped = line.strip()
+            # 跳过 ``` 开头的行
+            if stripped.startswith("```"):
+                in_block = not in_block
+                continue
+            # 跳过常见的自然语言引导
+            lower = stripped.lower()
+            if any(kw in lower for kw in (
+                "以下是", "代码如下", "这是", "here is", "here's",
+                "geo draw", "draw triangle", "draw a",
+            )) and "=" not in stripped and "(" not in stripped:
+                continue
+            cleaned.append(line)
+        # 如果全部被过滤了，返回原文（防御）
+        result = "\n".join(cleaned).strip()
+        return result if result else text.strip()
+    
     def _find_model_file(self) -> Path | None:
         try:
             d = self._resolve_model_dir()
@@ -198,7 +225,8 @@ class AIService(QObject):
                 max_tokens=max_tok,
                 temperature=temp,
             )
-            return resp["choices"][0]["message"]["content"] # type: ignore
+            raw = resp["choices"][0]["message"]["content"] # type: ignore
+            return self._clean_response(raw) # type: ignore
         except Exception:
             return ""
 

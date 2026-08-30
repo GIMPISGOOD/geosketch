@@ -282,12 +282,12 @@ class CodeEditor(QPlainTextEdit):
         if completionPrefix != self.completer.completionPrefix():
             self.completer.setCompletionPrefix(completionPrefix)
             popup = self.completer.popup()
-            popup.setCurrentIndex(
+            popup.setCurrentIndex(      # type: ignore
                 self.completer.completionModel().index(0, 0))
         cr = self.cursorRect()
         cr.setWidth(
-            self.completer.popup().sizeHintForColumn(0)
-            + self.completer.popup().verticalScrollBar()
+            self.completer.popup().sizeHintForColumn(0)# type: ignore
+            + self.completer.popup().verticalScrollBar()# type: ignore
               .sizeHint().width())
         self.completer.complete(cr)
 
@@ -452,27 +452,27 @@ class ScriptEditorDialog(QDialog):
         self._log.log_error(f"AI 错误: {msg}")
 
     # ── AI 补全 ────────────────────────────────────
-
+    
     def _ai_complete(self):
         if self._ai_service is None:
             return
         usage = self.canvas.doc.settings.get("ai.usage", "both")
         if usage == "generate":
             return
-        # 取光标前的上下文
         cursor = self.editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         cursor.setPosition(self.editor.textCursor().position(),
                            QTextCursor.MoveMode.KeepAnchor)
         context = cursor.selectedText()
-        # 截断到 context_tokens（粗略按字符估算）
         max_chars = int(
             self.canvas.doc.settings.get("ai.context_tokens", 512)) * 4
         if len(context) > max_chars:
             context = context[-max_chars:]
         prompt = (
-            "请补全以下 GeoSketch DSL 代码，只输出补全部分，"
-            "不要重复已有代码，不要解释：\n" + context
+            "补全以下 GeoSketch DSL 代码。"
+            "只输出需要补全的代码行，不要重复已有代码，"
+            "不要解释，不要使用代码块标记。\n"
+            + context
         )
         self._ai_status_lbl.setText("AI 思考中…")
         self._ai_service.request(prompt, "complete")
@@ -492,8 +492,9 @@ class ScriptEditorDialog(QDialog):
         if not ok or not desc.strip():
             return
         prompt = (
-            f"请根据以下描述生成 GeoSketch DSL 代码：\n{desc.strip()}\n"
-            f"只输出代码，不要解释。"
+            f"根据以下描述，直接输出 GeoSketch DSL 代码。"
+            f"不要解释，不要使用代码块标记，第一行就是代码。\n"
+            f"描述：{desc.strip()}"
         )
         self._ai_status_lbl.setText("AI 生成中…")
         self._log.log_ai(f"生成请求: {desc.strip()}")
