@@ -83,6 +83,26 @@ DEFAULTS: dict = {
         "undo_limit":         100,
         "autosave_minutes":   0,       # 0 = 关闭
     },
+
+    # ── AI 辅助 ──────────────────────────────────────
+    "ai": {
+        "enabled":          False,
+        "provider":         "local",       # "local" | "remote"
+        # 本地模型
+        "model_dir":        "models",
+        "model_file":       "",            # 空 = 自动选第一个 .gguf
+        # 远程 API
+        "api_url":          "",
+        "api_key":          "",
+        "api_model":        "",
+        # 通用
+        "system_prompt":    "你是 GeoSketch 几何画板的脚本助手，请只输出 GeoSketch DSL 代码，不要解释。",
+        "usage":            "both",        # "complete" | "generate" | "both"
+        "max_tokens":       256,
+        "temperature":      0.2,
+        "context_tokens":   512,
+        "timeout_ms":       5000,
+    },
 }
 
 

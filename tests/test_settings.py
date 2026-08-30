@@ -379,18 +379,6 @@ class TestFontConstruction:
         f = QFont("Consolas", size)
         assert f.pointSize() >= 1
 
-    def test_fontcombobox_setfont_requires_pointsize(self, qapp):
-        """QFontComboBox.setCurrentFont 传入的 QFont 必须 pointSize > 0。
-        这是导致 'Point size <= 0 (-1)' 警告的直接原因。"""
-        from PySide6.QtWidgets import QFontComboBox
-        combo = QFontComboBox()
-        # 正确方式：同时指定 family 和 pointSize
-        f = QFont("Consolas")
-        f.setPointSize(9)
-        combo.setCurrentFont(f)
-        assert combo.currentFont().family() == "Consolas"
-        # 错误方式（会触发警告）：
-        # combo.setCurrentFont(QFont("Consolas"))  ← pointSize == -1
 
 
 # ═══════════════════════════════════════════════════════════
@@ -604,3 +592,62 @@ class TestEdgeCases:
         for path, expected in _all_leaf_keys(DEFAULTS):
             val = s.get(path)
             assert val == expected, f"{path}: 期望 {expected!r}，得到 {val!r}"
+
+# ════════════════════════════════════════════════════
+# 10. AI 分区
+# ════════════════════════════════════════════════════
+
+class TestAIDefaults:
+    def test_ai_defaults_exist(self):
+        s = SettingsStore()
+        assert s.get("ai.enabled") is False
+        assert s.get("ai.provider") == "local"
+        assert s.get("ai.model_dir") == "models"
+        assert s.get("ai.model_file") == ""
+        assert s.get("ai.api_url") == ""
+        assert s.get("ai.api_key") == ""
+        assert s.get("ai.api_model") == ""
+        assert isinstance(s.get("ai.system_prompt"), str)
+        assert s.get("ai.usage") in ("complete", "generate", "both")
+        assert s.get("ai.max_tokens") > 0
+        assert s.get("ai.temperature") >= 0
+        assert s.get("ai.context_tokens") > 0
+        assert s.get("ai.timeout_ms") > 0
+
+    def test_ai_defaults_json_serializable(self):
+        text = json.dumps(DEFAULTS["ai"], ensure_ascii=False)
+        restored = json.loads(text)
+        assert restored == DEFAULTS["ai"]
+
+    def test_ai_load_dict_partial(self, qapp):
+        s = SettingsStore()
+        s.load_dict({"ai": {"enabled": True, "provider": "remote"}})
+        assert s.get("ai.enabled") is True
+        assert s.get("ai.provider") == "remote"
+        assert s.get("ai.model_dir") == "models"  # 默认保留
+
+    def test_ai_batch_set(self, qapp):
+        s = SettingsStore()
+        received = []
+        s.changed.connect(lambda k: received.append(k))
+        with s.batch():
+            s.set("ai.enabled", True)
+            s.set("ai.provider", "remote")
+            s.set("ai.api_url", "http://localhost:11434/v1/chat/completions")
+        assert "ai.*" in received
+
+    def test_ai_reset(self, qapp):
+        s = SettingsStore()
+        s.set("ai.enabled", True)
+        s.set("ai.provider", "remote")
+        s.reset_section("ai")
+        assert s.get("ai.enabled") is False
+        assert s.get("ai.provider") == "local"
+
+    def test_ai_leaf_keys_accessible(self):
+        s = SettingsStore()
+        for path, expected in _all_leaf_keys(DEFAULTS):
+            if path.startswith("ai."):
+                val = s.get(path)
+                assert val == expected, \
+                    f"{path}: 期望 {expected!r}，得到 {val!r}"

@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
+    QComboBox,
     QDialog,
     QDoubleSpinBox,
     QFontComboBox,
@@ -21,17 +23,19 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QPushButton,
     QSpinBox,
+    QPlainTextEdit,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 _PAGES = [
-    ("🎨", "外观"),
-    ("📐", "画布"),
-    ("✨", "动效"),
-    ("🖱", "交互"),
-    ("⚙", "工作流"),
+    ("🎨 ", "外观"),
+    ("📐 ", "画布"),
+    ("✨ ", "动效"),
+    ("🖱 ", "交互"),
+    ("⚙ ", "工作流"),
+    ("🤖 ", "AI"),
 ]
 
 
@@ -68,6 +72,7 @@ class SettingsDialog(QDialog):
         self._build_effects()
         self._build_interaction()
         self._build_workflow()
+        self._build_ai() 
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
 
         right = QVBoxLayout()
@@ -271,7 +276,191 @@ class SettingsDialog(QDialog):
         self._w_autosave.setSuffix(" 分钟")
         self._w_autosave.setSpecialValueText("关闭")
         f.addRow("自动保存", self._w_autosave)
+    def _build_ai(self):
+        f = self._new_page()
 
+        # 总开关
+        self._w_ai_enabled = QCheckBox("启用 AI 辅助")
+        f.addRow(self._w_ai_enabled)
+
+        # 提供者
+        self._w_ai_provider = QComboBox()
+        self._w_ai_provider.addItems(["本地模型", "远程 API"])
+        self._w_ai_provider.currentIndexChanged.connect(
+            self._on_ai_provider_changed)
+        f.addRow("提供者", self._w_ai_provider)
+
+        # ── 本地模型区 ──
+        from PySide6.QtWidgets import QGroupBox, QLineEdit, QFileDialog
+        local_box = QGroupBox("本地模型")
+        lf = QFormLayout(local_box)
+
+        dir_row = QHBoxLayout()
+        self._w_ai_model_dir = QLineEdit()
+        self._w_ai_model_dir.setPlaceholderText("models")
+        _browse = QPushButton("浏览…")
+        _browse.clicked.connect(self._on_ai_browse)
+        dir_row.addWidget(self._w_ai_model_dir, 1)
+        dir_row.addWidget(_browse)
+        lf.addRow("模型目录", dir_row)
+
+        self._w_ai_model_file = QComboBox()
+        self._w_ai_model_file.addItem("自动选择", "")
+        lf.addRow("模型文件", self._w_ai_model_file)
+
+        self._w_ai_detect_lbl = QLabel("")
+        lf.addRow("检测状态", self._w_ai_detect_lbl)
+
+        f.addRow(local_box)
+        self._ai_local_box = local_box
+
+        # ── 远程 API 区 ──
+        remote_box = QGroupBox("远程 API")
+        rf = QFormLayout(remote_box)
+
+        self._w_ai_api_url = QLineEdit()
+        self._w_ai_api_url.setPlaceholderText(
+            "https://api.openai.com/v1/chat/completions")
+        rf.addRow("API 地址", self._w_ai_api_url)
+
+        self._w_ai_api_key = QLineEdit()
+        self._w_ai_api_key.setEchoMode(QLineEdit.EchoMode.Password)
+        self._w_ai_api_key.setPlaceholderText("sk-…")
+        rf.addRow("API Key", self._w_ai_api_key)
+
+        self._w_ai_api_model = QLineEdit()
+        self._w_ai_api_model.setPlaceholderText("gpt-4o-mini")
+        rf.addRow("模型名称", self._w_ai_api_model)
+
+        test_row = QHBoxLayout()
+        self._w_ai_test_btn = QPushButton("测试连接")
+        self._w_ai_test_btn.clicked.connect(self._on_ai_test)
+        self._w_ai_test_lbl = QLabel("")
+        test_row.addWidget(self._w_ai_test_btn)
+        test_row.addWidget(self._w_ai_test_lbl, 1)
+        rf.addRow("连接测试", test_row)
+
+        f.addRow(remote_box)
+        self._ai_remote_box = remote_box
+
+        # ── 通用设置 ──
+        self._w_ai_usage = QComboBox()
+        self._w_ai_usage.addItems(["补全 + 生成", "仅补全", "仅生成"])
+        f.addRow("用途", self._w_ai_usage)
+
+        self._w_ai_prompt = QPlainTextEdit()
+        self._w_ai_prompt.setMaximumHeight(60)
+        f.addRow("系统提示词", self._w_ai_prompt)
+
+        self._w_ai_max_tok = QSpinBox()
+        self._w_ai_max_tok.setRange(16, 2048)
+        self._w_ai_max_tok.setSingleStep(16)
+        f.addRow("最大 Token", self._w_ai_max_tok)
+
+        self._w_ai_temp = QDoubleSpinBox()
+        self._w_ai_temp.setRange(0.0, 2.0)
+        self._w_ai_temp.setSingleStep(0.05)
+        self._w_ai_temp.setDecimals(2)
+        f.addRow("采样温度", self._w_ai_temp)
+
+        self._w_ai_timeout = QSpinBox()
+        self._w_ai_timeout.setRange(1000, 30000)
+        self._w_ai_timeout.setSingleStep(500)
+        self._w_ai_timeout.setSuffix(" ms")
+        f.addRow("超时", self._w_ai_timeout)
+
+    # ── AI 辅助方法 ──
+
+    def _on_ai_provider_changed(self, index):
+        is_local = (index == 0)
+        self._ai_local_box.setVisible(is_local)
+        self._ai_remote_box.setVisible(not is_local)
+        self._scan_ai_models()
+
+    def _on_ai_browse(self):
+        from PySide6.QtWidgets import QFileDialog
+        d = QFileDialog.getExistingDirectory(self, "选择模型目录")
+        if d:
+            self._w_ai_model_dir.setText(d)
+            self._scan_ai_models()
+
+    def _scan_ai_models(self):
+        """扫描模型目录，更新检测状态和启用开关。"""
+        try:
+            from core.ai_service import AIService
+            # 临时构造一个 AIService 仅用于扫描
+            svc = AIService(self._s)
+            provider_idx = self._w_ai_provider.currentIndex()
+
+            if provider_idx == 0:  # 本地
+                models = svc.discover_models()
+                self._w_ai_model_file.clear()
+                self._w_ai_model_file.addItem("自动选择", "")
+                for m in models:
+                    self._w_ai_model_file.addItem(m, m)
+                if models:
+                    self._w_ai_detect_lbl.setText(
+                        f"✅ 找到 {len(models)} 个模型")
+                    self._w_ai_detect_lbl.setStyleSheet("color: #2f9e44;")
+                    self._w_ai_enabled.setEnabled(True)
+                else:
+                    self._w_ai_detect_lbl.setText("❌ 未找到模型文件")
+                    self._w_ai_detect_lbl.setStyleSheet("color: #e03131;")
+                    self._w_ai_enabled.setEnabled(False)
+                    self._w_ai_enabled.setChecked(False)
+            else:  # 远程
+                url = self._w_ai_api_url.text().strip()
+                key = self._w_ai_api_key.text().strip()
+                if url and key:
+                    self._w_ai_detect_lbl.setText("✅ 配置完整")
+                    self._w_ai_detect_lbl.setStyleSheet("color: #2f9e44;")
+                    self._w_ai_enabled.setEnabled(True)
+                else:
+                    self._w_ai_detect_lbl.setText("❌ 请填写 API 地址和 Key")
+                    self._w_ai_detect_lbl.setStyleSheet("color: #e03131;")
+                    self._w_ai_enabled.setEnabled(False)
+                    self._w_ai_enabled.setChecked(False)
+        except Exception:
+            self._w_ai_detect_lbl.setText("❌ 检测失败")
+            self._w_ai_detect_lbl.setStyleSheet("color: #e03131;")
+            self._w_ai_enabled.setEnabled(False)
+            self._w_ai_enabled.setChecked(False)
+
+    def _on_ai_test(self):
+        """测试远程 API 连接（后台线程）。"""
+        url = self._w_ai_api_url.text().strip()
+        key = self._w_ai_api_key.text().strip()
+        model = self._w_ai_api_model.text().strip()
+        if not url:
+            self._w_ai_test_lbl.setText("❌ 请先填写 API 地址")
+            self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
+            return
+        self._w_ai_test_lbl.setText("测试中…")
+        self._w_ai_test_btn.setEnabled(False)
+        QApplication.processEvents()
+        try:
+            import requests as req
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {key}",
+            }
+            payload = {
+                "model": model or "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 1,
+            }
+            r = req.post(url, json=payload, headers=headers, timeout=5)
+            r.raise_for_status()
+            self._w_ai_test_lbl.setText("✅ 连接成功")
+            self._w_ai_test_lbl.setStyleSheet("color: #2f9e44;")
+        except ImportError:
+            self._w_ai_test_lbl.setText("❌ requests 未安装")
+            self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
+        except Exception as e:
+            self._w_ai_test_lbl.setText(f"❌ {e}")
+            self._w_ai_test_lbl.setStyleSheet("color: #e03131;")
+        finally:
+            self._w_ai_test_btn.setEnabled(True)
     # ══════════════════════════════════════════════════
     #  读取 / 写入
     # ══════════════════════════════════════════════════
@@ -332,7 +521,28 @@ class SettingsDialog(QDialog):
         # 工作流
         self._w_undo.setValue(s.get("workflow.undo_limit", 100))
         self._w_autosave.setValue(s.get("workflow.autosave_minutes", 0))
-
+        
+        # AI
+        self._w_ai_enabled.setChecked(s.get("ai.enabled", False))
+        provider = s.get("ai.provider", "local")
+        self._w_ai_provider.setCurrentIndex(
+            0 if provider == "local" else 1)
+        self._w_ai_model_dir.setText(s.get("ai.model_dir", "models"))
+        self._w_ai_api_url.setText(s.get("ai.api_url", ""))
+        self._w_ai_api_key.setText(s.get("ai.api_key", ""))
+        self._w_ai_api_model.setText(s.get("ai.api_model", ""))
+        usage = s.get("ai.usage", "both")
+        self._w_ai_usage.setCurrentIndex(
+            {"both": 0, "complete": 1, "generate": 2}.get(usage, 0))
+        self._w_ai_prompt.setPlainText(
+            s.get("ai.system_prompt", ""))
+        self._w_ai_max_tok.setValue(s.get("ai.max_tokens", 256))
+        self._w_ai_temp.setValue(s.get("ai.temperature", 0.2))
+        self._w_ai_timeout.setValue(s.get("ai.timeout_ms", 5000))
+        self._on_ai_provider_changed(
+            self._w_ai_provider.currentIndex())
+        self._scan_ai_models()
+        
     def _apply(self):
         """从控件读取值 → 批量写入 SettingsStore。"""
         s = self._s
@@ -381,7 +591,25 @@ class SettingsDialog(QDialog):
             # 工作流
             s.set("workflow.undo_limit",        self._w_undo.value())
             s.set("workflow.autosave_minutes",  self._w_autosave.value())
-
+        # AI
+            s.set("ai.enabled",      self._w_ai_enabled.isChecked())
+            s.set("ai.provider",
+              "local" if self._w_ai_provider.currentIndex() == 0
+              else "remote")
+            s.set("ai.model_dir",    self._w_ai_model_dir.text())
+            s.set("ai.model_file",
+              self._w_ai_model_file.currentData() or "")
+            s.set("ai.api_url",      self._w_ai_api_url.text())
+            s.set("ai.api_key",      self._w_ai_api_key.text())
+            s.set("ai.api_model",    self._w_ai_api_model.text())
+            usage_map = {0: "both", 1: "complete", 2: "generate"}
+            s.set("ai.usage",
+              usage_map.get(self._w_ai_usage.currentIndex(), "both"))
+            s.set("ai.system_prompt",
+              self._w_ai_prompt.toPlainText())
+            s.set("ai.max_tokens",   self._w_ai_max_tok.value())
+            s.set("ai.temperature",  self._w_ai_temp.value())
+            s.set("ai.timeout_ms",   self._w_ai_timeout.value())
     # ══════════════════════════════════════════════════
     #  按钮槽
     # ══════════════════════════════════════════════════

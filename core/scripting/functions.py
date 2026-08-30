@@ -1,6 +1,13 @@
 """脚本全局内置函数。"""
-
 import math
+
+# ── 日志回调（供脚本编辑器注入） ──────────────────
+_active_log_callback = None
+
+def set_log_callback(cb):
+    """设置全局日志回调。传入 None 恢复默认行为。"""
+    global _active_log_callback
+    _active_log_callback = cb
 
 
 def build_global_env(interp):
@@ -8,11 +15,16 @@ def build_global_env(interp):
 
     def _print(*args):
         text = " ".join(interp._format_value(a) for a in args)
-        interp.logs.append(text)
-
-        if interp.canvas is not None and hasattr(interp.canvas, "cursor_info"):
-            interp.canvas.cursor_info.emit(text)
-
+        # ★ 优先使用外部注入的日志回调（脚本编辑器的日志面板）
+        if _active_log_callback is not None:
+            try:
+                _active_log_callback(text)
+            except Exception:
+                pass
+        else:
+            interp.logs.append(text)
+            if interp.canvas is not None and hasattr(interp.canvas, "cursor_info"):
+                interp.canvas.cursor_info.emit(text)
         return None
 
     env = {

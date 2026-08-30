@@ -493,7 +493,8 @@ class MainWindow(QMainWindow):
         self._count_label = QLabel("0 个对象")
         self._rec_label = QLabel("")
         self._rec_label.setStyleSheet("")
-
+        self._ai_label = QLabel("")
+        sb.addPermanentWidget(self._ai_label)
         sb.addWidget(self._hint_label, 1)
         sb.addPermanentWidget(self._count_label)
         sb.addPermanentWidget(self._coord_label)
@@ -686,6 +687,9 @@ class MainWindow(QMainWindow):
 
         elif section == "workflow":
             self._restart_autosave()
+            
+        elif section == "ai":
+            self._update_ai_status()
 
     def _apply_ui_font(self) -> None:
         """从设置读取字体 → 应用到 QApplication + 主题 + 状态栏。"""
@@ -718,7 +722,23 @@ class MainWindow(QMainWindow):
             self._autosave_timer.start(int(minutes * 60 * 1000))
         else:
             self._autosave_timer.stop()
-
+            
+    def _update_ai_status(self) -> None:
+        """根据设置更新状态栏 AI 指示（不加载模型）。"""
+        try:
+            enabled = self.doc.settings.get("ai.enabled", False)
+            if not enabled:
+                self._ai_label.setText("")
+                return
+            provider = self.doc.settings.get("ai.provider", "local")
+            if provider == "local":
+                self._ai_label.setText("AI ● 本地")
+            else:
+                self._ai_label.setText("AI ● 远程")
+            self._ai_label.setStyleSheet("color: #2f9e44;")
+        except Exception:
+            self._ai_label.setText("")
+            
     def _do_autosave(self) -> None:
         if self._current_path and os.path.isfile(self._current_path):
             try:
