@@ -225,9 +225,12 @@ class AIService(QObject):
                 max_tokens=max_tok,
                 temperature=temp,
             )
+            print(f"[AI DEBUG] choices={resp.get('choices', [])}") # pyright: ignore[reportAttributeAccessIssue]
+            print(f"[AI DEBUG] usage={resp.get('usage', {})}")# pyright: ignore[reportAttributeAccessIssue]
             raw = resp["choices"][0]["message"]["content"] # type: ignore
             return self._clean_response(raw) # type: ignore
-        except Exception:
+        except Exception as e:
+            print(f"[AI ERROR] {e}")
             return ""
 
     # ── 远程推理（OpenAI 兼容） ─────────────────────

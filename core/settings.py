@@ -159,7 +159,7 @@ DEFAULTS: dict = {
         "usage":            "both",
         "max_tokens":       256,
         "temperature":      0.2,
-        "context_tokens":   512,
+        "context_tokens":   2048,
         "timeout_ms":       5000,
     },
 }
