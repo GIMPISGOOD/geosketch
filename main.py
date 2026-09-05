@@ -47,7 +47,7 @@ def main() -> None:
     app = QApplication(sys.argv)
     app.setApplicationName("GeoSketch 几何画板")
     # ── 使用 DEFAULTS 中的默认值初始化全局字体 ──
-    font = QFont()
+    font = QFont("sans-serif", 10)
     families = DEFAULTS["appearance"]["ui_font_family"]
     font.setFamilies(families if isinstance(families, list) else [families])
     font.setPointSize(int(DEFAULTS["appearance"]["ui_font_size"]))
