@@ -696,7 +696,10 @@ class MainWindow(QMainWindow):
             
         elif section == "ai":
             self._update_ai_status()
-
+            
+        elif section == "physics":
+            self.canvas.refresh_physics_bar()
+            
     def _apply_ui_font(self) -> None:
         """从设置读取字体 → 应用到 QApplication + 主题 + 状态栏。"""
         s = self.doc.settings

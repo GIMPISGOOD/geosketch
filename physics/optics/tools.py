@@ -29,8 +29,8 @@ from .objects import LightSourcePoint, PlaneMirror, LightRay
     "点光源",
     shortcut=None,
     order=900,
-    hint="点击画布创建点光源",
-    icon=None,
+    hint="创建点光源",
+    icon="light_source",
     panel="physics_optics",
 )
 class LightSourceTool(Tool):
@@ -77,7 +77,7 @@ class LightSourceTool(Tool):
     shortcut=None,
     order=901,
     hint="依次点击两个端点创建平面镜",
-    icon=None,
+    icon="plane_mirror",
     panel="physics_optics",
 )
 class PlaneMirrorTool(Tool):
@@ -139,7 +139,7 @@ class PlaneMirrorTool(Tool):
     shortcut=None,
     order=902,
     hint="先点击光源，再点击平面镜上的入射位置",
-    icon=None,
+    icon="light_ray",
     panel="physics_optics",
 )
 class LightRayTool(Tool):

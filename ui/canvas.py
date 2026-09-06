@@ -17,7 +17,7 @@ from ui.icons import trash_icon
 from ui.tool_rail import ToolRail
 from ui.zoom_bar import ZoomBar
 from ui.property_panel import PropertyPanel
-
+from ui.physics_tool_bar import PhysicsToolBar
 from ui.canvas_render import (
     draw_background_cached, draw_background, draw_grid, draw_axes,
     content_bbox, draw_publication, draw_publication_point, collect_screen_segments
@@ -95,6 +95,9 @@ class Canvas(QWidget):
         self.rail = ToolRail(self)
         self.rail.tool_chosen.connect(self.set_tool)
         self.tool_activated.connect(self.rail.sync)
+        self.physics_bar = PhysicsToolBar(self)
+        self.physics_bar.tool_chosen.connect(self.set_tool)
+        self.tool_activated.connect(self.physics_bar.sync)
         self.zoom_bar = ZoomBar(self, self)
         self._trash = QToolButton(self)
         self._trash.setObjectName("trashBtn")
@@ -117,6 +120,7 @@ class Canvas(QWidget):
         self._snow_timer.timeout.connect(self._tick_snow)
         self.refresh_theme()
         self.update_snow_state()
+        self.refresh_physics_bar()
         from geo.function_sampler import get_sampler
         self._sampler = get_sampler()
         self._sampler.sampled.connect(self._on_function_sampled)
@@ -604,6 +608,8 @@ class Canvas(QWidget):
         # ★ 触屏模式：增大边距，避免误触
         margin = 20 if self._touch_mode else 14
         self.rail.move(margin, margin)
+        pb = self.physics_bar
+        pb.move(margin, self.height() - pb.height() - margin)
         zb = self.zoom_bar
         zb.move(self.width() - zb.width() - margin,
                 self.height() - zb.height() - margin)
@@ -800,9 +806,13 @@ class Canvas(QWidget):
         self._trash.setIcon(trash_icon())
         self.zoom_bar.refresh_icons()
         self.rail.refresh_icons()
+        self.physics_bar.refresh_icons()
         self._bg_cache = None
         self.update()
-
+        
+    def refresh_physics_bar(self) -> None:
+        self.physics_bar.refresh_from_settings(self.doc.settings)
+        
     def update_snow_state(self):
         title = (self.doc.meta.get("title") or "").strip().lower()
         active = (title == "snow")

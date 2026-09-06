@@ -55,6 +55,9 @@ TOOL_ICON_KEYS: dict[str, tuple[str, ...]] = {
     "affine":      ("mdi.grid", "fa5s.drafting-compass"),
     "invert":      ("mdi.circle-double", "fa5s.dot-circle"),
     "iterate":     ("mdi.repeat", "fa5s.redo"),
+    "light_source": ("fa5s.sun", "fa.sun-o", "mdi.white-balance-sunny"),
+    "plane_mirror": ("mdi.flip-horizontal", "fa5s.exchange-alt", "fa5s.slash"),
+    "light_ray":    ("fa5s.long-arrow-alt-right", "mdi.arrow-right-bold"),
 }
 
 

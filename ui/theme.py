@@ -170,17 +170,26 @@ def canvas_qss() -> str:
 #toolRail QToolButton:hover {{
     background: {t["PANEL_HOVER"]};
 }}
+
 #zoomBar QToolButton:hover {{
     background: {t["PANEL_HOVER"]};
 }}
+
 #propertyPanel QPushButton:hover {{
     background: {t["PANEL_CHECKED"]};
 }}
+
 #propertyPanel #collapseBtn:hover,
 #propertyPanel #expandBtn:hover {{
     background: {t["PANEL_HOVER"]};
-    border-color: {t["ACCENT"]}; color: {t["ACCENT"]};
-}}"""
+    border-color: {t["ACCENT"]};
+    color: {t["ACCENT"]};
+}}
+
+#physicsToolBar QToolButton:hover {{
+    background: {t["PANEL_HOVER"]};
+}}
+"""
 
     return f"""
 /* ================= 工具栏 ================= */
@@ -282,6 +291,23 @@ def canvas_qss() -> str:
     width: 8px; margin: 2px; border-radius: 3px;
 }}
 {hover_rules}
+
+/* ================= 物理工具栏 ================= */
+#physicsToolBar {{
+    background: {t["PANEL_BG"]};
+    border: 1px solid {t["PANEL_BORDER"]};
+    border-radius: 14px;
+}}
+#physicsToolBar QToolButton {{
+    border: none;
+    background: transparent;
+    border-radius: 10px;
+    color: {t["INK"]};
+}}
+#physicsToolBar QToolButton:checked {{
+    background: {t["PANEL_CHECKED"]};
+    color: {t["ACCENT"]};
+}}
 """
 # ───────────────────────── 绘图工具（签名不变）─────────────────────────
 # ───────────────────────── 绘图工具（带缓存）─────────────────────────
