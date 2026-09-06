@@ -56,6 +56,8 @@ class MainWindow(QMainWindow):
         self._build_advanced_menu() 
         self._build_constraint_menu()# ★ 宏与脚本库移入高级菜单
         self._build_animation_menu()
+        self._physics_menu = None
+        self._build_physics_menu()
         theme.bus.changed.connect(self._on_theme_changed)
         self.canvas.set_tool(TOOL_REGISTRY[0]["cls"]())
         self.canvas.update_snow_state()
@@ -670,8 +672,10 @@ class MainWindow(QMainWindow):
             self.canvas._bg_cache = None
             self.canvas.update()
             self._restart_autosave()
+            self._refresh_physics_menu()
             return
-
+        elif section == "physics":
+            self._refresh_physics_menu()
         if section == "appearance":
             self._apply_ui_font()
             self.canvas._bg_cache = None
@@ -717,7 +721,60 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "_coord_label"):
             self._coord_label.setFont(theme.LABEL_FONT)
+    # ══════════════════════════════════════════════════
+    #  物理扩展菜单
+    # ══════════════════════════════════════════════════
 
+    def _physics_optics_enabled(self) -> bool:
+        return bool(self.doc.settings.get("physics.optics_enabled", False))
+
+    def _build_physics_menu(self) -> None:
+        """根据设置构建「物理」菜单。"""
+
+        if not self._physics_optics_enabled():
+            return
+
+        mb = self.menuBar()
+
+        pm = mb.addMenu("物理(&P)")
+        optics_menu = pm.addMenu("光学(&O)")
+
+        specs = [
+            s for s in TOOL_REGISTRY
+            if s.get("panel") == "physics_optics"
+        ]
+
+        for spec in sorted(specs, key=lambda s: s.get("order", 999)):
+            optics_menu.addAction(self._actions[spec["cls"]])
+
+        if not specs:
+            e = optics_menu.addAction("（暂无光学工具）")
+            e.setEnabled(False)
+
+        # 尽量插入到「帮助」之前
+        help_action = None
+        for act in mb.actions():
+            if act.text().startswith("帮助"):
+                help_action = act
+                break
+
+        if help_action is not None:
+            mb.removeAction(pm.menuAction())
+            mb.insertMenu(help_action, pm)
+
+        self._physics_menu = pm
+
+    def _remove_physics_menu(self) -> None:
+        menu = getattr(self, "_physics_menu", None)
+        if menu is not None:
+            self.menuBar().removeAction(menu.menuAction())
+            menu.deleteLater()
+            self._physics_menu = None
+
+    def _refresh_physics_menu(self) -> None:
+        self._remove_physics_menu()
+        self._build_physics_menu()
+        
     def _restart_autosave(self) -> None:
         minutes = self.doc.settings.get("workflow.autosave_minutes", 0)
         if minutes > 0:

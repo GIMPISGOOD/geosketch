@@ -162,6 +162,10 @@ DEFAULTS: dict = {
         "context_tokens":   2048,
         "timeout_ms":       5000,
     },
+    # ── 物理扩展 ─────────────────────────────────────
+    "physics": {
+        "optics_enabled": False,
+    },
 }
 
 

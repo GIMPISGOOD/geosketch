@@ -33,7 +33,15 @@ def load_constraints() -> None:
     except Exception as e:
         print("无法加载几何约束求解器扩展，请确保已正确安装依赖。")
         print("错误信息:", e)
-
+        
+def load_physics() -> None:
+    """加载物理扩展。"""
+    try:
+        import physics
+    except Exception as e:
+        print("无法加载物理扩展。")
+        print("错误信息:", e)
+        
 def load_animation() -> None:
     """加载动画系统扩展"""
     try:
@@ -63,6 +71,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    load_physics()
     load_constraints()
     load_animation()
     main()

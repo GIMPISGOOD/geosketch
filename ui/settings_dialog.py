@@ -36,6 +36,7 @@ _PAGES = [
     ("🖱 ", "交互"),
     ("⚙ ", "工作流"),
     ("🤖 ", "AI"),
+    ("🔬 ", "物理"),
 ]
 
 from PySide6.QtCore import QThread, Signal as _Signal
@@ -110,6 +111,7 @@ class SettingsDialog(QDialog):
         self._build_interaction()
         self._build_workflow()
         self._build_ai() 
+        self._build_physics()        
         self._nav.currentRowChanged.connect(self._stack.setCurrentIndex)
 
         right = QVBoxLayout()
@@ -151,7 +153,21 @@ class SettingsDialog(QDialog):
         )
         self._stack.addWidget(w)
         return form
+    
+    # ── 物理 ──
+    def _build_physics(self):
+        f = self._new_page()
 
+        self._w_physics_optics = QCheckBox("启用几何光学模块")
+        f.addRow(self._w_physics_optics)
+
+        note = QLabel(
+            "开启后菜单栏将出现「物理 → 光学」。\n"
+            "关闭后不会删除已有光学对象，只会隐藏创建入口。"
+        )
+        note.setWordWrap(True)
+        f.addRow(note)
+        
     # ── 外观 ──
     def _build_appearance(self):
         f = self._new_page()
@@ -602,6 +618,10 @@ class SettingsDialog(QDialog):
         idx = self._w_ai_generate_model.findData(gf)
         if idx >= 0:
             self._w_ai_generate_model.setCurrentIndex(idx)
+        # 物理
+        self._w_physics_optics.setChecked(
+            s.get("physics.optics_enabled", False)
+        )
         
     def _apply(self):
         """从控件读取值 → 批量写入 SettingsStore。"""
@@ -651,6 +671,8 @@ class SettingsDialog(QDialog):
             # 工作流
             s.set("workflow.undo_limit",        self._w_undo.value())
             s.set("workflow.autosave_minutes",  self._w_autosave.value())
+        # 物理
+            s.set("physics.optics_enabled", self._w_physics_optics.isChecked())
         # AI
             s.set("ai.enabled",      self._w_ai_enabled.isChecked())
             s.set("ai.provider",
