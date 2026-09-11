@@ -1,22 +1,15 @@
-# GeoSketch · 几何画板
-
-**一个基于 Python 与 PySide6 的开源动态几何画板**
-支持尺规作图、动态变量、函数曲线、几何变换、交互式课件导出……
-代码体积仅 462KB，却具备专业软件的扩展性与交互体验。
-
-（*实际运行界面以主题为准，支持纸白/墨夜/蓝图/黑板四种配色*）
-
----
-
 ## 🎯 简介
 
 GeoSketch 是一款**响应式动态几何软件**，它不同于传统绘图工具，而是构建了一个**基于依赖图的约束求解引擎**。用户绘制几何对象时，系统自动维护对象间的依赖关系——拖动任意父对象，所有子对象（如交点、中点、垂线、表达式线段）都会**实时联动更新**。
+
+新增的 **物理扩展总包** 当前定位为“几何光路实验扩展”，不是完整物理引擎。第一版实现点光源、平面镜、入射光线与反射光线，光学模块默认关闭，用户在设置中开启后，画布底部会显示物理工具条。
 
 主要应用场景：
 
 - 数学教学（几何定理演示、函数图像探索）
 - 课件制作（一键导出可交互的 HTML 课件）
 - 几何可视化与原型设计
+- 物理光学实验演示（平面镜反射光路）
 
 ---
 
@@ -35,8 +28,22 @@ GeoSketch 是一款**响应式动态几何软件**，它不同于传统绘图工
 | **主题系统**   | 内置四套配色（纸白/墨夜/蓝图/黑板），支持自定义导入导出                                |
 | **导出功能**   | PNG/SVG 高清导出，交互式 HTML 课件（含 JSXGraph 引擎），课件包可直接嵌入 PPT           |
 | **扩展机制**   | 通过装饰器注册新对象、工具、渲染器，无需改动主代码                                     |
+| **物理扩展（可选）** | 几何光学实验：点光源、平面镜、光线反射、画布底部物理工具条、设置开关             |
 
+---
 
+## 🔭 物理光学扩展（实验性）
+
+GeoSketch 新增 `physics/` 顶层包，作为未来物理实验模块的统一入口。当前只包含几何光学子模块，后续可扩展到折射、透镜、光学场景，乃至力学、电磁学、波动等方向。
+
+- **光学对象**：`LightSourcePoint`、`PlaneMirror`、`LightRay`
+- **光线追迹**：`physics/optics/tracer.py` 负责向量归一化、平面镜法线、反射方向与折线拾取距离
+- **光学工具**：点光源、平面镜、光线，注册为 `panel="physics_optics"`
+- **物理工具条**：`ui/physics_tool_bar.py`，显示在画布底部，仅在设置开启光学模块时出现
+- **设置开关**：偏好设置 → 物理 → “启用几何光学模块”，默认关闭
+- **主题样式**：物理工具条使用与左侧工具栏一致的半透明面板风格，支持悬停、选中和主题切换
+- **序列化与撤销**：光学对象继承 `GeoObject`，通过现有 `dump()` / `build()` 保存，支持保存、加载、撤销、重做和复制粘贴
+- **第一版边界**：当前只实现平面镜反射，不实现折射、透镜、全反射和多镜连续追迹
 
 ---
 
@@ -50,7 +57,7 @@ GeoSketch 是一款**响应式动态几何软件**，它不同于传统绘图工
 ### 安装依赖
 
 ```bash
-pip install PySide6 qtawesome
+pip install PySide6 qtawesome numpy
 ```
 
 ### 启动
@@ -65,6 +72,16 @@ python main.py
 python main.py 草图.wgeo
 ```
 
+### 启用几何光学模块
+
+启动后进入：
+
+```text
+偏好设置 → 物理 → 启用几何光学模块
+```
+
+开启后，画布底部会出现物理工具条，可创建点光源、平面镜和光线。默认关闭，避免影响原有几何画板界面。
+
 ---
 
 ## 🧭 使用指南
@@ -76,6 +93,7 @@ python main.py 草图.wgeo
 - **右下缩放条**：以画布中心缩放 / 重置视图
 - **信息面板**：显示选中对象的属性（位置、长度、面积等）
 - **状态栏**：鼠标坐标、当前工具提示、对象数量
+- **画布底部物理工具条**：仅在开启“几何光学模块”后显示，只包含光学工具
 
 ### 基本操作
 
@@ -87,6 +105,8 @@ python main.py 草图.wgeo
 | 中键拖拽                   | 平移画布                         |
 | `Delete` / `Backspace` | 删除选中的对象（级联删除）       |
 | `Esc`                    | 取消当前工具状态                 |
+
+拖动光源、平面镜或入射点时，依赖它们的光线会自动进入重算链，反射光线实时跟随变化。
 
 ### 工具速览
 
@@ -100,6 +120,16 @@ python main.py 草图.wgeo
 - **函数曲线**：通过右侧「函数编辑器」添加，支持显式/参数/极坐标
 - **更多插件工具**：角平分线、平行线、垂线、N等分、贝塞尔、定长线段、定角……
 
+### 光学工具
+
+开启几何光学模块后，画布底部物理工具条提供：
+
+- **点光源**：可拖动的自由点，渲染为发光样式
+- **平面镜**：基于线段体系构建，支持拖动端点或整体移动，背面绘制 `///` 阴影线
+- **光线**：由光源点、入射点和平面镜共同决定，内部维护折线路径，并按反射定律自动重算
+
+光学工具不会进入左侧主工具栏，而是作为底部扩展工具条存在。
+
 ---
 
 ## 🔬 核心机制解析
@@ -107,6 +137,8 @@ python main.py 草图.wgeo
 ### 1. 响应式依赖引擎
 
 所有几何对象（`GeoObject`）维护 `parents`（父对象）和 `children`（子对象）列表。当任何父对象发生变动，`Document` 自动调用 `recompute_from(roots)`，**仅重算受影响子树**，极大提升大型作图的性能。
+
+光学对象同样继承 `GeoObject`，因此可以参与依赖图重算、级联删除、撤销/重做和序列化。
 
 ### 2. 表达式与变量系统
 
@@ -124,6 +156,13 @@ python main.py 草图.wgeo
 - 支持平移、旋转、缩放、反射、中心对称、仿射（矩阵 / 三对应点）、反演。
 - 变换可**迭代应用**（深度控制），轻松创建分形图案。
 - 变换支持复合对象（线段、圆、椭圆、多边形等），自动处理点映射。
+
+### 5. 几何光学追迹
+
+- `physics/optics/tracer.py` 提供向量归一化、反射方向计算、平面镜法线计算和折线拾取距离。
+- `LightRay` 在 `recompute()` 中根据反射定律自动重算，不需要外部管理器轮询或监听。
+- 追迹结果只用于更新光线折线，不污染 `Document` 核心状态。
+- 当前版本只处理平面镜反射，未实现折射、透镜、全反射和多镜连续追迹。
 
 ---
 
@@ -153,11 +192,22 @@ def draw_my_curve(p, obj, view):
     pass
 ```
 
+物理光学对象也采用相同方式接入。例如 `LightSourcePoint`、`PlaneMirror`、`LightRay` 都继承 `GeoObject`，并通过正常注册表注册。
+
 ### 添加新工具
 
 1. 在 `tools/` 或 `plugins/` 下新建文件。
 2. 定义类继承 `Tool`，实现 `press`/`move`/`release` 等方法。
-3. 使用 `@register_tool(name, shortcut, order, panel, hint, icon)` 注册，`panel` 可选 `"rail"`（左侧工具栏）、`"menu"`（工具菜单）、`"insert"`（插入菜单）、`"measure"`（度量菜单）、`"transform"`（变换菜单）。
+3. 使用 `@register_tool(name, shortcut, order, panel, hint, icon)` 注册。
+
+`panel` 可选：
+
+- `"rail"`：左侧工具栏
+- `"menu"`：工具菜单
+- `"insert"`：插入菜单
+- `"measure"`：度量菜单
+- `"transform"`：变换菜单
+- `"physics_optics"`：画布底部物理工具条
 
 ```python
 @register_tool(name="我的工具", shortcut="M", panel="rail", hint="示例工具")
@@ -167,20 +217,27 @@ class MyTool(Tool):
         pass
 ```
 
+光学工具就是通过 `panel="physics_optics"` 注册，并由 `ui/physics_tool_bar.py` 统一管理。
+
 ### 添加主题
 
-在 `ui/theme.py` 的 `THEMES` 字典中新增条目，键为颜色名（如 `BG_TOP`），值为十六进制字符串或 RGBA 元组。
+在 `ui/theme.py` 的 `THEMES` 字典中新增条目，键为颜色名（如 `BG_TOP`），值为十六进制字符串或 RGBA 元组。物理工具条样式位于 `#physicsToolBar`，会随主题切换刷新。
+
+### 扩展物理模块
+
+`physics/` 是物理扩展总入口，当前包含 `physics/optics/` 几何光学子包。新增光学对象或工具时，只需在对应 `__init__.py` 中导入，使其完成注册。物理模块采用原生注册方式，不使用猴子补丁。
 
 ---
 
 ## 📦 项目结构
 
-```
+```text
 GeoSketch/
-├── main.py                 # 程序入口
+├── main.py                 # 程序入口，加载物理扩展包
 ├── core/                   # 核心引擎
 │   ├── document.py         # 文档模型（对象管理、撤销/重做、序列化）
 │   ├── registry.py         # 全局注册表
+│   ├── settings.py         # 偏好设置，含物理扩展开关
 │   └── variables.py        # 变量系统（表达式求值、存储）
 ├── geo/                    # 几何对象库
 │   ├── base.py             # GeoObject 基类
@@ -191,6 +248,8 @@ GeoSketch/
 │   ├── constraints.py      # 表达式约束
 │   ├── chain_fill.py       # 区域填充
 │   └── ...                 # 其他对象（椭圆、贝塞尔、多边形等）
+├── constraints/            # 几何约束求解器
+├── animation/              # 动画系统
 ├── tools/                  # 交互工具
 │   ├── base.py             # Tool 基类与辅助函数
 │   ├── select.py           # 选择工具
@@ -205,10 +264,18 @@ GeoSketch/
 │   └── ...
 ├── media/                  # 媒体对象（图片、表格、图表）
 ├── transforms/             # 变换系统（驱动、点、圆、工具）
+├── physics/                # 物理扩展（新增）
+│   ├── __init__.py         # 物理扩展总入口
+│   └── optics/             # 几何光学子包
+│       ├── __init__.py     # 注册光学对象与工具
+│       ├── tracer.py       # 平面镜反射追迹
+│       ├── objects.py      # LightSourcePoint / PlaneMirror / LightRay
+│       └── tools.py        # 点光源 / 平面镜 / 光线工具
 ├── ui/                     # 界面组件
-│   ├── canvas.py           # 画布控件
+│   ├── canvas.py           # 画布控件，挂载底部物理工具条
 │   ├── main_window.py      # 主窗口
-│   ├── theme.py            # 主题系统
+│   ├── physics_tool_bar.py # 画布底部物理工具条
+│   ├── theme.py            # 主题系统，含物理工具条样式
 │   ├── math/               # 数学排版引擎
 │   ├── variable_widgets.py
 │   └── ...
@@ -221,6 +288,7 @@ GeoSketch/
 
 - [PySide6](https://pypi.org/project/PySide6/) —— Qt for Python，GUI 框架
 - [qtawesome](https://pypi.org/project/qtawesome/) —— 图标库（Font Awesome / Material Design Icons）
+- [NumPy](https://numpy.org/) —— 约束求解器向量化计算
 
 *可选*：若要离线使用课件导出，需要联网下载 JSXGraph 库（`jsxgraphcore.js` 与 `jsxgraph.css`）。
 
@@ -228,7 +296,15 @@ GeoSketch/
 
 ## 📄 许可证
 
-本项目采用 **MIT License**，欢迎自由使用、修改和分发。
+本项目采用 **GNU Affero General Public License v3.0（AGPL-3.0）**。
+
+Copyright (C) 2026 GIMPISGOOD
+
+你可以在遵守 AGPLv3 条款的前提下自由使用、修改和分发本项目。
+若将修改后的版本作为网络服务提供，必须向用户提供对应源代码。
+
+完整许可证文本见 [LICENSE](LICENSE)，或访问：
+<https://www.gnu.org/licenses/agpl-3.0.html>
 
 ---
 
@@ -245,3 +321,4 @@ GeoSketch/
 欢迎提交 Issue 或 Pull Request。如果你有改进建议或发现 Bug，请通过 GitHub 与我们联系。
 
 **Enjoy dynamic geometry!** 🎨📐
+
