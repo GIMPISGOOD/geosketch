@@ -28,7 +28,11 @@ from ui.canvas_menu import (
     simple_edit_script_button, edit_text_object
 )
 from ui.canvas_snow import init_snow, tick_snow, draw_snow
-
+try:
+    from physics.optics.scene import sync_optics as _sync_optics_scene # type: ignore
+except Exception:
+    _sync_optics_scene = None
+    
 BASE_SCALE = 48.0
 
 class Canvas(QWidget):
@@ -491,6 +495,7 @@ class Canvas(QWidget):
         self._egg_data = None
         
     def render_scene(self, p: QPainter, bg_mode: str = "grid", publication: bool = False) -> None:
+        self._sync_optics_scene()
         if publication:
             p.fillRect(self.rect(), QColor("#ffffff"))
         elif bg_mode == "grid":
@@ -586,6 +591,7 @@ class Canvas(QWidget):
             p.drawLine(QPointF(x0, y0), QPointF(x0 - dx * tick, y0 - dy * tick))
 
     def pick(self, screen_pt: QPointF, tol_px: float = None): # pyright: ignore[reportArgumentType]
+        self._sync_optics_scene()
         if tol_px is None:
             tol_px = self._touch_tol()
         wx, wy = self.to_world(screen_pt)
@@ -617,7 +623,21 @@ class Canvas(QWidget):
         self._bg_cache = None
         if self._snow_active and not self._snowflakes:
             init_snow(self)
+            
+    def _sync_optics_scene(self) -> None:
+        """在渲染 / 拾取前同步光学场景。
 
+        该同步不会增删对象，也不会发射 doc.changed，
+        只更新光线内部追迹缓存。
+        """
+        if _sync_optics_scene is None:
+            return
+        try:
+            _sync_optics_scene(self.doc)
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            
     def mousePressEvent(self, ev) -> None:
         # 停止可能正在进行的惯性动画
         self._stop_inertia()

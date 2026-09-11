@@ -165,6 +165,9 @@ DEFAULTS: dict = {
     # ── 物理扩展 ─────────────────────────────────────
     "physics": {
         "optics_enabled": False,
+        "optics_max_reflections": 16,
+        "optics_mirror_double_sided": True,
+        "optics_show_arrows": True,
     },
 }
 

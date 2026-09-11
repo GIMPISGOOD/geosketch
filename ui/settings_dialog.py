@@ -161,9 +161,21 @@ class SettingsDialog(QDialog):
         self._w_physics_optics = QCheckBox("启用几何光学模块")
         f.addRow(self._w_physics_optics)
 
+        self._w_physics_max_ref = QSpinBox()
+        self._w_physics_max_ref.setRange(1, 128)
+        self._w_physics_max_ref.setSingleStep(1)
+        f.addRow("最大反射次数", self._w_physics_max_ref)
+
+        self._w_physics_double = QCheckBox("平面镜双面反射")
+        f.addRow(self._w_physics_double)
+
+        self._w_physics_arrows = QCheckBox("显示光线箭头")
+        f.addRow(self._w_physics_arrows)
+
         note = QLabel(
-            "开启后菜单栏将出现「物理 → 光学」。\n"
-            "关闭后不会删除已有光学对象，只会隐藏创建入口。"
+            "开启后画布底部会出现物理工具条。\n"
+            "关闭后不会删除已有光学对象，只会隐藏创建入口。\n"
+            "光线支持被多个可见平面镜连续反射，最后一段无限延伸。"
         )
         note.setWordWrap(True)
         f.addRow(note)
@@ -622,6 +634,15 @@ class SettingsDialog(QDialog):
         self._w_physics_optics.setChecked(
             s.get("physics.optics_enabled", False)
         )
+        self._w_physics_max_ref.setValue(
+            int(s.get("physics.optics_max_reflections", 16))
+        )
+        self._w_physics_double.setChecked(
+            bool(s.get("physics.optics_mirror_double_sided", True))
+        )
+        self._w_physics_arrows.setChecked(
+            bool(s.get("physics.optics_show_arrows", True))
+        )
         
     def _apply(self):
         """从控件读取值 → 批量写入 SettingsStore。"""
@@ -671,8 +692,20 @@ class SettingsDialog(QDialog):
             # 工作流
             s.set("workflow.undo_limit",        self._w_undo.value())
             s.set("workflow.autosave_minutes",  self._w_autosave.value())
-        # 物理
+            # 物理
             s.set("physics.optics_enabled", self._w_physics_optics.isChecked())
+            s.set(
+                "physics.optics_max_reflections",
+                self._w_physics_max_ref.value(),
+            )
+            s.set(
+                "physics.optics_mirror_double_sided",
+                self._w_physics_double.isChecked(),
+            )
+            s.set(
+                "physics.optics_show_arrows",
+                self._w_physics_arrows.isChecked(),
+            )
         # AI
             s.set("ai.enabled",      self._w_ai_enabled.isChecked())
             s.set("ai.provider",
