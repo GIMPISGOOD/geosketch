@@ -183,8 +183,10 @@ class LightRay(GeoObject):
         """
         if not (self.source.exists and self.incident.exists and self.mirror.exists):
             self._clear_trace()
+            self._mirror_refs = []
             self._last_trace_valid = False
             self._last_ray_sig = None
+            self._last_mirror_version = None
             return
 
         src = (float(self.source.x), float(self.source.y))
@@ -224,8 +226,10 @@ class LightRay(GeoObject):
         """由 sync_optics 调用，使用当前文档中的可见平面镜重新追迹。"""
         if not (self.source.exists and self.incident.exists and self.mirror.exists):
             self._clear_trace()
+            self._mirror_refs = []
             self._last_trace_valid = False
             self._last_ray_sig = None
+            self._last_mirror_version = None
             return
 
         src = (float(self.source.x), float(self.source.y))
@@ -278,7 +282,7 @@ class LightRay(GeoObject):
 
         包含：
         - 已命中的有限折线段
-        - 最后一段无限延伸射线
+        - 最后一段无限延伸射线，仅沿传播方向参与拾取
         """
         if not self.path:
             return None
@@ -287,7 +291,7 @@ class LightRay(GeoObject):
 
         if self.infinite and self.last_dir is not None:
             d = point_ray_distance((x, y), self.path[-1], self.last_dir)
-            if best is None or d < best:
+            if d is not None and (best is None or d < best):
                 best = d
 
         return best

@@ -72,7 +72,9 @@ class Document(QObject):
         self.constraints = []
         # ★ 动画系统（原 animation/serialization）
         self.animations = []
-
+        self._optics_sync_key = None
+        self._optics_mirror_sig = None
+        self._optics_mirror_version = 0
 
     # ──────────────────────────────────────────────────────
     #  临时图片管理
@@ -380,9 +382,16 @@ class Document(QObject):
         if self._type_cache_version != self._objects_version:
             self._type_cache.clear()
             self._type_cache_version = self._objects_version
+
         if type_name not in self._type_cache:
+            def _match(o):
+                return (
+                    getattr(o, "type_name", None) == type_name
+                    or type(o).__name__ == type_name
+                )
+
             self._type_cache[type_name] = [
-                o for o in self.objects if type(o).__name__ == type_name
+                o for o in self.objects if _match(o)
             ]
         return self._type_cache[type_name]
 
@@ -673,7 +682,9 @@ class Document(QObject):
                 next_remaining = []
                 for item in remaining:
                     if all(pid in pool for pid in item["parents"]):
-                        cls = GEO_REGISTRY[item["type"]]
+                        cls = GEO_REGISTRY.get(item["type"])
+                        if cls is None:
+                            continue
                         parents = [pool[pid] for pid in item["parents"]]
                         obj = cls.build(parents, item["params"])
                         obj.id = item["id"]

@@ -30,37 +30,30 @@ def sync_optics(doc, force: bool = False) -> None:
     mirror_objs = doc.get_typed("PlaneMirror")
     ray_objs = doc.get_typed("LightRay")
 
-    # 可见性变化未必总触发 _mutation_count，
-    # 这里把可见数量纳入 key，保证隐藏 / 显示镜子后能刷新。
-    vis_mirror_count = 0
+    mirrors = []
+    rays = []
+    vis_mirror_ids = []
+    vis_ray_ids = []
+
     for o in mirror_objs:
         if getattr(o, "exists", False) and getattr(o, "visible", True):
-            vis_mirror_count += 1
+            mirrors.append(o)
+            vis_mirror_ids.append(getattr(o, "id", 0))
 
-    vis_ray_count = 0
     for o in ray_objs:
         if getattr(o, "exists", False) and getattr(o, "visible", True):
-            vis_ray_count += 1
+            rays.append(o)
+            vis_ray_ids.append(getattr(o, "id", 0))
 
     key = (
         getattr(doc, "_mutation_count", 0),
         getattr(doc, "_objects_version", 0),
         settings_version,
-        vis_mirror_count,
-        vis_ray_count,
+        tuple(sorted(vis_mirror_ids)),
+        tuple(sorted(vis_ray_ids)),
     )
-
     if not force and getattr(doc, "_optics_sync_key", None) == key:
         return
-
-    mirrors = [
-        o for o in mirror_objs
-        if getattr(o, "exists", False) and getattr(o, "visible", True)
-    ]
-    rays = [
-        o for o in ray_objs
-        if getattr(o, "exists", False) and getattr(o, "visible", True)
-    ]
 
     if not rays:
         doc._optics_sync_key = key

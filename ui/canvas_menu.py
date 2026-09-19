@@ -107,6 +107,8 @@ def set_visible(canvas, objs, visible):
     def doit():
         for o in objs:
             o.visible = bool(visible)
+        canvas.doc._mutation_count += 1
+
     doc_action(canvas, doit)
 
 def duplicate_selected(canvas):
@@ -125,6 +127,9 @@ def reorder_objects(canvas, objs, front):
                 if o in canvas.doc.objects:
                     canvas.doc.objects.remove(o)
                     canvas.doc.objects.insert(0, o)
+
+        canvas.doc._mutation_count += 1
+
     doc_action(canvas, doit)
 
 def select_related(canvas, objs, mode):

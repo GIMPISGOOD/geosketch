@@ -221,7 +221,6 @@ class SettingsStore(QObject):
             self._version += 1
             self.changed.emit(key)
 
-    # ── 批量修改 ──────────────────────────────────────
     @contextmanager
     def batch(self) -> Generator[SettingsStore, None, None]:
         self._batch_depth += 1
@@ -230,6 +229,7 @@ class SettingsStore(QObject):
         finally:
             self._batch_depth -= 1
             if self._batch_depth == 0 and self._batch_dirty:
+                self._version += 1
                 sections = {k.split(".")[0] for k in self._batch_dirty}
                 self._batch_dirty = set()
                 for sec in sorted(sections):

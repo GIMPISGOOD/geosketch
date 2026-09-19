@@ -142,6 +142,15 @@ def content_bbox(doc):
                 continue
             except Exception:
                 pass
+        if getattr(o, "type_name", "") == "LightRay":
+            try:
+                for x, y in getattr(o, "path", []):
+                    xs.append(float(x))
+                    ys.append(float(y))
+            except Exception:
+                pass
+            continue
+        
         if isinstance(o, AbstractPoint):
             xs.append(o.x)
             ys.append(o.y)
@@ -212,6 +221,15 @@ def draw_publication(p: QPainter, obj, view):
     p.setBrush(Qt.BrushStyle.NoBrush)
     tn = type(obj).__name__
     if isinstance(obj, AbstractPoint):
+        return
+    if tn == "PlaneMirror":
+        p.drawLine(view.to_screen(obj.a.x, obj.a.y), view.to_screen(obj.b.x, obj.b.y))
+        return
+
+    if tn == "LightRay":
+        pts = [view.to_screen(x, y) for x, y in getattr(obj, "path", [])]
+        for i in range(len(pts) - 1):
+            p.drawLine(pts[i], pts[i + 1])
         return
     if tn == "Segment":
         p.drawLine(view.to_screen(obj.a.x, obj.a.y), view.to_screen(obj.b.x, obj.b.y))
@@ -309,6 +327,18 @@ def collect_screen_segments(view):
             sa = view.to_screen(obj.a.x, obj.a.y)
             sb = view.to_screen(obj.b.x, obj.b.y)
             segments.append((sa, sb))
+        elif tn == "PlaneMirror":
+            sa = view.to_screen(obj.a.x, obj.a.y)
+            sb = view.to_screen(obj.b.x, obj.b.y)
+            segments.append((sa, sb))
+
+        elif tn == "LightRay":
+            pts = [
+                view.to_screen(x, y)
+                for x, y in getattr(obj, "path", [])
+            ]
+            for i in range(len(pts) - 1):
+                segments.append((pts[i], pts[i + 1]))
         elif tn in ("Line", "Ray", "DirectedLine", "PerpLine", "ParallelLine",
                     "AngleBisector", "AngleDivLine", "PerpBisector"):
             w, h = view.width(), view.height()

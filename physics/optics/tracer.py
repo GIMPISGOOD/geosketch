@@ -131,8 +131,12 @@ def _mirror_endpoints(mirror):
 
 
 def _mirror_double_sided(mirror, global_double_sided: bool) -> bool:
-    return bool(getattr(mirror, "double_sided", global_double_sided))
+    """当前版本将设置中的双面反射作为全局总开关。
 
+    保留 PlaneMirror.double_sided 字段，
+    供未来扩展“单个平面镜覆盖全局设置”使用。
+    """
+    return bool(global_double_sided)
 
 def plane_mirror_normal(a, b, hatch_side: str = "right"):
     """计算平面镜反射面法线。
@@ -189,7 +193,11 @@ def ray_segment_t(origin, direction, a, b):
 
 
 def point_ray_distance(pt, origin, direction):
-    """点 pt 到无限射线 origin + t * direction 的距离。"""
+    """点 pt 到无限射线 origin + t * direction 的距离。
+
+    仅当投影位于射线正向时返回距离；
+    如果投影位于射线反向，则返回 None，避免反向延长线被选中。
+    """
     px, py = float(pt[0]), float(pt[1])
     ox, oy = float(origin[0]), float(origin[1])
 
@@ -200,10 +208,10 @@ def point_ray_distance(pt, origin, direction):
     dx, dy = d
     vx = px - ox
     vy = py - oy
-
     t = dot2(vx, vy, dx, dy)
+
     if t < 0.0:
-        return math.hypot(px - ox, py - oy)
+        return None
 
     proj_x = ox + dx * t
     proj_y = oy + dy * t

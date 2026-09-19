@@ -31,7 +31,6 @@ class MainWindow(QMainWindow):
         self.resize(1240, 780)
 
         self.doc = Document()
-        self.doc = Document()
         theme.set_settings(self.doc.settings)   # ← 新增：注入设置到主题模块
         self.canvas = Canvas(self.doc)
         self.setCentralWidget(self.canvas)  
@@ -321,8 +320,6 @@ class MainWindow(QMainWindow):
         del_act.setShortcut(QKeySequence.StandardKey.Delete)
         del_act.triggered.connect(self.doc.remove_selected)
         em.addAction(del_act)
-        
-        em.addAction(del_act)
 
         em.addSeparator()                              # ← 新增分隔线
         settings_act = QAction("偏好设置(&P)…", self)  # ← 新增
@@ -489,6 +486,7 @@ class MainWindow(QMainWindow):
     def _build_statusbar(self) -> None:
         sb = QStatusBar(self)
         self.setStatusBar(sb)
+
         self._hint_label = QLabel("就绪")
         self._coord_label = QLabel("(    0.00 ,    0.00 )")
         self._coord_label.setFont(theme.LABEL_FONT)
@@ -496,18 +494,18 @@ class MainWindow(QMainWindow):
         self._rec_label = QLabel("")
         self._rec_label.setStyleSheet("")
         self._ai_label = QLabel("")
-        sb.addPermanentWidget(self._ai_label)
+
         sb.addWidget(self._hint_label, 1)
         sb.addPermanentWidget(self._count_label)
         sb.addPermanentWidget(self._coord_label)
         sb.addPermanentWidget(self._rec_label)
-        self._ai_label = QLabel("")
         sb.addPermanentWidget(self._ai_label)
-        
+
         # ★ 宏状态刷新
         if hasattr(self, "macro_manager"):
             self.macro_manager.changed.connect(self._update_macro_actions)
             self._update_macro_actions()
+
         self.canvas.cursor_info.connect(self._coord_label.setText)
         self.canvas.tool_changed.connect(self._hint_label.setText)
         self.doc.changed.connect(
@@ -541,11 +539,11 @@ class MainWindow(QMainWindow):
             if hasattr(self, 'macro_manager') and self.macro_manager.is_recording():
                 self.macro_manager.toggle_recording()
                 self._update_macro_actions()
-
             self.doc.load(path)
-            self._current_path = path                   # ← 新增
+            self._current_path = path
             self.canvas.update_snow_state()
-            self.canvas.update_snow_state()
+            self.canvas.refresh_physics_bar()
+            self._refresh_physics_menu()
             self.setWindowTitle(
                 f"{os.path.basename(path)} — GeoSketch")
             # ★ 刷新宏菜单
@@ -673,33 +671,42 @@ class MainWindow(QMainWindow):
             self.canvas.update()
             self._restart_autosave()
             self._refresh_physics_menu()
+            self.canvas.refresh_physics_bar()
+            self._invalidate_optics_sync()
             return
-        elif section == "physics":
-            self._refresh_physics_menu()
+
         if section == "appearance":
             self._apply_ui_font()
             self.canvas._bg_cache = None
             self.canvas.update()
-
         elif section == "canvas":
             self.canvas._bg_cache = None
             self.canvas.update()
-
         elif section == "effects":
-            pass  # 动效参数在下次交互/渲染时自动生效
-
+            pass
         elif section == "interaction":
-            pass  # 磁吸/缩放等参数在下次事件时自动生效
-
+            pass
         elif section == "workflow":
             self._restart_autosave()
-            
         elif section == "ai":
             self._update_ai_status()
-            
         elif section == "physics":
+            self._refresh_physics_menu()
             self.canvas.refresh_physics_bar()
+            self._invalidate_optics_sync()
+            self.canvas.update()
             
+    def _invalidate_optics_sync(self) -> None:
+        """强制光学场景在下一次渲染前重新同步。"""
+        try:
+            self.doc._optics_sync_key = None
+            self.doc._optics_mirror_sig = None
+
+            from physics.optics.scene import sync_optics
+            sync_optics(self.doc, force=True)
+        except Exception:
+            pass
+                    
     def _apply_ui_font(self) -> None:
         """从设置读取字体 → 应用到 QApplication + 主题 + 状态栏。"""
         s = self.doc.settings
