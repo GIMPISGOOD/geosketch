@@ -31,17 +31,25 @@ def find_renderer(obj) -> Optional[Callable]:
 
 
 def register_tool(name: str, shortcut: Optional[str] = None, order: int = 100,
-                  hint: str = "", icon: Optional[str] = None, panel: str = "rail"):
+                  hint: str = "", icon: Optional[str] = None, panel: str = "rail",
+                  **kwargs):
     """注册工具。
     panel="rail" → 左侧工具栏（核心工具）；
-    panel="menu" → 菜单栏「工具」下拉菜单（plugins/ 插件工具）。"""
+    panel="menu" → 菜单栏「工具」下拉菜单（plugins/ 插件工具）；
+    panel="physics_*" → 物理扩展工具。
+    """
     def deco(cls):
         cls.tool_name = name
         cls.shortcut = shortcut
         cls.hint = hint
         cls.panel = panel
-        TOOL_REGISTRY.append({"name": name, "shortcut": shortcut, "order": order,
-                              "hint": hint, "icon": icon, "panel": panel, "cls": cls})
+        spec = {
+            "name": name, "shortcut": shortcut, "order": order,
+            "hint": hint, "icon": icon, "panel": panel, "cls": cls
+        }
+        # ★ 新增：支持传入额外的元数据（如 physics_module）
+        spec.update(kwargs)
+        TOOL_REGISTRY.append(spec)
         TOOL_REGISTRY.sort(key=lambda d: d["order"])
         return cls
     return deco

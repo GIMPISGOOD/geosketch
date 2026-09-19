@@ -163,11 +163,14 @@ DEFAULTS: dict = {
         "timeout_ms":       5000,
     },
     # ── 物理扩展 ─────────────────────────────────────
+    # ── 物理扩展 ─────────────────────────────────────
     "physics": {
         "optics_enabled": False,
         "optics_max_reflections": 16,
         "optics_mirror_double_sided": True,
         "optics_show_arrows": True,
+        # ★ 新增：底部工具栏钉选的工具名称列表
+        "pinned_tools": ["点光源", "平面镜", "光线"],
     },
 }
 

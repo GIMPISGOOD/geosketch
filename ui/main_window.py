@@ -739,27 +739,45 @@ class MainWindow(QMainWindow):
         return bool(self.doc.settings.get("physics.optics_enabled", False))
 
     def _build_physics_menu(self) -> None:
-        """根据设置构建「物理」菜单。"""
-
+        """根据设置构建「物理」菜单，支持按模块自动分组。"""
+        # 检查是否有任何物理模块启用（目前只有光学）
         if not self._physics_optics_enabled():
             return
 
         mb = self.menuBar()
-
         pm = mb.addMenu("物理(&P)")
-        optics_menu = pm.addMenu("光学(&O)")
+        
+        # ★ 新增：自定义工具栏入口
+        config_act = QAction("⚙ 自定义底部工具栏...", self)
+        config_act.triggered.connect(self._open_physics_toolbar_config)
+        pm.addAction(config_act)
+        pm.addSeparator()
 
-        specs = [
-            s for s in TOOL_REGISTRY
-            if s.get("panel") == "physics_optics"
+        # 按 physics_module 分组
+        physics_specs = [
+            s for s in TOOL_REGISTRY if s.get("panel", "").startswith("physics_")
         ]
+        
+        modules = {}
+        for spec in physics_specs:
+            mod = spec.get("physics_module", "other")
+            if mod not in modules:
+                modules[mod] = []
+            modules[mod].append(spec)
+            
+        # 模块名称映射
+        module_names = {
+            "optics": "光学(&O)",
+            "mechanics": "力学(&M)",
+            "electromagnetism": "电磁学(&E)",
+            "other": "其他(&X)"
+        }
 
-        for spec in sorted(specs, key=lambda s: s.get("order", 999)):
-            optics_menu.addAction(self._actions[spec["cls"]])
-
-        if not specs:
-            e = optics_menu.addAction("（暂无光学工具）")
-            e.setEnabled(False)
+        for mod, specs in modules.items():
+            menu_name = module_names.get(mod, f"{mod}(&{mod[0].upper()})")
+            sub_menu = pm.addMenu(menu_name)
+            for spec in sorted(specs, key=lambda s: s.get("order", 999)):
+                sub_menu.addAction(self._actions[spec["cls"]])
 
         # 尽量插入到「帮助」之前
         help_action = None
@@ -767,12 +785,20 @@ class MainWindow(QMainWindow):
             if act.text().startswith("帮助"):
                 help_action = act
                 break
-
         if help_action is not None:
             mb.removeAction(pm.menuAction())
             mb.insertMenu(help_action, pm)
-
+            
         self._physics_menu = pm
+
+    def _open_physics_toolbar_config(self):
+        """打开物理工具栏配置对话框。"""
+        from ui.physics_tool_bar import PinnedToolsConfigDialog
+        dlg = PinnedToolsConfigDialog(self.doc.settings, self)
+        if dlg.exec():
+            new_pinned = dlg.get_pinned_tools()
+            self.doc.settings.set("physics.pinned_tools", new_pinned)
+            self.canvas.refresh_physics_bar()
 
     def _remove_physics_menu(self) -> None:
         menu = getattr(self, "_physics_menu", None)

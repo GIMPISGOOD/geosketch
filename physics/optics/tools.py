@@ -51,12 +51,8 @@ def _silent_remove_unused(doc, obj):
 # ═══════════════════════════════════════════════════════════
 
 @register_tool(
-    "点光源",
-    shortcut=None,
-    order=900,
-    hint="创建点光源",
-    icon="light_source",
-    panel="physics_optics",
+    "点光源", shortcut=None, order=900, hint="创建点光源",
+    icon="light_source", panel="physics_optics", physics_module="optics",
 )
 class LightSourceTool(Tool):
 
@@ -98,12 +94,8 @@ class LightSourceTool(Tool):
 # ═══════════════════════════════════════════════════════════
 
 @register_tool(
-    "平面镜",
-    shortcut=None,
-    order=901,
-    hint="依次点击两个端点创建平面镜",
-    icon="plane_mirror",
-    panel="physics_optics",
+    "平面镜", shortcut=None, order=901, hint="依次点击两个端点创建平面镜",
+    icon="plane_mirror", panel="physics_optics", physics_module="optics",
 )
 class PlaneMirrorTool(Tool):
 
@@ -163,12 +155,8 @@ class PlaneMirrorTool(Tool):
 # ═══════════════════════════════════════════════════════════
 
 @register_tool(
-    "光线",
-    shortcut=None,
-    order=902,
-    hint="先点击光源，再点击平面镜上的入射位置",
-    icon="light_ray",
-    panel="physics_optics",
+    "光线", shortcut=None, order=902, hint="先点击光源，再点击平面镜上的入射位置",
+    icon="light_ray", panel="physics_optics", physics_module="optics",
 )
 class LightRayTool(Tool):
 
