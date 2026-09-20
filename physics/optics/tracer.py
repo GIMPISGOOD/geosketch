@@ -115,29 +115,6 @@ def cross2(ax: float, ay: float, bx: float, by: float) -> float:
     return ax * by - ay * bx
 
 
-# ════════════════════════════════════════════════════════════
-# 新增：平面镜几何辅助
-# ════════════════════════════════════════════════════════════
-
-def _mirror_endpoints(mirror):
-    """安全获取平面镜两端点坐标。"""
-    try:
-        return (
-            (float(mirror.a.x), float(mirror.a.y)),
-            (float(mirror.b.x), float(mirror.b.y)),
-        )
-    except Exception:
-        return None
-
-
-def _mirror_double_sided(mirror, global_double_sided: bool) -> bool:
-    """当前版本将设置中的双面反射作为全局总开关。
-
-    保留 PlaneMirror.double_sided 字段，
-    供未来扩展“单个平面镜覆盖全局设置”使用。
-    """
-    return bool(global_double_sided)
-
 def plane_mirror_normal(a, b, hatch_side: str = "right"):
     """计算平面镜反射面法线。
 
@@ -222,48 +199,6 @@ def point_ray_distance(pt, origin, direction):
 # 新增：多镜追迹核心
 # ════════════════════════════════════════════════════════════
 
-def _mirror_interaction_normal(mirror, direction, global_double_sided: bool):
-    """判断当前光线是否能与该镜子发生有效反射，并返回可用法线。
-
-    返回：
-    - 可用于反射计算的法线向量
-    - 不能反射时返回 None
-
-    规则：
-    - 双面镜：无论哪一侧都可反射，但会自动翻转法线。
-    - 单面镜：只有从反射面一侧入射才反射。
-    - 掠射角过小：返回 None，避免数值抖动。
-    """
-    pts = _mirror_endpoints(mirror)
-    if pts is None:
-        return None
-
-    a, b = pts
-    if math.hypot(b[0] - a[0], b[1] - a[1]) < EPS:
-        return None
-
-    n = plane_mirror_normal(a, b, getattr(mirror, "hatch_side", "right"))
-    if n is None:
-        return None
-
-    nx, ny = n
-    dx, dy = float(direction[0]), float(direction[1])
-    ddot = dot2(dx, dy, nx, ny)
-
-    if _mirror_double_sided(mirror, global_double_sided):
-        # 双面反射：让法线始终背向入射方向。
-        if ddot > 0.0:
-            nx, ny = -nx, -ny
-            ddot = -ddot
-        if abs(ddot) < GRAZE_EPS:
-            return None
-        return (nx, ny)
-
-    # 单面反射：必须从反射面一侧射入。
-    if ddot >= -GRAZE_EPS:
-        return None
-    return (nx, ny)
-
 
 def _reflect_with_normal(direction, normal):
     """根据单位方向和法线计算反射方向。"""
@@ -284,32 +219,48 @@ def _reflect_with_normal(direction, normal):
 def trace_light_path(
     src,
     inc,
-    initial_mirror,
-    mirrors,
+    initial_surface,
+    surfaces,
     max_reflections: int = 16,
-    global_double_sided: bool = True,
     initial_active: bool = True,
 ):
-    """多平面镜光线追迹。
+    """多表面光线追迹。
 
-    参数：
-        src: 光源点坐标 (x, y)
-        inc: 初始入射点坐标 (x, y)
-        initial_mirror: 初始平面镜对象
-        mirrors: 当前可参与反射的平面镜列表
-        max_reflections: 最大反射次数，包括初始镜反射
-        global_double_sided: 全局双面反射默认值
-        initial_active: 初始平面镜是否参与第一次反射
+    参数
+    ----
+    src : (float, float)
+        光源点坐标。
+    inc : (float, float)
+        初始入射点坐标。
+    initial_surface : OpticalSurface | None
+        初始光学表面（如初始平面镜）。
+    surfaces : list[OpticalSurface]
+        当前可参与追迹的全部表面（可含 ``initial_surface``）。
+    max_reflections : int
+        最大交互次数（含初始表面交互）。范围 [1, 256]。
+    initial_active : bool
+        初始表面是否参与第一次交互。
 
-    返回：
+    返回
+    ----
+    dict:
         {
             "points": [(x, y), ...],
             "last_dir": (dx, dy) | None,
             "infinite": bool,
             "reason": str,
             "reflections": int,
-            "hit_mirrors": [mirror, ...],
+            "hit_surfaces": [OpticalSurface, ...],
         }
+
+    注意
+    ----
+    ``reason`` 的取值由各表面的 ``interact()`` 决定，常见值：
+    ``"open" / "reflected" / "refracted" / "absorbed" /
+    "total_internal_reflection" / "max_reflections" / "degenerate"``。
+
+    初始表面命中点不追加到 ``points`` 与 ``hit_surfaces``，
+    因为 ``inc`` 已经在 ``points`` 中。
     """
     src = (float(src[0]), float(src[1]))
     inc = (float(inc[0]), float(inc[1]))
@@ -320,7 +271,7 @@ def trace_light_path(
         "infinite": False,
         "reason": "degenerate",
         "reflections": 0,
-        "hit_mirrors": [],
+        "hit_surfaces": [],
     }
 
     dx = inc[0] - src[0]
@@ -344,23 +295,27 @@ def trace_light_path(
 
     origin = inc
     direction = incident_dir
-    last_mirror = initial_mirror
+    last_surface = initial_surface
     reflections = 0
 
-    # ── 初始平面镜第一次反射 ──
+    # ── 初始表面第一次交互 ──
     if (
         initial_active
-        and initial_mirror is not None
-        and getattr(initial_mirror, "exists", False)
+        and initial_surface is not None
+        and getattr(initial_surface, "exists", False)
+        and initial_surface.is_active_for_ray(incident_dir)
     ):
-        n = _mirror_interaction_normal(initial_mirror, incident_dir, global_double_sided)
-        if n is not None:
-            r = _reflect_with_normal(direction, n)
-            if r is not None:
-                direction = r
-                reflections = 1
-                result["last_dir"] = direction
-                result["reason"] = "reflected"
+        res = initial_surface.interact(inc, incident_dir)
+        if (
+            res["kind"] in ("reflect", "refract")
+            and res["direction"] is not None
+        ):
+            direction = res["direction"]
+            reflections = 1
+            result["last_dir"] = direction
+            result["reason"] = res["reason"]
+            result["hit_surfaces"].append(initial_surface)
+        # absorb / direction=None：跳过初始交互，继续找其他表面。
 
     result["reflections"] = reflections
 
@@ -370,29 +325,25 @@ def trace_light_path(
 
     terminated_by_max = False
 
-    # ── 后续平面镜追迹 ──
+    # ── 后续表面追迹 ──
     while reflections < max_reflections:
         best_t = None
-        best_mirror = None
-        best_normal = None
+        best_surface = None
 
-        for m in mirrors:
-            if m is last_mirror:
+        for s in surfaces:
+            if s is last_surface:
                 continue
-            if not getattr(m, "exists", False):
+            if not getattr(s, "exists", False):
                 continue
-
-            n = _mirror_interaction_normal(m, direction, global_double_sided)
-            if n is None:
+            if not s.is_active_for_ray(direction):
                 continue
 
-            pts = _mirror_endpoints(m)
-            if pts is None:
+            hit = s.ray_hit(origin, direction)
+            if hit is None:
                 continue
 
-            a, b = pts
-            t = ray_segment_t(origin, direction, a, b)
-            if t is None or t <= MIN_ADVANCE:
+            t = hit[0]
+            if t <= MIN_ADVANCE:
                 continue
 
             if (
@@ -400,34 +351,37 @@ def trace_light_path(
                 or t < best_t - 1e-9
                 or (
                     abs(t - best_t) <= 1e-9
-                    and getattr(m, "id", 0) < getattr(best_mirror, "id", 0)
+                    and getattr(s, "id", 0) < getattr(best_surface, "id", 0)
                 )
             ):
                 best_t = t
-                best_mirror = m
-                best_normal = n
+                best_surface = s
 
-        if best_mirror is None:
+        if best_surface is None:
             result["reason"] = "open"
             break
 
-        hit = (
+        hit_pt = (
             origin[0] + direction[0] * best_t, # pyright: ignore[reportOperatorIssue]
             origin[1] + direction[1] * best_t, # pyright: ignore[reportOperatorIssue]
         )
 
-        new_dir = _reflect_with_normal(direction, best_normal)
-        if new_dir is None:
-            result["reason"] = "open"
+        res = best_surface.interact(hit_pt, direction)
+
+        if res["kind"] == "absorb" or res["direction"] is None:
+            result["reason"] = res["reason"]
+            result["infinite"] = False
             break
 
-        result["points"].append(hit)
-        result["hit_mirrors"].append(best_mirror)
+        result["points"].append(hit_pt)
+        result["hit_surfaces"].append(best_surface)
 
-        reflections += 1
-        origin = hit
-        direction = new_dir
-        last_mirror = best_mirror
+        if best_surface.consumes_interaction_budget:
+            reflections += 1
+
+        origin = hit_pt
+        direction = res["direction"]
+        last_surface = best_surface
 
         result["last_dir"] = direction
         result["reflections"] = reflections

@@ -22,10 +22,15 @@ from geo.segments import Segment
 from ui import theme
 from ui.canvas_render import arrow_path
 from ui.math import draw_math
-
+from .surfaces import OpticalSurface
 from .tracer import (
+    GRAZE_EPS,
+    _reflect_with_normal,
+    dot2,
+    plane_mirror_normal,
     point_ray_distance,
     polyline_distance,
+    ray_segment_t,
     trace_light_path,
 )
 
@@ -49,14 +54,12 @@ class LightSourcePoint(FreePoint):
 
 
 @register_geo("PlaneMirror")
-class PlaneMirror(Segment):
+class PlaneMirror(Segment, OpticalSurface):
     """平面镜。
 
-    基于 Segment：
-    - 依赖两个端点
-    - 可拖动端点
-    - 可整体选择 / 删除
-    - 背面绘制 /// 阴影线
+    同时是 ``Segment``（提供端点、投影、长度）与 ``OpticalSurface``
+    （提供追迹接口）。多重继承的 MRO：
+    ``PlaneMirror → Segment → OpticalSurface → GeoObject``。
 
     hatch_side:
         "right" 表示从 A 到 B 的屏幕右侧绘制阴影线
@@ -87,6 +90,79 @@ class PlaneMirror(Segment):
             bool(params.get("double_sided", True)),
         )
 
+    # ──────────────────────────────────────────────
+    #  OpticalSurface 接口
+    # ──────────────────────────────────────────────
+
+    def optics_signature(self):
+        return (
+            float(self.a.x),
+            float(self.a.y),
+            float(self.b.x),
+            float(self.b.y),
+            str(self.hatch_side),
+            bool(self.double_sided),
+        )
+
+    def _surface_normal(self):
+        """反射面法线，方向由 hatch_side 决定。"""
+        return plane_mirror_normal(
+            (self.a.x, self.a.y),
+            (self.b.x, self.b.y),
+            self.hatch_side,
+        )
+
+    def is_active_for_ray(self, direction):
+        if self.double_sided:
+            return True
+        n = self._surface_normal()
+        if n is None:
+            return False
+        return dot2(direction[0], direction[1], n[0], n[1]) < 0.0
+
+    def ray_hit(self, origin, direction):
+        t = ray_segment_t(
+            origin, direction,
+            (self.a.x, self.a.y),
+            (self.b.x, self.b.y),
+        )
+        if t is None:
+            return None
+        return (
+            t,
+            origin[0] + direction[0] * t,
+            origin[1] + direction[1] * t,
+        )
+
+    def interact(self, hit_point, direction):
+        n = self._surface_normal()
+        if n is None:
+            return {"kind": "absorb", "direction": None,
+                    "reason": "degenerate"}
+
+        nx, ny = n
+        ddot = dot2(direction[0], direction[1], nx, ny)
+
+        if self.double_sided:
+            if ddot > 0.0:
+                nx, ny = -nx, -ny
+                ddot = -ddot
+            if abs(ddot) < GRAZE_EPS:
+                return {"kind": "absorb", "direction": None,
+                        "reason": "graze"}
+        else:
+            if ddot >= -GRAZE_EPS:
+                return {"kind": "absorb", "direction": None,
+                        "reason": "back_side"}
+
+        r = _reflect_with_normal(direction, (nx, ny))
+        if r is None:
+            return {"kind": "absorb", "direction": None,
+                    "reason": "degenerate"}
+
+        return {"kind": "reflect", "direction": r,
+                "reason": "reflected"}
+
 
 @register_geo("LightRay")
 class LightRay(GeoObject):
@@ -114,11 +190,11 @@ class LightRay(GeoObject):
         self.infinite = False
         self.stop_reason = ""
         self.reflection_count = 0
-        self.hit_mirrors = []
+        self.hit_surfaces = []
 
-        self._mirror_refs = []
-        self._trace_settings = (16, True)
-        self._last_mirror_version = None
+        self._surface_refs = []
+        self._trace_settings = (16,)
+        self._last_surface_version = None
         self._last_ray_sig = None
         self._last_trace_valid = False
 
@@ -134,33 +210,40 @@ class LightRay(GeoObject):
         self.infinite = False
         self.stop_reason = ""
         self.reflection_count = 0
-        self.hit_mirrors = []
+        self.hit_surfaces = []
 
-    def _resolved_cached_mirrors(self):
-        """解析弱引用缓存中的镜子，只保留存在且可见的镜子。"""
-        mirrors = []
-        for ref in self._mirror_refs:
+    def _resolved_cached_surfaces(self):
+        """解析弱引用缓存中的表面，只保留存在且可见的表面。"""
+        surfaces = []
+        for ref in self._surface_refs:
             try:
-                m = ref()
+                s = ref()
             except Exception:
-                m = None
-            if m is None:
+                s = None
+            if s is None:
                 continue
-            if not getattr(m, "exists", False):
+            if not getattr(s, "exists", False):
                 continue
-            if not getattr(m, "visible", True):
+            if not getattr(s, "visible", True):
                 continue
-            mirrors.append(m)
-        return mirrors
+            surfaces.append(s)
+        return surfaces
 
-    def _trace(self, src, inc, mirrors, max_reflections, double_sided, initial_active):
+    # 向后兼容别名
+    _resolved_cached_mirrors = _resolved_cached_surfaces
+    
+    @property
+    def hit_mirrors(self):
+        """向后兼容别名：旧的 ``hit_mirrors`` 指向 ``hit_surfaces``。"""
+        return self.hit_surfaces
+    
+    def _trace(self, src, inc, surfaces, max_reflections, initial_active):
         res = trace_light_path(
             src,
             inc,
             self.mirror,
-            mirrors,
+            surfaces,
             max_reflections=max_reflections,
-            global_double_sided=double_sided,
             initial_active=initial_active,
         )
 
@@ -169,45 +252,37 @@ class LightRay(GeoObject):
         self.infinite = bool(res["infinite"])
         self.stop_reason = res["reason"]
         self.reflection_count = int(res["reflections"])
-        self.hit_mirrors = res["hit_mirrors"]
+        self.hit_surfaces = res["hit_surfaces"]
 
     # ──────────────────────────────────────────
     # Document 依赖重算入口
     # ──────────────────────────────────────────
 
     def recompute(self):
-        """父依赖变化时由 Document 调用。
-
-        这里优先使用上一次场景同步缓存的镜子列表。
-        真正的全场景同步由 physics.optics.scene.sync_optics 负责。
-        """
         if not (self.source.exists and self.incident.exists and self.mirror.exists):
             self._clear_trace()
-            self._mirror_refs = []
+            self._surface_refs = []
             self._last_trace_valid = False
             self._last_ray_sig = None
-            self._last_mirror_version = None
+            self._last_surface_version = None
             return
 
         src = (float(self.source.x), float(self.source.y))
         inc = (float(self.incident.x), float(self.incident.y))
 
-        mirrors = self._resolved_cached_mirrors()
-        if not mirrors and self.mirror.exists and getattr(self.mirror, "visible", True):
-            mirrors = [self.mirror]
+        surfaces = self._resolved_cached_surfaces()
+        if not surfaces and self.mirror.exists and getattr(self.mirror, "visible", True):
+            surfaces = [self.mirror]
 
-        max_r, double = self._trace_settings
+        max_r = int(self._trace_settings[0])
         initial_active = bool(getattr(self.mirror, "visible", True))
 
         ray_sig = (
-            src[0],
-            src[1],
-            inc[0],
-            inc[1],
+            src[0], src[1],
+            inc[0], inc[1],
             getattr(self.mirror, "id", 0),
             initial_active,
             max_r,
-            double,
         )
 
         if self._last_trace_valid and self._last_ray_sig == ray_sig:
@@ -215,62 +290,67 @@ class LightRay(GeoObject):
 
         self._clear_trace()
         self._last_ray_sig = ray_sig
-        self._trace(src, inc, mirrors, max_r, double, initial_active)
+        self._trace(src, inc, surfaces, max_r, initial_active)
         self._last_trace_valid = True
 
     # ──────────────────────────────────────────
     # 场景同步入口
     # ──────────────────────────────────────────
 
-    def update_trace(self, mirrors, max_reflections, double_sided, mirror_version=0):
-        """由 sync_optics 调用，使用当前文档中的可见平面镜重新追迹。"""
+    def update_trace(self, surfaces, max_reflections, surface_version=0):
+        """由 ``scene.sync_optics`` 调用。
+
+        参数
+        ----
+        surfaces : list[OpticalSurface]
+            当前文档中可见的光学表面。
+        max_reflections : int
+        surface_version : int
+            由 ``scene.sync_optics`` 维护的表面签名版本号。
+        """
         if not (self.source.exists and self.incident.exists and self.mirror.exists):
             self._clear_trace()
-            self._mirror_refs = []
+            self._surface_refs = []
             self._last_trace_valid = False
             self._last_ray_sig = None
-            self._last_mirror_version = None
+            self._last_surface_version = None
             return
 
         src = (float(self.source.x), float(self.source.y))
         inc = (float(self.incident.x), float(self.incident.y))
 
         max_r = max(1, min(256, int(max_reflections)))
-        double = bool(double_sided)
         initial_active = bool(getattr(self.mirror, "visible", True))
 
         ray_sig = (
-            src[0],
-            src[1],
-            inc[0],
-            inc[1],
+            src[0], src[1],
+            inc[0], inc[1],
             getattr(self.mirror, "id", 0),
             initial_active,
             max_r,
-            double,
         )
 
         if (
             self._last_trace_valid
-            and self._last_mirror_version == mirror_version
+            and self._last_surface_version == surface_version
             and self._last_ray_sig == ray_sig
         ):
             return
 
         self._clear_trace()
-        self._trace_settings = (max_r, double)
-        self._last_mirror_version = mirror_version
+        self._trace_settings = (max_r,)
+        self._last_surface_version = surface_version
         self._last_ray_sig = ray_sig
 
-        # 使用弱引用缓存镜子，避免已删除平面镜被光线长期持有。
-        self._mirror_refs = []
-        for m in mirrors:
+        # 弱引用缓存表面，避免已删除表面被光线长期持有。
+        self._surface_refs = []
+        for s in surfaces:
             try:
-                self._mirror_refs.append(weakref.ref(m))
+                self._surface_refs.append(weakref.ref(s))
             except Exception:
                 continue
 
-        self._trace(src, inc, mirrors, max_r, double, initial_active)
+        self._trace(src, inc, surfaces, max_r, initial_active)
         self._last_trace_valid = True
 
     # ──────────────────────────────────────────

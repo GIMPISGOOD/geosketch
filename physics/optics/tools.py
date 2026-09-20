@@ -148,7 +148,14 @@ class PlaneMirrorTool(Tool):
                 b = point_or_snap(canvas, wpt, hit)
 
                 if b is not self.a:
-                    canvas.doc.add(PlaneMirror(self.a, b))
+                    double_sided = bool(
+                        canvas.doc.settings.get(
+                            "physics.optics_mirror_double_sided", True
+                        )
+                    )
+                    canvas.doc.add(
+                        PlaneMirror(self.a, b, double_sided=double_sided)
+                    )
                     self._created_a = None
                     self.cancel(canvas)
 

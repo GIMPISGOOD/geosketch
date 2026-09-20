@@ -75,6 +75,8 @@ class Document(QObject):
         self._optics_sync_key = None
         self._optics_mirror_sig = None
         self._optics_mirror_version = 0
+        self._optics_scan_version = -1
+        self._optics_scan_result = None
 
     # ──────────────────────────────────────────────────────
     #  临时图片管理
