@@ -435,6 +435,10 @@ class PropertyPanel(QWidget):
             "ExprSegment": "表达式线段",
             "ExprAngle": "表达式角度",
             "TransformDriver": "变换驱动器",
+            "TransformDriver": "变换驱动器",
+            "LightSourcePoint": "点光源",
+            "PlaneMirror": "平面镜",
+            "LightRay": "光线",
         }
         return cn.get(name, name)
 
@@ -635,7 +639,50 @@ class PropertyPanel(QWidget):
                     lambda t: self._set_expr(obj, t),
                 ),
             )
+        # ── 光学对象扩展（新增，不影响既有分支）──
+        
+        elif tn == "LightSourcePoint":
+            # 坐标已由 FreePoint 分支处理，这里只补充光源说明。
+            self._add_section("光源")
+            self._add_row("类型", QLabel("点光源"))
 
+        elif tn == "PlaneMirror":
+            self._add_section("平面镜")
+            self._add_row(
+                "阴影侧",
+                self._make_combo(
+                    ["right", "left"],
+                    getattr(obj, "hatch_side", "right"),
+                    lambda v: self._set_optics_property(
+                        obj, "hatch_side", v
+                    ),
+                ),
+            )
+            self._add_row(
+                "双面反射",
+                self._make_check(
+                    getattr(obj, "double_sided", True),
+                    lambda v: self._set_optics_property(
+                        obj, "double_sided", bool(v)
+                    ),
+                ),
+            )
+
+        elif tn == "LightRay":
+            self._add_section("光线状态")
+            self._add_row(
+                "反射次数",
+                QLabel(str(getattr(obj, "reflection_count", 0))),
+            )
+            self._add_row(
+                "终止原因",
+                QLabel(getattr(obj, "stop_reason", "") or "—"),
+            )
+            self._add_row(
+                "无限延伸",
+                QLabel("是" if getattr(obj, "infinite", False) else "否"),
+            )
+            
         self._add_section("依赖")
         parents = getattr(obj, "parents", [])
         children = getattr(obj, "children", [])
@@ -697,7 +744,24 @@ class PropertyPanel(QWidget):
             setattr(obj, "expr", text)
             self.canvas.doc.refresh_variables()
         self._doc_action(doit)
+        
+    def _set_optics_property(self, obj: Any, name: str, value: Any) -> None:
+        """修改光学对象属性后，强制光学场景同步缓存失效。
 
+        与 ``_set_attr_and_changed`` 的区别：
+        - 改 hatch_side / double_sided 不会改变 _objects_version，
+          scene.sync_optics 的缓存键不会失效，需要手动清空。
+        - 这里直接清 _optics_sync_key 与 _optics_mirror_sig，
+          与本文件 _set_visible / _reorder 里手动 bump _mutation_count 的做法一致。
+        """
+        def doit() -> None:
+            setattr(obj, name, value)
+            doc = self.canvas.doc
+            doc._optics_sync_key = None
+            doc._optics_mirror_sig = None
+            doc._mutation_count += 1
+        self._doc_action(doit)
+        
     def _set_function_curve_expr(self, obj: Any, field: str, text: str) -> None:
         def doit() -> None:
             setattr(obj, field, text)

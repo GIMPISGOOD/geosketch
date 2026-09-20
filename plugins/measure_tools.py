@@ -514,3 +514,39 @@ class RegionMeasureTool(Tool):
 # 注册到度量菜单
 register_tool(name="任意区域", order=11, panel="measure", icon="area",
               hint="依次点击多边形的顶点，再次点击起点闭合并度量面积和周长")(RegionMeasureTool)
+
+# ───────── 光学模块度量扩展（新增，保持既有精确类型名匹配不动）─────────
+#
+# 设计说明：
+# - 既有 LengthMeasureTool / SlopeMeasureTool 用 type().__name__ == "Segment"
+#   精确匹配，PlaneMirror 不会命中，这是有意为之（避免度量工具把平面镜
+#   当普通线段处理，语义上要区分）。
+# - 这里新增两个光学专用工具，仅对 PlaneMirror 生效，复用既有 kind，
+#   因此 Measure 对象的 _compute / _auto_lp / draw_measure 全部无需改动。
+
+class MirrorLengthMeasureTool(MeasureTool):
+    """平面镜长度：仅对 PlaneMirror 生效。"""
+    kind, n_targets = "length", 1
+
+    def _get_target(self, canvas, wpt, hit):
+        return hit if type(hit).__name__ == "PlaneMirror" else None
+
+
+class MirrorSlopeMeasureTool(MeasureTool):
+    """平面镜斜率：仅对 PlaneMirror 生效。"""
+    kind, n_targets = "slope", 1
+
+    def _get_target(self, canvas, wpt, hit):
+        return hit if type(hit).__name__ == "PlaneMirror" else None
+
+
+# 注册到「度量」菜单；order 排在既有工具之后，避免打乱现有菜单顺序。
+register_tool(
+    name="平面镜长度", order=20, panel="measure", icon="length",
+    hint="点击平面镜度量其长度",
+)(MirrorLengthMeasureTool)
+
+register_tool(
+    name="平面镜斜率", order=21, panel="measure", icon="slope",
+    hint="点击平面镜度量其斜率",
+)(MirrorSlopeMeasureTool)

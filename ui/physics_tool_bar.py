@@ -171,8 +171,10 @@ class PhysicsToolBar(QWidget):
             if should_show:
                 any_visible = True
 
-        # 配置按钮始终显示（只要有任何物理工具注册）
-        self._config_btn.setVisible(bool(self._physics_specs))
-        
+        # 配置按钮：仅在工具栏整体可见时才需要显示。
+        self._config_btn.setVisible(any_visible)
+
         self._update_size()
-        self.setVisible(any_visible or bool(self._physics_specs))
+        # 关闭模块时整条工具栏隐藏，与 FeatureList 第 10 条一致。
+        # 「物理 → 自定义底部工具栏…」菜单入口仍可用于重新配置。
+        self.setVisible(any_visible)
