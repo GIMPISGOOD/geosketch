@@ -1,14 +1,11 @@
 """几何光学工具。
-
 第一版工具：
-- 点光源工具
-- 平面镜工具
-- 光线工具
-
+点光源工具
+平面镜工具
+光线工具
 所有工具注册到 panel="physics_optics"，
 由主窗口的「物理 → 光学」菜单显示。
 """
-
 from __future__ import annotations
 
 from PySide6.QtCore import QPointF
@@ -17,8 +14,8 @@ from core.registry import register_tool
 from geo.points import AbstractPoint, FreePoint, PointOnObject, nearest_point
 from tools.base import Tool, point_or_snap, _snappable
 from ui import theme
-
 from .objects import LightSourcePoint, PlaneMirror, LightRay
+
 
 def _silent_remove_unused(doc, obj):
     """工具取消时删除尚未被使用的临时对象。
@@ -45,17 +42,21 @@ def _silent_remove_unused(doc, obj):
         pass
 
     doc.changed.emit()
-    
+
+
 # ═══════════════════════════════════════════════════════════
 # 点光源工具
 # ═══════════════════════════════════════════════════════════
-
 @register_tool(
-    "点光源", shortcut=None, order=900, hint="创建点光源",
-    icon="light_source", panel="physics_optics", physics_module="optics",
+    "点光源",
+    shortcut=None,
+    order=900,
+    hint="创建点光源",
+    icon="light_source",
+    panel="physics_optics",
+    physics_module="optics",
 )
 class LightSourceTool(Tool):
-
     def activated(self, canvas):
         self.cursor = None
 
@@ -82,7 +83,6 @@ class LightSourceTool(Tool):
     def draw_overlay(self, p, view):
         if self.cursor is None:
             return
-
         qpt = view.to_screen(*self.cursor)
         p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
         p.setBrush(theme.brush(theme.PREVIEW))
@@ -92,13 +92,16 @@ class LightSourceTool(Tool):
 # ═══════════════════════════════════════════════════════════
 # 平面镜工具
 # ═══════════════════════════════════════════════════════════
-
 @register_tool(
-    "平面镜", shortcut=None, order=901, hint="依次点击两个端点创建平面镜",
-    icon="plane_mirror", panel="physics_optics", physics_module="optics",
+    "平面镜",
+    shortcut=None,
+    order=901,
+    hint="依次点击两个端点创建平面镜",
+    icon="plane_mirror",
+    panel="physics_optics",
+    physics_module="optics",
 )
 class PlaneMirrorTool(Tool):
-
     def activated(self, canvas):
         self.state = 0
         self.a = None
@@ -149,17 +152,31 @@ class PlaneMirrorTool(Tool):
                     self._created_a = None
                     self.cancel(canvas)
 
+    def draw_overlay(self, p, view):
+        """★ 恢复：平面镜预览虚线与端点圆"""
+        if self.state != 1 or self.a is None or self.cursor is None:
+            return
+        pa = view.to_screen(self.a.x, self.a.y)
+        pc = view.to_screen(*self.cursor)
+        p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
+        p.drawLine(pa, pc)
+        p.setBrush(theme.brush(theme.PREVIEW))
+        p.drawEllipse(pc, 4.0, 4.0)
+
 
 # ═══════════════════════════════════════════════════════════
 # 光线工具
 # ═══════════════════════════════════════════════════════════
-
 @register_tool(
-    "光线", shortcut=None, order=902, hint="先点击光源，再点击平面镜上的入射位置",
-    icon="light_ray", panel="physics_optics", physics_module="optics",
+    "光线",
+    shortcut=None,
+    order=902,
+    hint="先点击光源，再点击平面镜上的入射位置",
+    icon="light_ray",
+    panel="physics_optics",
+    physics_module="optics",
 )
 class LightRayTool(Tool):
-
     def activated(self, canvas):
         self.state = 0
         self.source = None
@@ -242,3 +259,15 @@ class LightRayTool(Tool):
 
                 canvas.update()
                 return
+
+    def draw_overlay(self, p, view):
+        """★ 恢复：光线预览入射线与镜面吸附圆"""
+        if self.state != 1 or self.source is None or self.cursor is None:
+            return
+        ps = view.to_screen(self.source.x, self.source.y)
+        pc = view.to_screen(*self.cursor)
+        p.setPen(theme.dashed_pen(theme.PREVIEW, 1.5))
+        p.drawLine(ps, pc)
+        if isinstance(self.hover, PlaneMirror):
+            p.setBrush(theme.brush(theme.PREVIEW))
+            p.drawEllipse(pc, 4.5, 4.5)
