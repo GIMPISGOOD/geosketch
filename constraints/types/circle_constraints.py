@@ -25,21 +25,23 @@ class ConcentricConstraint(GeometricConstraint):
             self.c1.center.x - self.c2.center.x,
             self.c1.center.y - self.c2.center.y
         ]
-
-    # ★ P1-6 新增：解析雅可比（2 行残差）
+    # ★ 解析雅可比（2 行残差 → 2 行雅可比）
+    # R = [c1.x − c2.x,  c1.y − c2.y]
     def _jacobian_analytic(self, vars_map):
         n_cols = 2 * len(vars_map)
-        jac = [[0.0] * n_cols, [0.0] * n_cols]
+        # ★ 必须是 2 行，与 residual() 的 2 个分量对应
+        jac = [[0.0] * n_cols,
+               [0.0] * n_cols]
         if id(self.c1.center) in vars_map:
             idx = vars_map[id(self.c1.center)]
-            jac[0][idx * 2] = 1.0
-            jac[1][idx * 2 + 1] = 1.0
+            jac[0][idx * 2]     =  1.0   # ∂R₁/∂c1.x
+            jac[1][idx * 2 + 1] =  1.0   # ∂R₂/∂c1.y
         if id(self.c2.center) in vars_map:
             idx = vars_map[id(self.c2.center)]
-            jac[0][idx * 2] = -1.0
-            jac[1][idx * 2 + 1] = -1.0
+            jac[0][idx * 2]     = -1.0   # ∂R₁/∂c2.x
+            jac[1][idx * 2 + 1] = -1.0   # ∂R₂/∂c2.y
         return jac
-
+    
     def dump(self):
         return {"c1": self.c1.id, "c2": self.c2.id}
 
@@ -66,10 +68,10 @@ class EqualRadiusConstraint(GeometricConstraint):
         r2 = _dist(self.c2.center, self.c2.through)
         return [r1 - r2]
 
-    # ★ P1-6 新增：解析雅可比
-    # R = r1 − r2
-    # ∂r/∂center = −(through−center)/r
-    # ∂r/∂through = +(through−center)/r
+    # ★ 解析雅可比（符号修正版）
+    # R = r₁ − r₂
+    # ∂r₁/∂c₁ = −u₁   ∂r₁/∂t₁ = +u₁
+    # ∂(−r₂)/∂c₂ = +u₂   ∂(−r₂)/∂t₂ = −u₂
     def _jacobian_analytic(self, vars_map):
         n_cols = 2 * len(vars_map)
         jac = [[0.0] * n_cols]
@@ -85,17 +87,14 @@ class EqualRadiusConstraint(GeometricConstraint):
         u2x = (t2.x - c2.x) / r2
         u2y = (t2.y - c2.y) / r2
 
-        # ∂R/∂c1 = −∂r1/∂c1 = +u1
-        # ∂R/∂t1 = −∂r1/∂t1 = −u1   （注意 R = r1 − r2）
-        # ∂R/∂c2 = −∂r2/∂c2 = +u2   （−(−u2) = +u2）
-        # ∂R/∂t2 = −∂r2/∂t2 = −u2
-        for p, gx, gy in ((c1, u1x, u1y),
-                          (t1, -u1x, -u1y),
-                          (c2, u2x, u2y),
-                          (t2, -u2x, -u2y)):
+        # ★ 注意 c1 和 t1 的符号与 c2 和 t2 相反
+        for p, gx, gy in ((c1, -u1x, -u1y),   # ∂R/∂c₁ = −u₁
+                          (t1,  u1x,  u1y),   # ∂R/∂t₁ = +u₁
+                          (c2,  u2x,  u2y),   # ∂R/∂c₂ = +u₂
+                          (t2, -u2x, -u2y)):  # ∂R/∂t₂ = −u₂
             if id(p) in vars_map:
                 idx = vars_map[id(p)]
-                jac[0][idx * 2] = gx
+                jac[0][idx * 2]     = gx
                 jac[0][idx * 2 + 1] = gy
         return jac
 
