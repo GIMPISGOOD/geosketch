@@ -155,14 +155,14 @@ class TangentCL(GeometricConstraint):
         if r < 1e-9:
             return jac
 
-        # ∂cross/∂q（注意这里 cross 定义与
-        # TangentLineCircleConstraint 符号一致）
-        dc_dax = cy - by
-        dc_day = bx - cx
-        dc_dbx = ay - cy
-        dc_dby = cx - ax
-        dc_dcx = dy
-        dc_dcy = -dx
+        # ∂cross/∂q，按 residual() 中
+        # cross = (bx-ax)*(cy-ay) - (by-ay)*(cx-ax) 解析求导
+        dc_dax = by - cy
+        dc_day = cx - bx
+        dc_dbx = cy - ay
+        dc_dby = ax - cx
+        dc_dcx = -dy
+        dc_dcy = dx
 
         dL_dax = -dx / L
         dL_day = -dy / L

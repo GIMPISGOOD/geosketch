@@ -46,16 +46,26 @@ def _point_on_object_derivatives(poo) -> _DerivMap:
         angle = 2.0 * math.pi * t
         c, s = math.cos(angle), math.sin(angle)
         result = {}
-        if isinstance(center, FreePoint):
-            result[id(center)] = (1.0, 0.0, 0.0, 1.0)
         through = getattr(host, 'through', None)
-        if through is not None and isinstance(through, FreePoint) and r > 1e-12:
+
+        if isinstance(center, FreePoint):
+            # 圆心同时决定圆心位置与半径（r = |through - center|），
+            # 所以 ∂P/∂center 里必须包含 ∂r/∂center 的贡献。
+            dr_dcx = dr_dcy = 0.0
+            if isinstance(through, FreePoint) and r > 1e-12:
+                dr_dcx = -(through.x - center.x) / r
+                dr_dcy = -(through.y - center.y) / r
+            result[id(center)] = (1.0 + c * dr_dcx, c * dr_dcy,
+                                  s * dr_dcx, 1.0 + s * dr_dcy)
+
+        if isinstance(through, FreePoint) and r > 1e-12:
             dr_dtx = (through.x - center.x) / r
             dr_dty = (through.y - center.y) / r
             result[id(through)] = (c * dr_dtx, c * dr_dty,
                                    s * dr_dtx, s * dr_dty)
-        return result
 
+        return result
+    
     if tn in ("Line", "Ray", "DirectedLine"):
         if hasattr(host, 'a') and hasattr(host, 'b'):
             a, b = host.a, host.b
