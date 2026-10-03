@@ -1,3 +1,5 @@
 ﻿*.gguf
 *.pyc
 models/
+.pytest_cache
+.cache
