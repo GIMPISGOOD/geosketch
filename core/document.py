@@ -355,12 +355,16 @@ class Document(QObject):
         return False
 
     # ──────────────────────────────────────────────────────
-    #  约束求解（替换 add_constraint 方法）
+    #  约束求解
     # ──────────────────────────────────────────────────────
     def add_constraint(self, constraint):
         """添加约束。如果导致过约束（冲突），自动回滚并提示。
 
-        ★ P0-1 补充：回滚时同时备份/恢复 PointOnObject 的 t 值。
+        ★ P2-13 修复：
+          ① 逐约束残差检测，识别冲突最严重的约束
+          ② 自适应阈值（基于约束数量）
+          ③ 回滚时备份/恢复 PointOnObject 的 t 值
+          ④ 回滚后重算完整对象列表
         """
         if not _HAS_CONSTRAINTS:
             return
@@ -376,30 +380,51 @@ class Document(QObject):
         self.constraints.append(constraint)
         success = self.solve_constraints()
 
-        total_err = 0.0
+        # ★ P2-13：逐约束残差检测
+        total_err_sq = 0.0
+        worst_constraint = None
+        worst_err = 0.0
         for c in self.constraints:
             try:
+                c_err_sq = 0.0
                 for v in c.residual():
-                    total_err += v * v
+                    c_err_sq += v * v
+                c_err = math.sqrt(c_err_sq)
+                total_err_sq += c_err_sq
+                if c_err > worst_err:
+                    worst_err = c_err
+                    worst_constraint = c
             except Exception:
                 pass
 
-        if not success or math.sqrt(total_err) > 1e-3:
-            # 回滚
+        total_err = math.sqrt(total_err_sq)
+
+        # ★ 自适应阈值：约束越多，容许的总残差越大
+        n_con = max(len(self.constraints), 1)
+        threshold = max(1e-3, 5e-4 * n_con)
+
+        if not success or total_err > threshold:
+            # ── 回滚 ──
             if constraint in self.constraints:
                 self.constraints.remove(constraint)
             for p, x, y, t_val in backup:
                 p.x, p.y = x, y
                 if t_val is not None:
                     p.t = t_val
-            # ★ 修复：重算完整对象列表，而非仅自由点
+            # ★ 修复：重算完整对象列表（含从动点）
             self.recompute_silent(self.objects)
             self.changed.emit()
+
+            # ★ 增强错误信息
+            msg = "添加的约束与现有约束冲突，已自动撤销。"
+            if worst_constraint is not None and worst_err > 1e-6:
+                msg += (f"\n\n冲突最严重的约束: "
+                        f"{worst_constraint.type_name}"
+                        f"（残差 = {worst_err:.4f}）")
             try:
                 from PySide6.QtWidgets import QMessageBox, QApplication
                 parent = QApplication.activeWindow()
-                QMessageBox.warning(parent, "过约束",
-                                    "添加的约束与现有约束冲突，已自动撤销。")
+                QMessageBox.warning(parent, "过约束", msg)
             except Exception:
                 pass
             return
@@ -838,12 +863,11 @@ class Document(QObject):
                                        indent=1))
             try:
                 zf.writestr("settings.json",
-                        json.dumps(self.settings.to_dict(),
-                                   ensure_ascii=False, indent=1))
+                            json.dumps(self.settings.to_dict(),
+                                       ensure_ascii=False, indent=1))
             except Exception:
-                zf.writestr("settings.json", "{}")            
-            
-            
+                zf.writestr("settings.json", "{}")
+
             # 内嵌图片
             for obj in self.objects:
                 if type(obj).__name__ == "ImageObject":
@@ -856,31 +880,17 @@ class Document(QObject):
                         except Exception:
                             pass
 
-        # ★ 追加约束文件（原 constraints/serialization._new_save）
-        if self.constraints:
-            c_file_data = []
-            for c in self.constraints:
-                try:
-                    c_file_data.append({
-                        "id": c.cid,
-                        "type": c.type_name,
-                        "params": c.dump()
-                    })
-                except Exception:
-                    pass
-            if c_file_data:
-                with zipfile.ZipFile(path, "a") as zf:
-                    zf.writestr("constraints.json",
-                                json.dumps(c_file_data, ensure_ascii=False,
-                                           indent=1))
+            # ★ P3-10 修复：约束已通过 snapshot() 嵌入 sketch.json，
+            #   不再单独写入 constraints.json（消除冗余）。
+            #   load() 中仍保留 constraints.json 读取，兼容旧文档。
 
-        # ★ 追加动画文件（原 animation/serialization._new_save）
-        if self.animations:
-            a_file_data = [clip.dump() for clip in self.animations]
-            with zipfile.ZipFile(path, "a") as zf:
-                zf.writestr("animations.json",
-                            json.dumps(a_file_data, ensure_ascii=False,
-                                       indent=1))
+            # ★ 追加动画文件（原 animation/serialization._new_save）
+            if self.animations:
+                a_file_data = [clip.dump() for clip in self.animations]
+                with zipfile.ZipFile(path, "a") as zf:
+                    zf.writestr("animations.json",
+                                json.dumps(a_file_data, ensure_ascii=False,
+                                           indent=1))
 
     def load(self, path):
         import tempfile
