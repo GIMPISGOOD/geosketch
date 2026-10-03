@@ -281,12 +281,22 @@ class Document(QObject):
         self.changed.emit()
         return obj
 
+    # ──────────────────────────────────────────────────────
+    #  增删（替换 _remove 方法）
+    # ──────────────────────────────────────────────────────
     def _remove(self, obj):
         """级联删除（不入栈、不发信号），返回被删集合。
-        ★ 整合原 constraints/document_ext._new_remove 的约束清理。
+
+        ★ P0-3 修复：清理约束时不仅检查 involved_points() 返回的点，
+        还检查约束 __dict__ 中引用的所有 GeoObject（覆盖
+        TangentCirclesConstraint 等对象级约束引用已删除
+        Circle 的情况）。
         """
+        from geo.base import GeoObject as _GeoBase
+
         self._mutation_count += 1
         self._objects_version += 1
+
         doomed, stack = set(), [obj]
         while stack:
             o = stack.pop()
@@ -294,6 +304,7 @@ class Document(QObject):
                 continue
             doomed.add(o)
             stack.extend(o.children)
+
         for o in doomed:
             for p in o.parents:
                 if o in p.children:
@@ -303,18 +314,97 @@ class Document(QObject):
             if o in self.expr_objects:
                 self.expr_objects.remove(o)
             self._unregister_name(o)
-        # ★ 清理引用了被删对象的约束
+
+        # ★ P0-3 修复：清理引用了被删对象的约束
         if self.constraints:
             doomed_ids = {o.id for o in doomed}
             self.constraints = [
                 c for c in self.constraints
-                if not any(getattr(p, 'id', None) in doomed_ids
-                           for p in c.involved_points())
+                if not self._constraint_touches_doomed(c, doomed_ids, doomed)
             ]
+
         if not getattr(self, "_macro_suppress", False):
             self.object_removed.emit(obj)
         self._assign_point_labels()
         return doomed
+
+    @staticmethod
+    def _constraint_touches_doomed(c, doomed_ids, doomed_set):
+        """判断约束是否引用了任何被删除的对象。
+
+        三层检查：
+        1. involved_points() 返回的点的 id
+        2. 约束 __dict__ 中直接持有的 GeoObject 引用
+        3. 约束 __dict__ 中持有的 list/tuple 内的 GeoObject
+        """
+        from geo.base import GeoObject as _GeoBase
+
+        # 层 1：点级检查
+        for p in c.involved_points():
+            if getattr(p, 'id', None) in doomed_ids:
+                return True
+
+        # 层 2 + 3：对象级检查（覆盖 Circle / Segment 等）
+        for val in vars(c).values():
+            if isinstance(val, _GeoBase) and val in doomed_set:
+                return True
+            if isinstance(val, (list, tuple)):
+                for item in val:
+                    if isinstance(item, _GeoBase) and item in doomed_set:
+                        return True
+        return False
+
+    # ──────────────────────────────────────────────────────
+    #  约束求解（替换 add_constraint 方法）
+    # ──────────────────────────────────────────────────────
+    def add_constraint(self, constraint):
+        """添加约束。如果导致过约束（冲突），自动回滚并提示。
+
+        ★ P0-1 补充：回滚时同时备份/恢复 PointOnObject 的 t 值。
+        """
+        if not _HAS_CONSTRAINTS:
+            return
+
+        # ★ 修复：备份所有可能被移动的点（含吸附点的 t）
+        backup = []
+        for p in self.objects:
+            if isinstance(p, FreePoint):
+                backup.append((p, p.x, p.y, None))
+            elif isinstance(p, PointOnObject):
+                backup.append((p, p.x, p.y, p.t))
+
+        self.constraints.append(constraint)
+        success = self.solve_constraints()
+
+        total_err = 0.0
+        for c in self.constraints:
+            try:
+                for v in c.residual():
+                    total_err += v * v
+            except Exception:
+                pass
+
+        if not success or math.sqrt(total_err) > 1e-3:
+            # 回滚
+            if constraint in self.constraints:
+                self.constraints.remove(constraint)
+            for p, x, y, t_val in backup:
+                p.x, p.y = x, y
+                if t_val is not None:
+                    p.t = t_val
+            # ★ 修复：重算完整对象列表，而非仅自由点
+            self.recompute_silent(self.objects)
+            self.changed.emit()
+            try:
+                from PySide6.QtWidgets import QMessageBox, QApplication
+                parent = QApplication.activeWindow()
+                QMessageBox.warning(parent, "过约束",
+                                    "添加的约束与现有约束冲突，已自动撤销。")
+            except Exception:
+                pass
+            return
+
+        self.changed.emit()
 
     def remove(self, obj):
         if self._group_depth == 0:
@@ -425,42 +515,6 @@ class Document(QObject):
             self.refresh_variables()
         else:
             self.changed.emit()
-
-    # ──────────────────────────────────────────────────────
-    #  约束求解（原 constraints/document_ext）
-    # ──────────────────────────────────────────────────────
-    def add_constraint(self, constraint):
-        """添加约束。如果导致过约束（冲突），自动回滚并提示。"""
-        if not _HAS_CONSTRAINTS:
-            return
-        backup = [(p, p.x, p.y) for p in self.objects
-                  if isinstance(p, FreePoint)]
-        self.constraints.append(constraint)
-        success = self.solve_constraints()
-        total_err = 0.0
-        for c in self.constraints:
-            try:
-                for v in c.residual():
-                    total_err += v * v
-            except Exception:
-                pass
-        if not success or math.sqrt(total_err) > 1e-3:
-            if constraint in self.constraints:
-                self.constraints.remove(constraint)
-            for p, x, y in backup:
-                p.x, p.y = x, y
-            if backup:
-                self.recompute_silent([p for p, _, _ in backup])
-            self.changed.emit()
-            try:
-                from PySide6.QtWidgets import QMessageBox, QApplication
-                parent = QApplication.activeWindow()
-                QMessageBox.warning(parent, "过约束",
-                                    "添加的约束与现有约束冲突，已自动撤销。")
-            except Exception:
-                pass
-            return
-        self.changed.emit()
 
     def remove_constraint(self, constraint):
         if constraint in self.constraints:

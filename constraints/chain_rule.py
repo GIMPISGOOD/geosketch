@@ -309,13 +309,18 @@ def _line_free_points(obj):
     return [p for p in pts if isinstance(p, FreePoint)]
 
 
-# ─── 数值回退 ──────────────────────────────────────────────
+# 替换 _numeric_fallback 函数（文件其余部分不变）
 
+# ─── 数值回退 ──────────────────────────────────────────────
 def _numeric_fallback(ip) -> _DerivMap:
+    """★ P0-2 修复：扰动自由点后，先递归重算其子对象树
+    （如 Circle.recompute() 更新 r），再重算交点。
+    旧代码只调 ip.recompute()，导致圆参与时半径过时。
+    """
     from geo.points import FreePoint
+
     result: _DerivMap = {}
     eps = 1e-7
-
     free_pts = []
     for parent in ip.parents:
         free_pts.extend(_collect_free(parent))
@@ -328,21 +333,31 @@ def _numeric_fallback(ip) -> _DerivMap:
         ox, oy = fp.x, fp.y
 
         fp.x = ox + eps
+        _recompute_subtree_local(fp)
         ip.recompute()
         xp = (ip.x, ip.y) if ip.exists else None
+
         fp.x = ox - eps
+        _recompute_subtree_local(fp)
         ip.recompute()
         xm = (ip.x, ip.y) if ip.exists else None
+
         fp.x = ox
+        _recompute_subtree_local(fp)
         ip.recompute()
 
         fp.y = oy + eps
+        _recompute_subtree_local(fp)
         ip.recompute()
         yp = (ip.x, ip.y) if ip.exists else None
+
         fp.y = oy - eps
+        _recompute_subtree_local(fp)
         ip.recompute()
         ym = (ip.x, ip.y) if ip.exists else None
+
         fp.y = oy
+        _recompute_subtree_local(fp)
         ip.recompute()
 
         if xp is None or xm is None or yp is None or ym is None:
@@ -354,7 +369,25 @@ def _numeric_fallback(ip) -> _DerivMap:
             (xp[1] - xm[1]) / (2 * eps),
             (yp[1] - ym[1]) / (2 * eps),
         )
+
     return result
+
+
+def _recompute_subtree_local(root):
+    """递归重算子对象树（与 base._recompute_subtree 逻辑一致）。"""
+    stack = list(root.children)
+    dirty = set()
+    while stack:
+        obj = stack.pop()
+        if id(obj) in dirty:
+            continue
+        dirty.add(id(obj))
+        if getattr(obj, 'exists', True):
+            try:
+                obj.recompute()
+            except Exception:
+                pass
+        stack.extend(obj.children)
 
 
 def _collect_free(obj):
