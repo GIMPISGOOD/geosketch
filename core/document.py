@@ -521,10 +521,19 @@ class Document(QObject):
             self.constraints.remove(constraint)
             self.changed.emit()
 
+    # ──────────────────────────────────────────────────────
+    #  约束求解
+    # ──────────────────────────────────────────────────────
     def solve_constraints(self, trigger_points=None, pinned_points=None,
                           _depth=0, quick=False):
+        """★ P1-8 修复：
+        ① 递归时把已移动的自由点加入 pinned，防止二次移动
+        ② 递归 trigger 使用从动点（而非刚被移动的自由点）
+        ③ recompute_silent 覆盖完整对象列表，确保从动点同步
+        """
         if not _HAS_CONSTRAINTS or not self.constraints or _depth >= 5:
             return True
+
         if trigger_points:
             affected = get_affected_constraints(trigger_points,
                                                 self.constraints)
@@ -541,10 +550,8 @@ class Document(QObject):
                     continue
                 if isinstance(p, FreePoint):
                     free_set.add(p)
-                # ★ 修复：吸附点也作为可优化对象（自由度=2，投影保持曲线约束）
                 elif isinstance(p, PointOnObject):
                     free_set.add(p)
-
         if not free_set:
             return True
 
@@ -553,12 +560,22 @@ class Document(QObject):
         else:
             solver = ConstraintSolver(max_iter=50, tol=1e-9)
         success = solver.solve(affected, list(free_set), list(pinned_set))
-        self.recompute_silent(list(free_set))
-        if list(free_set):
-            self.solve_constraints(list(free_set), pinned_points,
-                                   _depth + 1, quick=quick)
-        return success
 
+        # ★ 修复③：重算完整对象列表（含从动点、子对象）
+        self.recompute_silent(self.objects)
+
+        # ★ 修复①②：递归时把已移动的点钉住，
+        # trigger 仍用原始触发点（让图扩展覆盖从动点链）
+        if free_set and _depth < 4:
+            merged_pinned = list(pinned_set | free_set)
+            self.solve_constraints(
+                trigger_points=trigger_points or list(free_set),
+                pinned_points=merged_pinned,
+                _depth=_depth + 1,
+                quick=quick,
+            )
+
+        return success
     # ──────────────────────────────────────────────────────
     #  快照 / 撤销
     # ──────────────────────────────────────────────────────

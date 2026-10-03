@@ -1,33 +1,58 @@
-"""约束图：用于寻找局部连通分量，避免全局求解。"""
-from typing import List, Any, Set
+"""约束图：用于寻找局部连通分量，避免全局求解。
+
+★ P1-7 修复：
+  ① list.pop(0) → collections.deque.popleft()，O(n)→O(1)
+  ② 全表扫描 → 预建邻接表，O(n²k)→O(nk)
+  ③ 防止同一约束重复入队
+"""
+from collections import deque
+from typing import List, Any
+
 from .base import GeometricConstraint
 
+
 def get_affected_constraints(
-    trigger_points: List[Any], 
+    trigger_points: List[Any],
     all_constraints: List[GeometricConstraint]
 ) -> List[GeometricConstraint]:
     """获取受触发点影响的约束连通分量。"""
+    if not trigger_points or not all_constraints:
+        return []
+
     trigger_ids = {id(p) for p in trigger_points}
-    affected = []
-    
-    # 1. 找到直接涉及的约束
-    frontier = []
-    expanded_ids = set()
+
+    # ★ 预建邻接表：点 id → 涉及该点的约束列表
+    point_to_constraints: dict = {}
     for c in all_constraints:
-        if any(id(p) in trigger_ids for p in c.involved_points()):
-            frontier.append(c)
-            
-    # 2. BFS 扩展连通分量
-    while frontier:
-        c = frontier.pop(0)
-        if id(c) in expanded_ids: continue
-        expanded_ids.add(id(c))
-        affected.append(c)
-        
+        if not c.enabled:
+            continue
         for p in c.involved_points():
-            for c2 in all_constraints:
+            pid = id(p)
+            if pid not in point_to_constraints:
+                point_to_constraints[pid] = []
+            point_to_constraints[pid].append(c)
+
+    # ★ 种子：直接涉及触发点的约束
+    expanded_ids: set = set()
+    frontier: deque = deque()
+    for pid in trigger_ids:
+        for c in point_to_constraints.get(pid, []):
+            if id(c) not in expanded_ids:
+                frontier.append(c)
+
+    # ★ BFS
+    affected: list = []
+    while frontier:
+        c = frontier.popleft()
+        cid = id(c)
+        if cid in expanded_ids:
+            continue
+        expanded_ids.add(cid)
+        affected.append(c)
+        # 沿共享点扩展
+        for p in c.involved_points():
+            for c2 in point_to_constraints.get(id(p), []):
                 if id(c2) not in expanded_ids:
-                    if any(id(p2) == id(p) for p2 in c2.involved_points()):
-                        frontier.append(c2)
-                        
+                    frontier.append(c2)
+
     return affected

@@ -132,7 +132,61 @@ class TangentCL(GeometricConstraint):
                        self.through.y - self.center.y)
         self.status = "ok"
         return [dist - r]
+    # ★ P1-6 新增：解析雅可比（TangentCL）
+    # R = |cross|/L − r
+    # cross = dx(center.y − a.y) − dy(center.x − a.x)
+    # 与 TangentLineCircleConstraint 同构
+    def _jacobian_analytic(self, vars_map):
+        n_cols = 2 * len(vars_map)
+        jac = [[0.0] * n_cols]
 
+        ax, ay = self.a.x, self.a.y
+        bx, by = self.b.x, self.b.y
+        cx, cy = self.center.x, self.center.y
+        dx, dy = bx - ax, by - ay
+        L = math.hypot(dx, dy)
+        if L < 1e-9:
+            return jac
+
+        cross = dx * (cy - ay) - dy * (cx - ax)
+        s = 1.0 if cross >= 0 else -1.0
+        dist = abs(cross) / L
+        r = math.hypot(self.through.x - cx, self.through.y - cy)
+        if r < 1e-9:
+            return jac
+
+        # ∂cross/∂q（注意这里 cross 定义与
+        # TangentLineCircleConstraint 符号一致）
+        dc_dax = cy - by
+        dc_day = bx - cx
+        dc_dbx = ay - cy
+        dc_dby = cx - ax
+        dc_dcx = dy
+        dc_dcy = -dx
+
+        dL_dax = -dx / L
+        dL_day = -dy / L
+        dL_dbx = dx / L
+        dL_dby = dy / L
+
+        def d_dist(q_cross, q_L):
+            return s * q_cross / L - dist * q_L / L
+
+        urx = (self.through.x - cx) / r
+        ury = (self.through.y - cy) / r
+
+        for p, ddist_x, ddist_y, dr_x, dr_y in (
+            (self.a,      d_dist(dc_dax, dL_dax), d_dist(dc_day, dL_day), 0.0, 0.0),
+            (self.b,      d_dist(dc_dbx, dL_dbx), d_dist(dc_dby, dL_dby), 0.0, 0.0),
+            (self.center, d_dist(dc_dcx, 0.0),    d_dist(dc_dcy, 0.0),   -urx, -ury),
+            (self.through, 0.0,                   0.0,                    urx,  ury),
+        ):
+            if id(p) in vars_map:
+                idx = vars_map[id(p)]
+                jac[0][idx * 2] = ddist_x - dr_x
+                jac[0][idx * 2 + 1] = ddist_y - dr_y
+        return jac
+    
     def dump(self):
         return {"center": self.center.id, "through": self.through.id,
                 "a": self.a.id, "b": self.b.id}
