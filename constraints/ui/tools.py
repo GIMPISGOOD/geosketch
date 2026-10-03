@@ -104,121 +104,40 @@ class BaseConstraintTool(Tool):
         self._hover = None
         canvas.update()
 
-    # ═══════ ★ 实时预览高亮（重画版）═══════
+    # ═══════ 实时预览（清爽版：与线段渲染同款实线，仅换色）═══════
     def draw_overlay(self, p, view):
-        """约束创建工具实时预览：双层圆环 + 序号 + 悬停高亮 + 进度提示。"""
-        try:
-            from ui import theme
-        except Exception:
-            return
-        from PySide6.QtCore import Qt, QPointF, QRect
-        from PySide6.QtGui import QColor, QPen, QFont
+        from PySide6.QtCore import Qt
+        from ui import theme
 
         p.save()
 
-        accent = QColor(theme.ACCENT)
-        preview = QColor(theme.PREVIEW)
+        # 已选点之间：实线，线宽 2，与 draw_segment 一致，仅换用 ACCENT
+        if len(self.pts) >= 2:
+            p.setPen(theme.pen(theme.ACCENT, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            for i in range(len(self.pts) - 1):
+                a, b = self.pts[i], self.pts[i + 1]
+                if hasattr(a, 'x') and hasattr(b, 'x'):
+                    p.drawLine(view.to_screen(a.x, a.y),
+                               view.to_screen(b.x, b.y))
 
-        # ── 1. 已选择的点：外圈半透明 + 内圈实心 + 序号 ──
-        if self.pts:
-            for i, pt in enumerate(self.pts):
-                if not (hasattr(pt, 'x') and hasattr(pt, 'y')):
-                    continue
-                sp = view.to_screen(pt.x, pt.y)
-
-                # 外圈（半透明光晕）
-                outer = QColor(accent)
-                outer.setAlphaF(0.30)
-                p.setPen(QPen(outer, 2.0))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawEllipse(sp, 11, 11)
-
-                # 内圈（实心锚点）
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(accent)
-                p.drawEllipse(sp, 3.5, 3.5)
-
-                # 序号标签（多点约束时显示点击顺序）
-                if self.n_points > 1:
-                    p.setPen(QPen(accent, 1))
-                    f = QFont()
-                    f.setPixelSize(11)
-                    f.setBold(True)
-                    p.setFont(f)
-                    p.drawText(int(sp.x()) + 14, int(sp.y()) - 10,
-                               str(i + 1))
-
-        # ── 2. 悬停对象高亮 ──
+        # 悬停对象：实线/实圆环，线宽 2，仅换用 PREVIEW
         if self._hover is not None:
-            hc = QColor(preview)
-            hc.setAlphaF(0.65)
+            p.setPen(theme.pen(theme.PREVIEW, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
             if hasattr(self._hover, 'center') and hasattr(self._hover, 'r'):
-                # 圆：虚线圆环 + 极淡填充
                 c = view.to_screen(self._hover.center.x,
                                    self._hover.center.y)
                 r_s = self._hover.r * view.scale
-                p.setPen(theme.dashed_pen(hc, 2.0))
-                fill = QColor(preview)
-                fill.setAlphaF(0.07)
-                p.setBrush(fill)
                 p.drawEllipse(c, r_s, r_s)
 
             elif (hasattr(self._hover, 'a') and hasattr(self._hover, 'b')
                   and hasattr(self._hover.a, 'x')):
-                # 线段/直线：粗线 + 端点圆
-                sa = view.to_screen(self._hover.a.x, self._hover.a.y)
-                sb = view.to_screen(self._hover.b.x, self._hover.b.y)
-                p.setPen(QPen(hc, 3.5))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawLine(sa, sb)
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(hc)
-                p.drawEllipse(sa, 3, 3)
-                p.drawEllipse(sb, 3, 3)
-
-            elif hasattr(self._hover, 'x') and hasattr(self._hover, 'y'):
-                # 点：圆环
-                sp = view.to_screen(self._hover.x, self._hover.y)
-                p.setPen(QPen(hc, 2.5))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawEllipse(sp, 10, 10)
-
-        # ── 3. 已选点之间连线 + 中点菱形 ──
-        if len(self.pts) >= 2:
-            p.setPen(theme.dashed_pen(accent, 1.5))
-            p.setBrush(Qt.BrushStyle.NoBrush)
-            for i in range(len(self.pts) - 1):
-                a, b = self.pts[i], self.pts[i + 1]
-                if not (hasattr(a, 'x') and hasattr(b, 'x')):
-                    continue
-                sa = view.to_screen(a.x, a.y)
-                sb = view.to_screen(b.x, b.y)
-                p.drawLine(sa, sb)
-                # 中点菱形
-                mx = (sa.x() + sb.x()) / 2.0
-                my = (sa.y() + sb.y()) / 2.0
-                d = 3.5
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(accent)
-                p.drawPolygon([QPointF(mx, my - d),
-                               QPointF(mx + d, my),
-                               QPointF(mx, my + d),
-                               QPointF(mx - d, my)])
-                p.setPen(theme.dashed_pen(accent, 1.5))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-
-        # ── 4. 底部进度提示 ──
-        remaining = self.n_points - len(self.pts)
-        if remaining > 0 and self.pts:
-            hint = f"{self.tool_name}  {len(self.pts)}/{self.n_points}"
-            p.setPen(QPen(accent, 1))
-            f = QFont()
-            f.setPixelSize(12)
-            p.setFont(f)
-            rect = view.rect()
-            p.drawText(QRect(0, rect.height() - 32, rect.width(), 24),
-                       Qt.AlignmentFlag.AlignHCenter, hint)
+                p.drawLine(view.to_screen(self._hover.a.x,
+                                          self._hover.a.y),
+                           view.to_screen(self._hover.b.x,
+                                          self._hover.b.y))
 
         p.restore()
 
@@ -339,103 +258,42 @@ class BaseObjectConstraintTool(Tool):
         self._hover = None
         canvas.update()
         
-    # ═══════ 实时预览高亮（重画版）═══════
+    # ═══════ 实时预览（清爽版：与线段/圆渲染同款实线，仅换色）═══════
     def draw_overlay(self, p, view):
-        """对象级约束工具实时预览：双层圆环/粗线 + 序号 + 进度提示。"""
-        from PySide6.QtCore import Qt, QRect
-        from PySide6.QtGui import QColor, QPen, QFont
+        from PySide6.QtCore import Qt
         from ui import theme
 
         p.save()
 
-        accent = QColor(theme.ACCENT)
-        preview = QColor(theme.PREVIEW)
-
-        # ── 1. 悬停对象高亮 ──
+        # 悬停对象
         if (self._hover is not None
                 and type(self._hover).__name__ in self.valid_types):
-            hc = QColor(preview)
-            hc.setAlphaF(0.65)
+            p.setPen(theme.pen(theme.PREVIEW, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
             if hasattr(self._hover, 'center') and hasattr(self._hover, 'r'):
                 c = view.to_screen(self._hover.center.x,
                                    self._hover.center.y)
                 r_s = self._hover.r * view.scale
-                p.setPen(theme.dashed_pen(hc, 2.0))
-                fill = QColor(preview)
-                fill.setAlphaF(0.07)
-                p.setBrush(fill)
                 p.drawEllipse(c, r_s, r_s)
             elif hasattr(self._hover, 'a') and hasattr(self._hover, 'b'):
-                sa = view.to_screen(self._hover.a.x, self._hover.a.y)
-                sb = view.to_screen(self._hover.b.x, self._hover.b.y)
-                p.setPen(QPen(hc, 3.5))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawLine(sa, sb)
+                p.drawLine(view.to_screen(self._hover.a.x,
+                                          self._hover.a.y),
+                           view.to_screen(self._hover.b.x,
+                                          self._hover.b.y))
 
-        # ── 2. 已选对象：外圈光晕 + 内圈实线 + 序号 ──
-        for i, obj in enumerate(self.objs):
+        # 已选对象：与渲染器同款实线，仅换用 ACCENT
+        for obj in self.objs:
+            p.setPen(theme.pen(theme.ACCENT, 2))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+
             if hasattr(obj, 'center') and hasattr(obj, 'r'):
                 c = view.to_screen(obj.center.x, obj.center.y)
                 r_s = obj.r * view.scale
-                # 外圈光晕
-                outer = QColor(accent)
-                outer.setAlphaF(0.30)
-                p.setPen(QPen(outer, 2.5))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawEllipse(c, r_s + 5, r_s + 5)
-                # 内圈
-                p.setPen(QPen(accent, 1.5))
                 p.drawEllipse(c, r_s, r_s)
-                # 序号
-                if self.n_objects > 1:
-                    p.setPen(QPen(accent, 1))
-                    f = QFont()
-                    f.setPixelSize(11)
-                    f.setBold(True)
-                    p.setFont(f)
-                    p.drawText(int(c.x()) + 14, int(c.y()) - 10,
-                               str(i + 1))
-
             elif hasattr(obj, 'a') and hasattr(obj, 'b'):
-                sa = view.to_screen(obj.a.x, obj.a.y)
-                sb = view.to_screen(obj.b.x, obj.b.y)
-                # 外圈光晕
-                outer = QColor(accent)
-                outer.setAlphaF(0.30)
-                p.setPen(QPen(outer, 5.0))
-                p.setBrush(Qt.BrushStyle.NoBrush)
-                p.drawLine(sa, sb)
-                # 内圈
-                p.setPen(QPen(accent, 2.5))
-                p.drawLine(sa, sb)
-                # 端点
-                p.setPen(Qt.PenStyle.NoPen)
-                p.setBrush(accent)
-                p.drawEllipse(sa, 3, 3)
-                p.drawEllipse(sb, 3, 3)
-                # 序号
-                if self.n_objects > 1:
-                    mx = (sa.x() + sb.x()) / 2.0
-                    my = (sa.y() + sb.y()) / 2.0
-                    p.setPen(QPen(accent, 1))
-                    f = QFont()
-                    f.setPixelSize(11)
-                    f.setBold(True)
-                    p.setFont(f)
-                    p.drawText(int(mx) + 10, int(my) - 10, str(i + 1))
-
-        # ── 3. 底部进度提示 ──
-        remaining = self.n_objects - len(self.objs)
-        if remaining > 0 and self.objs:
-            hint = f"{self.tool_name}  {len(self.objs)}/{self.n_objects}"
-            p.setPen(QPen(accent, 1))
-            f = QFont()
-            f.setPixelSize(12)
-            p.setFont(f)
-            rect = view.rect()
-            p.drawText(QRect(0, rect.height() - 32, rect.width(), 24),
-                       Qt.AlignmentFlag.AlignHCenter, hint)
+                p.drawLine(view.to_screen(obj.a.x, obj.a.y),
+                           view.to_screen(obj.b.x, obj.b.y))
 
         p.restore()
 
