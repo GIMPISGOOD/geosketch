@@ -70,6 +70,7 @@ class Document(QObject):
         self._temp_image_dir = None
         # ★ 约束系统（原 constraints/document_ext._new_init）
         self.constraints = []
+        self.last_constraint_error = ""
         # ★ 动画系统（原 animation/serialization）
         self.animations = []
         self._optics_sync_key = None
@@ -357,19 +358,28 @@ class Document(QObject):
     # ──────────────────────────────────────────────────────
     #  约束求解
     # ──────────────────────────────────────────────────────
-    def add_constraint(self, constraint):
-        """添加约束。如果导致过约束（冲突），自动回滚并提示。
+    def add_constraint(self, constraint, silent=False):
+        """添加约束。如果导致过约束，自动回滚。
 
-        ★ P2-13 修复：
-          ① 逐约束残差检测，识别冲突最严重的约束
-          ② 自适应阈值（基于约束数量）
-          ③ 回滚时备份/恢复 PointOnObject 的 t 值
-          ④ 回滚后重算完整对象列表
+        参数
+        ----
+        constraint:
+            GeometricConstraint 实例。
+        silent:
+            True 时不弹 QMessageBox，适合脚本/测试/自动化调用。
+
+        返回
+        ----
+        bool
+            True 表示添加成功；False 表示冲突或约束系统不可用。
         """
         if not _HAS_CONSTRAINTS:
-            return
+            self.last_constraint_error = "约束系统不可用"
+            return False
 
-        # ★ 修复：备份所有可能被移动的点（含吸附点的 t）
+        self.last_constraint_error = ""
+
+        # ★ 备份所有可能被移动的点（含吸附点的 t）
         backup = []
         for p in self.objects:
             if isinstance(p, FreePoint):
@@ -380,10 +390,11 @@ class Document(QObject):
         self.constraints.append(constraint)
         success = self.solve_constraints()
 
-        # ★ P2-13：逐约束残差检测
+        # ★ 逐约束残差检测
         total_err_sq = 0.0
         worst_constraint = None
         worst_err = 0.0
+
         for c in self.constraints:
             try:
                 c_err_sq = 0.0
@@ -407,29 +418,37 @@ class Document(QObject):
             # ── 回滚 ──
             if constraint in self.constraints:
                 self.constraints.remove(constraint)
+
             for p, x, y, t_val in backup:
                 p.x, p.y = x, y
                 if t_val is not None:
                     p.t = t_val
-            # ★ 修复：重算完整对象列表（含从动点）
+
+            # ★ 重算完整对象列表（含从动点）
             self.recompute_silent(self.objects)
             self.changed.emit()
 
-            # ★ 增强错误信息
             msg = "添加的约束与现有约束冲突，已自动撤销。"
             if worst_constraint is not None and worst_err > 1e-6:
-                msg += (f"\n\n冲突最严重的约束: "
-                        f"{worst_constraint.type_name}"
-                        f"（残差 = {worst_err:.4f}）")
-            try:
-                from PySide6.QtWidgets import QMessageBox, QApplication
-                parent = QApplication.activeWindow()
-                QMessageBox.warning(parent, "过约束", msg)
-            except Exception:
-                pass
-            return
+                msg += (
+                    f"\n冲突最严重的约束: {worst_constraint.type_name}"
+                    f"（残差 = {worst_err:.4f}）"
+                )
+
+            self.last_constraint_error = msg
+
+            if not silent:
+                try:
+                    from PySide6.QtWidgets import QMessageBox, QApplication
+                    parent = QApplication.activeWindow()
+                    QMessageBox.warning(parent, "过约束", msg)
+                except Exception:
+                    pass
+
+            return False
 
         self.changed.emit()
+        return True
 
     def remove(self, obj):
         if self._group_depth == 0:

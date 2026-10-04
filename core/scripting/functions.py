@@ -164,4 +164,52 @@ def build_global_env(interp):
         
     }
 
+    cf = getattr(interp, "constraint_factory", None)
+    if cf is not None:
+        env.update({
+            # 点级约束
+            "constraint_fixed": cf.fixed,
+            "固定约束": cf.fixed,
+
+            "constraint_distance": cf.distance,
+            "距离约束": cf.distance,
+
+            "constraint_angle": cf.angle,
+            "角度约束": cf.angle,
+
+            "constraint_horizontal": cf.horizontal,
+            "水平约束": cf.horizontal,
+
+            "constraint_vertical": cf.vertical,
+            "竖直约束": cf.vertical,
+
+            "constraint_collinear": cf.collinear,
+            "共线约束": cf.collinear,
+
+            "constraint_parallel": cf.parallel,
+            "平行约束": cf.parallel,
+
+            "constraint_perpendicular": cf.perpendicular,
+            "垂直约束": cf.perpendicular,
+
+            # 对象级约束
+            "constraint_concentric": cf.concentric,
+            "同心约束": cf.concentric,
+
+            "constraint_equal_radius": cf.equal_radius,
+            "等半径约束": cf.equal_radius,
+
+            "constraint_tangent": cf.tangent,
+            "相切约束": cf.tangent,
+
+            # 求解 / 删除
+            "constraint_solve": cf.solve,
+            "求解约束": cf.solve,
+
+            "constraint_remove": cf.remove,
+            "remove_constraint": cf.remove,
+            "delete_constraint": cf.remove,
+            "删除约束": cf.remove,
+        })
+
     return env

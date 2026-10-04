@@ -49,6 +49,21 @@ FUNCS = [
     "sqrt ",  "abs ",  "ln ",  "log ",  "exp ",
     "floor ",  "ceil ",  "round ",  "sign ",  "min ",  "max ",
     "print ",  "math ",  "geo ",  "draw ",  "doc "
+    "constraint_fixed ",
+    "constraint_distance ",
+    "constraint_angle ",
+    "constraint_horizontal ",
+    "constraint_vertical ",
+    "constraint_collinear ",
+    "constraint_parallel ",
+    "constraint_perpendicular ",
+    "constraint_concentric ",
+    "constraint_equal_radius ",
+    "constraint_tangent ",
+    "constraint_solve ",
+    "constraint_remove ",
+    "remove_constraint ",
+    "delete_constraint ",
 ]
 
 

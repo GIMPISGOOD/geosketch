@@ -11,7 +11,7 @@ from .object_factory import ObjectFactory, get_object_property
 from .object_destructor import ObjectDestructor
 from .functions import build_global_env
 from .parser import parse
-
+from .constraint_factory import ConstraintFactory
 
 class Interpreter:
     def __init__(self, doc, canvas=None, owner_id="script"):
@@ -32,8 +32,11 @@ class Interpreter:
 
         self.logs = []
         self.created = []
+        self.created_constraints = []
+        self._had_created_constraints = False
+        self._point_backup = None
         self.error = None
-
+        
         self.imported_modules = {}
         self.importing = set()
 
@@ -42,6 +45,7 @@ class Interpreter:
 
         self.factory = ObjectFactory(self)
         self.destructor = ObjectDestructor(self)
+        self.constraint_factory = ConstraintFactory(self)
 
         self.global_scope = Scope()
 
@@ -100,17 +104,116 @@ class Interpreter:
         self.doc.add(obj)
 
         return obj
+    
+    def add_created_constraint(self, constraint, name=None, line=None):
+        """脚本创建约束的统一入口。"""
 
+        # 第一次创建约束前备份点坐标，便于失败或 __keep=false 时恢复。
+        self._backup_points_once()
+
+        constraint.script_owner = self.owner_id
+        constraint.script_created = True
+
+        if name:
+            constraint.script_name = name
+
+        try:
+            ok = self.doc.add_constraint(constraint, silent=True)
+        except TypeError:
+            # 兼容尚未支持 silent 参数的旧 Document。
+            self.doc.add_constraint(constraint)
+            ok = constraint in self.doc.constraints
+
+        if not ok:
+            msg = getattr(self.doc, "last_constraint_error", "")
+            if not msg:
+                msg = "约束添加失败或过约束"
+            raise ScriptError(msg, line)
+
+        self.created_constraints.append(constraint)
+        self._had_created_constraints = True
+
+        return constraint
+
+    # ------------------------------------------------------------
+    # 约束回滚 / 清理
+    # ------------------------------------------------------------
+
+    def _backup_points_once(self):
+        if self._point_backup is not None:
+            return
+
+        from geo.points import FreePoint, PointOnObject
+
+        backup = []
+        for p in self.doc.objects:
+            if isinstance(p, FreePoint):
+                backup.append((p, p.x, p.y, None))
+            elif isinstance(p, PointOnObject):
+                backup.append((p, p.x, p.y, p.t))
+
+        self._point_backup = backup
+
+    def _restore_point_backup(self):
+        if self._point_backup is None:
+            return
+
+        for p, x, y, t in self._point_backup:
+            try:
+                if p not in self.doc.objects:
+                    continue
+
+                p.x, p.y = x, y
+                if t is not None:
+                    p.t = t
+            except Exception:
+                pass
+
+        try:
+            self.doc.recompute_silent(self.doc.objects)
+        except Exception:
+            pass
+
+        self._point_backup = None
+
+    def _remove_created_constraints(self):
+        if not self.created_constraints:
+            return
+
+        for c in reversed(self.created_constraints):
+            try:
+                if c in self.doc.constraints:
+                    self.doc.constraints.remove(c)
+            except Exception:
+                pass
+
+        self.created_constraints = []
+        
     def _finalize_success(self):
         keep = self._truth(self.special.get("__keep", False))
 
         if not keep:
+            had_constraints = self._had_created_constraints
+
+            self._remove_created_constraints()
+
+            if had_constraints:
+                self._restore_point_backup()
+
             for obj in reversed(self.created):
                 if obj in self.doc.objects:
                     self.doc._remove(obj)
 
             self.created = []
+
+            try:
+                self.doc.recompute_silent(self.doc.objects)
+            except Exception:
+                pass
+
             self.doc.changed.emit()
+        else:
+            self._point_backup = None
 
     def _rollback(self):
         for obj in reversed(self.created):
@@ -158,10 +261,10 @@ class Interpreter:
 
             # 如果赋值的是几何对象，尝试同步对象名
             if hasattr(value, "script_name"):
-                value.script_name = stmt.name
+                value.script_name = stmt.name # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
 
                 try:
-                    value.name = stmt.name
+                    value.name = stmt.name # pyright: ignore[reportOptionalMemberAccess, reportAttributeAccessIssue]
                 except Exception:
                     pass
 

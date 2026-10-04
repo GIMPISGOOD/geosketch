@@ -125,9 +125,8 @@ class TangentCirclesConstraint(GeometricConstraint):
         r1 = _dist(self.c1.center, self.c1.through)
         r2 = _dist(self.c2.center, self.c2.through)
         if self.mode == "inner":
-            return [d + r2 - r1]
-        else:
-            return [d - (r1 + r2)]
+            return [d - abs(r1 - r2)]
+        return [d - (r1 + r2)]
 
     # ★ P1-6 新增：解析雅可比（与 TangentCC 同构）
     def _jacobian_analytic(self, vars_map):
@@ -157,11 +156,12 @@ class TangentCirclesConstraint(GeometricConstraint):
             dc2x, dc2y = ux + u2x, uy + u2y
             dt2x, dt2y = -u2x, -u2y
         else:
-            # 内切：R = d + r2 − r1
-            dc1x, dc1y = u1x - ux, u1y - uy
-            dt1x, dt1y = -u1x, -u1y
-            dc2x, dc2y = ux - u2x, uy - u2y
-            dt2x, dt2y = u2x, u2y
+            # 内切：R = d − |r1 − r2|，s = sign(r1 − r2) 处理绝对值
+            s = 1.0 if r1 >= r2 else -1.0
+            dc1x, dc1y = s * u1x - ux, s * u1y - uy
+            dt1x, dt1y = -s * u1x, -s * u1y
+            dc2x, dc2y = ux - s * u2x, uy - s * u2y
+            dt2x, dt2y = s * u2x, s * u2y
 
         for p, gx, gy in ((c1, dc1x, dc1y),
                           (t1, dt1x, dt1y),
