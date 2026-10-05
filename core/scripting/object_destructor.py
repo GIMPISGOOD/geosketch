@@ -72,21 +72,18 @@ class ObjectDestructor:
     def delete_all(self, target, line=None):
         doc = self.interp.doc
         candidates = list(doc.objects)
-
         if target == "points":
             candidates = [o for o in candidates if isinstance(o, AbstractPoint)]
-
         elif target == "circles":
             candidates = [
                 o for o in candidates
                 if type(o).__name__ in ("Circle", "ExprCircle")
             ]
-
         elif target == "created":
             candidates = [
                 o for o in candidates
-                if getattr(obj, "script_created", False)
-                or getattr(obj, "script_owner", None) == self.interp.owner_id
+                if getattr(o, "script_created", False)
+                or getattr(o, "script_owner", None) == self.interp.owner_id
             ]
 
         changed = False

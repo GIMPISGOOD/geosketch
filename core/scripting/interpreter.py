@@ -216,15 +216,20 @@ class Interpreter:
             self._point_backup = None
 
     def _rollback(self):
+        # 1. 优先清理已添加的约束，防止残留
+        self._remove_created_constraints()
+        # 2. 恢复被求解器移动过的点坐标
+        self._restore_point_backup()
+        # 3. 清理已创建的几何对象
         for obj in reversed(self.created):
             if obj in self.doc.objects:
                 self.doc._remove(obj)
-
+        self.created = []
+        # 4. 恢复变量状态
         try:
             self.doc.vars.load_dict(self._var_backup)
         except Exception:
             pass
-
         self.doc.changed.emit()
 
     # ------------------------------------------------------------

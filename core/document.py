@@ -612,13 +612,15 @@ class Document(QObject):
         # trigger 仍用原始触发点（让图扩展覆盖从动点链）
         if free_set and _depth < 4:
             merged_pinned = list(pinned_set | free_set)
-            self.solve_constraints(
+            # 接收深层递归的求解状态
+            sub_success = self.solve_constraints(
                 trigger_points=trigger_points or list(free_set),
                 pinned_points=merged_pinned,
                 _depth=_depth + 1,
                 quick=quick,
             )
-
+            # 合并状态：只要有一层失败，整体即视为失败
+            success = success and sub_success
         return success
     # ──────────────────────────────────────────────────────
     #  快照 / 撤销

@@ -401,18 +401,16 @@ class ConstraintFactory:
 
     def remove(self, value):
         """删除约束。
-
         支持：
-            remove_constraint(c)
-            remove_constraint("c12")
+        remove_constraint(c)
+        remove_constraint("c12")
         """
         doc = self._doc()
         target = None
-
+        
+        # 1. 解析目标约束
         if hasattr(value, "cid"):
-            if value in doc.constraints:
-                target = value
-
+            target = value
         elif isinstance(value, str):
             for c in doc.constraints:
                 if getattr(c, "cid", None) == value:
@@ -421,16 +419,16 @@ class ConstraintFactory:
                 if getattr(c, "script_name", None) == value:
                     target = c
                     break
-
-        if target is None:
+                    
+        # 2. 统一校验目标是否存在于文档中
+        if target is None or target not in doc.constraints:
             raise ScriptError("找不到要删除的约束")
-
+            
+        # 3. 执行删除与清理
         doc.remove_constraint(target)
-
         try:
             if target in self.interp.created_constraints:
                 self.interp.created_constraints.remove(target)
         except Exception:
             pass
-
         return True
