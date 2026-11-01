@@ -378,7 +378,34 @@ class Document(QObject):
             return False
 
         self.last_constraint_error = ""
+        
+        # ★ 新增：添加前检查约束有效性
+        try:
+            constraint.residual()
+        except Exception:
+            msg = "约束残差计算失败，无法添加。"
+            self.last_constraint_error = msg
+            if not silent:
+                try:
+                    from PySide6.QtWidgets import QMessageBox, QApplication
+                    parent = QApplication.activeWindow()
+                    QMessageBox.warning(parent, "约束无效", msg)
+                except Exception:
+                    pass
+            return False
 
+        if getattr(constraint, "status", "ok") == "invalid_expr":
+            msg = "约束表达式无效，无法添加。"
+            self.last_constraint_error = msg
+            if not silent:
+                try:
+                    from PySide6.QtWidgets import QMessageBox, QApplication
+                    parent = QApplication.activeWindow()
+                    QMessageBox.warning(parent, "约束无效", msg)
+                except Exception:
+                    pass
+            return False
+        
         # ★ 备份所有可能被移动的点（含吸附点的 t）
         backup = []
         for p in self.objects:

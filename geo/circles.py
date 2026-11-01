@@ -10,7 +10,7 @@ from ui import theme
 class Circle(GeoObject):
     """圆：圆心 + 圆周上一点。"""
 
-    closed = True  # ★ 新增：圆是闭合曲线
+    closed = True
 
     def __init__(self, center, through):
         super().__init__(parents=[center, through])
@@ -18,17 +18,22 @@ class Circle(GeoObject):
         self.r = 0.0
         self.recompute()
 
-    def recompute(self):
-        self.r = math.hypot(
+    def _live_radius(self):
+        """实时半径：避免 recompute 滞后导致 point_at/project 使用旧半径。"""
+        return math.hypot(
             self.through.x - self.center.x,
-            self.through.y - self.center.y
+            self.through.y - self.center.y,
         )
+
+    def recompute(self):
+        self.r = self._live_radius()
 
     def point_at(self, t):
         ang = 2 * math.pi * t
+        r = self._live_radius()
         return (
-            self.center.x + self.r * math.cos(ang),
-            self.center.y + self.r * math.sin(ang)
+            self.center.x + r * math.cos(ang),
+            self.center.y + r * math.sin(ang),
         )
 
     def project(self, x, y):
@@ -38,7 +43,10 @@ class Circle(GeoObject):
         ) % 1.0
 
     def distance_to(self, x, y):
-        return abs(math.hypot(x - self.center.x, y - self.center.y) - self.r)
+        return abs(
+            math.hypot(x - self.center.x, y - self.center.y)
+            - self._live_radius()
+        )
 
     @classmethod
     def build(cls, parents, params):

@@ -65,10 +65,12 @@ class GeometricConstraint:
             # ═══════════════════════════════════════════════
             if isinstance(p, PointOnObject) and id(p) in vars_map:
                 idx = vars_map[id(p)]
-                # 1) 先做自由坐标差分，得到 ∂C/∂x, ∂C/∂y
+
+                # 1) 先做自由坐标差分，得到 ∂C/∂P.x, ∂C/∂P.y
                 dC_dpx = zeros(n_res, dtype=float64)
                 dC_dpy = zeros(n_res, dtype=float64)
                 old_x, old_y = p.x, p.y
+
                 try:
                     p.x = old_x + eps
                     r_px = asarray(self.residual(), dtype=float64)
@@ -79,6 +81,7 @@ class GeometricConstraint:
                     pass
                 finally:
                     p.x = old_x
+
                 try:
                     p.y = old_y + eps
                     r_py = asarray(self.residual(), dtype=float64)
@@ -90,7 +93,7 @@ class GeometricConstraint:
                 finally:
                     p.y = old_y
 
-                # 2) 计算宿主在当前 t 处的切线方向
+                # 2) 吸附点自身作为变量：只保留宿主切线方向
                 old_t = p.t
                 try:
                     x_p, y_p = p.host.point_at(old_t + eps)
@@ -103,16 +106,37 @@ class GeometricConstraint:
                 speed = math.hypot(dx_dt, dy_dt)
                 if speed > 1e-12:
                     tx, ty = dx_dt / speed, dy_dt / speed
-                    # 沿切线方向的方向导数
                     dC_ds = dC_dpx * tx + dC_dpy * ty
-                    # 投影回 (x, y) 分量：只保留切线方向
-                    jac[:, idx * 2] = dC_ds * tx
-                    jac[:, idx * 2 + 1] = dC_ds * ty
+                    jac[:, idx * 2] += dC_ds * tx
+                    jac[:, idx * 2 + 1] += dC_ds * ty
                 else:
-                    jac[:, idx * 2] = dC_dpx
-                    jac[:, idx * 2 + 1] = dC_dpy
-                continue
+                    jac[:, idx * 2] += dC_dpx
+                    jac[:, idx * 2 + 1] += dC_dpy
 
+                # 3) 补充宿主自由点链式法则贡献
+                #
+                # 例如：
+                #   P = PointOnObject(Segment(A, B))
+                #   约束残差 C(P)
+                #
+                # 当 A/B 也是变量时，必须有：
+                #   ∂C/∂A = ∂C/∂P.x * ∂P.x/∂A + ∂C/∂P.y * ∂P.y/∂A
+                #   ∂C/∂B = ∂C/∂P.x * ∂P.x/∂B + ∂C/∂P.y * ∂P.y/∂B
+                try:
+                    host_derivs = get_coordinate_derivatives(p)
+                except Exception:
+                    host_derivs = {}
+
+                for fp_id, dm in host_derivs.items():
+                    if fp_id == id(p) or fp_id not in vars_map:
+                        continue
+                    hidx = vars_map[fp_id]
+                    # dm = (∂x/∂qx, ∂x/∂qy, ∂y/∂qx, ∂y/∂qy)
+                    jac[:, hidx * 2] += dC_dpx * dm[0] + dC_dpy * dm[2]
+                    jac[:, hidx * 2 + 1] += dC_dpx * dm[1] + dC_dpy * dm[3]
+
+                continue
+            
             # ── 原有逻辑：非 PointOnObject 或不在 vars_map 中 ──
             dC_dpx = zeros(n_res, dtype=float64)
             dC_dpy = zeros(n_res, dtype=float64)
@@ -247,11 +271,21 @@ def _recompute_subtree(root):
 def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
     """直接扰动自由点，观察从动点引起的残差变化。
 
-    返回 {fp_id: ndarray(2*n_res)}，
-    布局 [dr0_dx, dr0_dy, dr1_dx, dr1_dy, ...]。
+    返回：
 
-    ★ P0-2 修复：扰动自由点后，先递归重算其整个子对象树
-    （含中间层如 Circle），再重算从动点，最后取残差。
+        {
+            fp_id: ndarray(2 * n_res)
+        }
+
+    布局必须是交叠格式：
+
+        [
+            dr0_dx, dr0_dy,
+            dr1_dx, dr1_dy,
+            ...
+        ]
+
+    ★ 修复旧版按 [all_dx..., all_dy...] 返回导致调用方错误取列的问题。
     """
     from geo.points import FreePoint
 
@@ -271,48 +305,39 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
                 if id(p) == fp_id:
                     fp = p
                     break
+            if fp is not None:
+                break
+
         if fp is None:
             continue
 
         old_x, old_y = fp.x, fp.y
 
+        def _eval():
+            try:
+                _recompute_subtree(fp)
+                dep_point.recompute()
+                return asarray(constraint.residual(), dtype=float64)
+            except Exception:
+                return zeros(n_res, dtype=float64)
+
         # +x
         fp.x = old_x + eps
-        try:
-            _recompute_subtree(fp)
-            dep_point.recompute()
-            r_px = asarray(constraint.residual(), dtype=float64)
-        except Exception:
-            r_px = zeros(n_res, dtype=float64)
+        r_px = _eval()
 
         # -x
         fp.x = old_x - eps
-        try:
-            _recompute_subtree(fp)
-            dep_point.recompute()
-            r_mx = asarray(constraint.residual(), dtype=float64)
-        except Exception:
-            r_mx = zeros(n_res, dtype=float64)
+        r_mx = _eval()
 
         fp.x = old_x
 
         # +y
         fp.y = old_y + eps
-        try:
-            _recompute_subtree(fp)
-            dep_point.recompute()
-            r_py = asarray(constraint.residual(), dtype=float64)
-        except Exception:
-            r_py = zeros(n_res, dtype=float64)
+        r_py = _eval()
 
         # -y
         fp.y = old_y - eps
-        try:
-            _recompute_subtree(fp)
-            dep_point.recompute()
-            r_my = asarray(constraint.residual(), dtype=float64)
-        except Exception:
-            r_my = zeros(n_res, dtype=float64)
+        r_my = _eval()
 
         fp.y = old_y
 
@@ -324,11 +349,11 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
             pass
 
         n = min(n_res, len(r_px), len(r_mx), len(r_py), len(r_my))
-        acc[:n] = (r_px[:n] - r_mx[:n]) / (2.0 * eps)
-        acc[n:2 * n] = (r_py[:n] - r_my[:n]) / (2.0 * eps)
+        if n > 0:
+            acc[0:2 * n:2] = (r_px[:n] - r_mx[:n]) / (2.0 * eps)
+            acc[1:2 * n:2] = (r_py[:n] - r_my[:n]) / (2.0 * eps)
 
     return result
-
 
 def _collect_free_from(obj):
     """从几何对象中收集自由点。

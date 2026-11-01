@@ -17,24 +17,46 @@ class AngleConstraint(GeometricConstraint):
 
     def _target_rad(self):
         deg = eval_expr(self.expr)
+
         if deg is None:
             self.status = "invalid_expr"
-            return 0.0
+            return None
+
+        try:
+            deg = float(deg)
+        except Exception:
+            self.status = "invalid_expr"
+            return None
+
+        if not math.isfinite(deg):
+            self.status = "invalid_expr"
+            return None
+
         self.status = "ok"
         return math.radians(abs(deg))
 
     def residual(self):
         ux, uy = self.p1.x - self.vertex.x, self.p1.y - self.vertex.y
         vx, vy = self.p2.x - self.vertex.x, self.p2.y - self.vertex.y
+
         len_u = math.hypot(ux, uy)
         len_v = math.hypot(vx, vy)
+
         if len_u < 1e-9 or len_v < 1e-9:
             self.status = "degenerate"
             return [0.0]
+
+        target = self._target_rad()
+
+        # ★ 无效表达式不再强制目标角 0°
+        if target is None:
+            return [0.0]
+
         cos_theta = (ux * vx + uy * vy) / (len_u * len_v)
         cos_theta = max(-1.0, min(1.0, cos_theta))
-        target = self._target_rad()
+
         return [cos_theta - math.cos(target)]
+
 
     # ★ P1-6 新增：解析雅可比
     # 残差 R = cos θ − cos(target)，cos θ = û·v̂

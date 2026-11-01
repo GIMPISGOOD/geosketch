@@ -17,10 +17,24 @@ class DistanceConstraint(GeometricConstraint):
         dx = self.p2.x - self.p1.x
         dy = self.p2.y - self.p1.y
         d = math.hypot(dx, dy)
+
         target = eval_expr(self.expr)
+
         if target is None:
             self.status = "invalid_expr"
             return [0.0]
+
+        try:
+            target = float(target)
+        except Exception:
+            self.status = "invalid_expr"
+            return [0.0]
+
+        # ★ 非有限值或负距离目标都视为无效约束
+        if not math.isfinite(target) or target < 0.0:
+            self.status = "invalid_expr"
+            return [0.0]
+
         self.status = "ok"
         return [d - target]
 
