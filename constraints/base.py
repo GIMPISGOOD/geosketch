@@ -3,6 +3,9 @@ import math
 from numpy import asarray, zeros, float64
 from typing import List, Any, Dict, Type
 
+def _fd_eps(v: float) -> float:
+    """尺度自适应数值差分布长：相对 ~1e-6，避免大坐标灾难性抵消。"""
+    return 1e-6 * max(1.0, abs(v))
 
 class GeometricConstraint:
     _next_id = 1
@@ -47,6 +50,13 @@ class GeometricConstraint:
 
         n_cols = 2 * len(vars_map)
         pts = self.involved_points()
+        _seen = set()
+        _u = []
+        for _p in pts:
+            if id(_p) not in _seen:
+                _seen.add(id(_p))
+                _u.append(_p)
+        pts = _u
         try:
             r = self.residual()
             n_res = len(r)
@@ -54,7 +64,7 @@ class GeometricConstraint:
             return zeros((0, n_cols), dtype=float64)
 
         jac = zeros((n_res, n_cols), dtype=float64)
-        eps = 1e-7
+        ept = 1e-7
 
         for p in pts:
             # ═══════════════════════════════════════════════
@@ -70,7 +80,8 @@ class GeometricConstraint:
                 dC_dpx = zeros(n_res, dtype=float64)
                 dC_dpy = zeros(n_res, dtype=float64)
                 old_x, old_y = p.x, p.y
-
+                eps = _fd_eps(max(abs(p.x), abs(p.y)))
+                
                 try:
                     p.x = old_x + eps
                     r_px = asarray(self.residual(), dtype=float64)
@@ -141,6 +152,7 @@ class GeometricConstraint:
             dC_dpx = zeros(n_res, dtype=float64)
             dC_dpy = zeros(n_res, dtype=float64)
             old_x, old_y = p.x, p.y
+            eps = _fd_eps(max(abs(p.x), abs(p.y)))
             try:
                 p.x = old_x + eps
                 r_px = asarray(self.residual(), dtype=float64)
@@ -165,12 +177,12 @@ class GeometricConstraint:
             # 三级分发
             if isinstance(p, FreePoint) and id(p) in vars_map:
                 idx = vars_map[id(p)]
-                jac[:, idx * 2] = dC_dpx
-                jac[:, idx * 2 + 1] = dC_dpy
+                jac[:, idx * 2] += dC_dpx
+                jac[:, idx * 2 + 1] += dC_dpy
             elif id(p) in vars_map:
                 idx = vars_map[id(p)]
-                jac[:, idx * 2] = dC_dpx
-                jac[:, idx * 2 + 1] = dC_dpy
+                jac[:, idx * 2] += dC_dpx
+                jac[:, idx * 2 + 1] += dC_dpy
             else:
                 derivs = get_coordinate_derivatives(p)
                 if not derivs:
@@ -193,7 +205,6 @@ class GeometricConstraint:
 
     # ── 纯数值差分雅可比（无从动点，无解析式）──────────
     def _numeric_jacobian(self, vars_map: Dict[int, int]):
-        eps = 1e-7
         pts = self.involved_points()
         n_res = len(self.residual())
         n_cols = 2 * len(vars_map)
@@ -202,6 +213,8 @@ class GeometricConstraint:
             if id(p) not in vars_map:
                 continue
             idx = vars_map[id(p)]
+            # ★ v2：逐点尺度自适应步长
+            eps = _fd_eps(max(abs(p.x), abs(p.y)))
             for axis in range(2):
                 old = p.x if axis == 0 else p.y
                 try:
@@ -223,7 +236,7 @@ class GeometricConstraint:
                 n = min(n_res, len(r_plus), len(r_minus))
                 jac[:n, idx * 2 + axis] = (r_plus[:n] - r_minus[:n]) / (2.0 * eps)
         return jac
-
+    
     # ── 序列化 ──────────────────────────────────────
     def dump(self) -> dict:
         raise NotImplementedError
@@ -290,7 +303,6 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
     from geo.points import FreePoint
 
     result: Dict[int, Any] = {}
-    eps = 1e-7
     free_ids = set(vars_map.keys())
 
     for parent in dep_point.parents:
@@ -311,6 +323,8 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
         if fp is None:
             continue
 
+        # ★ v2：逐点尺度自适应步长
+        eps = _fd_eps(max(abs(fp.x), abs(fp.y)))
         old_x, old_y = fp.x, fp.y
 
         def _eval():
@@ -353,7 +367,7 @@ def _numeric_chain_fallback(constraint, dep_point, vars_map, n_res):
             acc[0:2 * n:2] = (r_px[:n] - r_mx[:n]) / (2.0 * eps)
             acc[1:2 * n:2] = (r_py[:n] - r_my[:n]) / (2.0 * eps)
 
-    return result
+    return result               
 
 def _collect_free_from(obj):
     """从几何对象中收集自由点。

@@ -1,7 +1,10 @@
 """相切约束：圆-圆相切（外切/内切）、圆-线相切。"""
 import math
+
+
 from ..base import GeometricConstraint, register_constraint
 
+_KINK_EPS2 = 1e-12
 
 @register_constraint("tangent_cc")
 class TangentCC(GeometricConstraint):
@@ -39,7 +42,8 @@ class TangentCC(GeometricConstraint):
         self.status = "ok"
         if self.mode == "external":
             return [d - (r1 + r2)]
-        return [d - abs(r1 - r2)]
+        gap = r1 - r2
+        return [d - math.sqrt(gap * gap + _KINK_EPS2)]
 
     def _jacobian_analytic(self, vars_map):
         """解析雅可比：避免数值差分。"""
@@ -68,7 +72,8 @@ class TangentCC(GeometricConstraint):
             dc2x, dc2y = ux + u2x, uy + u2y
             dt2x, dt2y = -u2x, -u2y
         else:
-            s = 1.0 if r1 >= r2 else -1.0
+            gap = r1 - r2
+            s = gap / math.sqrt(gap * gap + _KINK_EPS2)
             dc1x, dc1y = s * u1x - ux, s * u1y - uy
             dt1x, dt1y = -s * u1x, -s * u1y
             dc2x, dc2y = ux - s * u2x, uy - s * u2y
@@ -127,7 +132,7 @@ class TangentCL(GeometricConstraint):
             return [0.0]
         cross = dx * (self.center.y - self.a.y) - \
                 dy * (self.center.x - self.a.x)
-        dist = abs(cross) / L
+        dist = math.sqrt(cross * cross + _KINK_EPS2) / L
         r = math.hypot(self.through.x - self.center.x,
                        self.through.y - self.center.y)
         self.status = "ok"
@@ -149,8 +154,9 @@ class TangentCL(GeometricConstraint):
             return jac
 
         cross = dx * (cy - ay) - dy * (cx - ax)
-        s = 1.0 if cross >= 0 else -1.0
-        dist = abs(cross) / L
+        smooth = math.sqrt(cross * cross + _KINK_EPS2)
+        s = cross / smooth
+        dist = smooth / L
         r = math.hypot(self.through.x - cx, self.through.y - cy)
         if r < 1e-9:
             return jac

@@ -2,6 +2,8 @@
 import math
 from typing import Dict, Tuple
 
+from constraints.base import _fd_eps
+
 _DerivMap = Dict[int, Tuple[float, float, float, float]]
 
 
@@ -144,7 +146,9 @@ def _ll_derivs(ip, la_obj, lb_obj, px, py) -> _DerivMap:
     j11, j12 = dy1, -dx1
     j21, j22 = dy2, -dx2
     det = j11 * j22 - j12 * j21
-    if abs(det) < 1e-12:
+    # ★ v2：阈值随场景尺度归一（det 量纲为长度²）
+    _s = max(1.0, abs(dx1), abs(dy1), abs(dx2), abs(dy2))
+    if abs(det) < 1e-12 * _s * _s:
         return _numeric_fallback(ip)
 
     result: _DerivMap = {}
@@ -187,7 +191,9 @@ def _lc_derivs(ip, line_obj, circ_obj, px, py) -> _DerivMap:
     j11, j12 = dy1, -dx1
     j21, j22 = 2.0 * (px - cx), 2.0 * (py - cy)
     det = j11 * j22 - j12 * j21
-    if abs(det) < 1e-12:
+    # ★ v2：阈值随场景尺度归一（det 量纲为长度²）
+    _s = max(1.0, abs(dx1), abs(dy1), abs(r))
+    if abs(det) < 1e-12 * _s * _s:
         return _numeric_fallback(ip)
 
     result: _DerivMap = {}
@@ -217,7 +223,9 @@ def _cc_derivs(ip, ca_obj, cb_obj, px, py) -> _DerivMap:
     j11, j12 = 2.0 * (px - x1), 2.0 * (py - y1)
     j21, j22 = 2.0 * (px - x2), 2.0 * (py - y2)
     det = j11 * j22 - j12 * j21
-    if abs(det) < 1e-12:
+    # ★ v2：阈值随场景尺度归一（det 量纲为长度²）
+    _s = max(1.0, abs(r1), abs(r2))
+    if abs(det) < 1e-12 * _s * _s:
         return _numeric_fallback(ip)
 
     result: _DerivMap = {}
@@ -330,7 +338,6 @@ def _numeric_fallback(ip) -> _DerivMap:
     from geo.points import FreePoint
 
     result: _DerivMap = {}
-    eps = 1e-7
     free_pts = []
     for parent in ip.parents:
         free_pts.extend(_collect_free(parent))
@@ -341,8 +348,15 @@ def _numeric_fallback(ip) -> _DerivMap:
             continue
 
         ox, oy = fp.x, fp.y
+        for fp in free_pts:
+            key = id(fp)
+            if key in result:
+                continue
 
-        fp.x = ox + eps
+            ox, oy = fp.x, fp.y
+            eps = _fd_eps(max(abs(ox), abs(oy)))   # ★ 逐点尺度自适应
+            fp.x = ox + eps
+            
         _recompute_subtree_local(fp)
         ip.recompute()
         xp = (ip.x, ip.y) if ip.exists else None

@@ -3,6 +3,10 @@ import math
 
 from ..base import GeometricConstraint, register_constraint
 
+# ★ v2 数值稳定：平滑绝对值 ε²。内切 |r1−r2| 与线圆 |cross| 在 0 处
+#   不可导，导致雅可比逐帧跳变 → 震荡；改用 sqrt(v²+ε²)。
+#   ε=1e-6，对残差数值影响远低于任何容差，序列化格式不变。
+_KINK_EPS2 = 1e-12
 
 def _dist(p1, p2):
     return math.hypot(p1.x - p2.x, p1.y - p2.y)
@@ -125,7 +129,8 @@ class TangentCirclesConstraint(GeometricConstraint):
         r1 = _dist(self.c1.center, self.c1.through)
         r2 = _dist(self.c2.center, self.c2.through)
         if self.mode == "inner":
-            return [d - abs(r1 - r2)]
+            gap = r1 - r2
+            return [d - math.sqrt(gap * gap + _KINK_EPS2)]
         return [d - (r1 + r2)]
 
     # ★ P1-6 新增：解析雅可比（与 TangentCC 同构）
@@ -157,7 +162,8 @@ class TangentCirclesConstraint(GeometricConstraint):
             dt2x, dt2y = -u2x, -u2y
         else:
             # 内切：R = d − |r1 − r2|，s = sign(r1 − r2) 处理绝对值
-            s = 1.0 if r1 >= r2 else -1.0
+            gap = r1 - r2
+            s = gap / math.sqrt(gap * gap + _KINK_EPS2)  # 平滑 sign ∈ (−1,1)
             dc1x, dc1y = s * u1x - ux, s * u1y - uy
             dt1x, dt1y = -s * u1x, -s * u1y
             dc2x, dc2y = ux - s * u2x, uy - s * u2y
@@ -203,7 +209,8 @@ class TangentLineCircleConstraint(GeometricConstraint):
         L = math.hypot(dx, dy)
         if L < 1e-9:
             return [0.0]
-        dist = abs(dx * (ay - cy) - dy * (ax - cx)) / L
+        cross = dx * (ay - cy) - dy * (ax - cx)
+        dist = math.sqrt(cross * cross + _KINK_EPS2) / L
         r = _dist(self.circle.center, self.circle.through)
         return [dist - r]
 
@@ -224,8 +231,9 @@ class TangentLineCircleConstraint(GeometricConstraint):
             return jac
 
         cross = dx * (ay - cy) - dy * (ax - cx)
-        s = 1.0 if cross >= 0 else -1.0
-        dist = abs(cross) / L
+        smooth = math.sqrt(cross * cross + _KINK_EPS2)
+        s = cross / smooth          # 平滑 sign
+        dist = smooth / L
         r = _dist(ctr, thr)
         if r < 1e-9:
             return jac

@@ -14,6 +14,7 @@ from tools.base import Tool, snap_target
 from ui import theme
 
 import math
+import time
 
 
 def _free_points_of(obj, acc, seen):
@@ -50,6 +51,8 @@ class SelectTool(Tool):
         self._moved = False
         self._snap_mem = (None, None)      # 滞回记忆：当前吸附的 (x目标, y目标)
         self._snap_excl_ids = set()        # 吸附排除集：点的 id()
+        self._last_wpt: Optional[Tuple[float, float]] = None
+        self._last_solve_t: float = 0.0
         
 
     def cancel_pending_script(self):
@@ -224,6 +227,13 @@ class SelectTool(Tool):
             canvas.doc.begin_action()
             self._drag_undo_begun = True
         self._guides = []
+        # 帧间位移（供步长钳制使用）
+        frame_delta = 0.0
+        if self._last_wpt is not None:
+            frame_delta = math.hypot(wpt[0] - self._last_wpt[0],
+                                     wpt[1] - self._last_wpt[1])
+        self._last_wpt = wpt
+
         if self.rotate_media is not None:
             center = self.rotate_media.screen_rect(canvas).center()
             cur = canvas.to_screen(wpt[0], wpt[1])
@@ -260,26 +270,40 @@ class SelectTool(Tool):
             for p, ox, oy in self._orig_pos:
                 p.drag_to((ox + actual_dx, oy + actual_dy))
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
-    # ★ 拖动时触发约束求解
-    # 修复：钉住被拖动的点，让求解器驱动其余自由点/从动点
+
+        # ★ v2：拖动约束求解（帧节流 + 拖动连续模式 + 步长钳制）
+        self._solve_drag(canvas, frame_delta)
+
+    def _solve_drag(self, canvas, frame_delta):
+        """拖动时的约束求解（v2）。
+        ① 帧节流：每 8ms 至多一次求解（首次 move 必解，_last_solve_t=0）；
+        ② drag_mode：Tikhonov 时间连续 + λ 热启动（抑制抖动）；
+        ③ max_step：单帧步长 ≤ 4×帧间拖动距离，防跳变。
+        """
         doc = canvas.doc
-        if hasattr(doc, 'constraints') and doc.constraints:
-            dragged = set()
-            if self.drag_poo is not None:
-                dragged.add(self.drag_poo)
-            for p in self.drag_pts:
-                dragged.add(p)
-            if self.drag_media is not None:
-                dragged.add(self.drag_media)
-            if dragged:
-                try:
-                    doc.solve_constraints(
-                    trigger_points=list(dragged),
-                    pinned_points=list(dragged),
-                    quick=True,
-                    )
-                except Exception:
-                    pass
+        if not getattr(doc, "constraints", None):
+            return
+        dragged = set()
+        if self.drag_poo is not None:
+            dragged.add(self.drag_poo)
+        for p in self.drag_pts:
+            dragged.add(p)
+        if not dragged:
+            return
+        now = time.perf_counter()
+        if self._last_solve_t > 0.0 and now - self._last_solve_t < 0.008:
+            return
+        self._last_solve_t = now
+        try:
+            doc.solve_constraints(
+                trigger_points=list(dragged),
+                pinned_points=list(dragged),
+                quick=True,
+                drag_mode=True,
+                max_step=4.0 * frame_delta + 1e-3,
+            )
+        except Exception:
+            pass
 
     def release(self, canvas, wpt, hit):
         if self._click_media is not None and not self._moved:

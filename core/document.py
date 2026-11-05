@@ -78,6 +78,9 @@ class Document(QObject):
         self._optics_mirror_version = 0
         self._optics_scan_version = -1
         self._optics_scan_result = None
+        # ★ v2：求解器实例缓存（跨帧 λ 热启动，避免每帧重建）
+        self._solver_quick = None
+        self._solver_full = None
 
     # ──────────────────────────────────────────────────────
     #  临时图片管理
@@ -437,9 +440,18 @@ class Document(QObject):
 
         total_err = math.sqrt(total_err_sq)
 
-        # ★ 自适应阈值：约束越多，容许的总残差越大
         n_con = max(len(self.constraints), 1)
         threshold = max(1e-3, 5e-4 * n_con)
+        # ★ v2 场景尺度感知：坐标 >100 世界单位时按比例放宽，避免误回滚
+        try:
+            _L = 0.0
+            for _p in constraint.involved_points():
+                if hasattr(_p, 'x') and hasattr(_p, 'y'):
+                    _L = max(_L, abs(_p.x), abs(_p.y))
+            if _L > 100.0:
+                threshold *= _L / 100.0
+        except Exception:
+            pass
 
         if not success or total_err > threshold:
             # ── 回滚 ──
@@ -592,19 +604,17 @@ class Document(QObject):
             self.constraints.remove(constraint)
             self.changed.emit()
 
-    # ──────────────────────────────────────────────────────
-    #  约束求解
-    # ──────────────────────────────────────────────────────
     def solve_constraints(self, trigger_points=None, pinned_points=None,
-                          _depth=0, quick=False):
-        """★ P1-8 修复：
-        ① 递归时把已移动的自由点加入 pinned，防止二次移动
-        ② 递归 trigger 使用从动点（而非刚被移动的自由点）
-        ③ recompute_silent 覆盖完整对象列表，确保从动点同步
+                          _depth=0, quick=False, drag_mode=False,
+                          max_step=None):
+        """约束求解。
+        ★ v2：
+        ① 求解器实例缓存（拖动模式跨帧 λ 热启动 + Tikhonov 时间连续性）；
+        ② drag_mode / max_step 为新增可选参数，旧调用方式与语义不变；
+        ③ 递归与 pinned 合并语义保持。
         """
         if not _HAS_CONSTRAINTS or not self.constraints or _depth >= 5:
             return True
-
         if trigger_points:
             affected = get_affected_constraints(trigger_points,
                                                 self.constraints)
@@ -612,7 +622,6 @@ class Document(QObject):
             affected = [c for c in self.constraints if c.enabled]
         if not affected:
             return True
-
         pinned_set = set(pinned_points or [])
         free_set = set()
         for c in affected:
@@ -625,30 +634,31 @@ class Document(QObject):
                     free_set.add(p)
         if not free_set:
             return True
-
         if quick:
-            solver = ConstraintSolver(max_iter=12, tol=1e-6)
+            if self._solver_quick is None:
+                self._solver_quick = ConstraintSolver(max_iter=12, tol=1e-6)
+            solver = self._solver_quick
         else:
-            solver = ConstraintSolver(max_iter=50, tol=1e-9)
-        success = solver.solve(affected, list(free_set), list(pinned_set))
-
-        # ★ 修复③：重算完整对象列表（含从动点、子对象）
+            if self._solver_full is None:
+                self._solver_full = ConstraintSolver(max_iter=50, tol=1e-9)
+            solver = self._solver_full
+        success = solver.solve(affected, list(free_set), list(pinned_set),
+                               drag_mode=drag_mode, max_step=max_step)
+        # 重算完整对象列表（含从动点、子对象）
         self.recompute_silent(self.objects)
-
-        # ★ 修复①②：递归时把已移动的点钉住，
-        # trigger 仍用原始触发点（让图扩展覆盖从动点链）
         if free_set and _depth < 4:
             merged_pinned = list(pinned_set | free_set)
-            # 接收深层递归的求解状态
             sub_success = self.solve_constraints(
                 trigger_points=trigger_points or list(free_set),
                 pinned_points=merged_pinned,
                 _depth=_depth + 1,
                 quick=quick,
+                drag_mode=drag_mode,
+                max_step=max_step,
             )
-            # 合并状态：只要有一层失败，整体即视为失败
             success = success and sub_success
         return success
+    
     # ──────────────────────────────────────────────────────
     #  快照 / 撤销
     # ──────────────────────────────────────────────────────

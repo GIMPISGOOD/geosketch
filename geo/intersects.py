@@ -86,7 +86,11 @@ def _fallback_solve(a, b):
     # 3. 圆 - 线
     if ca and lb:
         return _fallback_solve(b, a)
-        
+
+    # 4. 圆 - 圆（★ v2 补全）
+    if ca and cb:
+        return _circle_circle(ca[0], ca[1], cb[0], cb[1])
+
     return []
 
 # ───────────────────────── 核心 API ─────────────────────────
@@ -109,6 +113,9 @@ def has_solver(a, b) -> bool:
     if _get_line_params(a) and (_get_line_params(b) or _get_circle_params(b)):
         return True
     if _get_circle_params(a) and _get_line_params(b):
+        return True
+    # ★ 新增：圆 × 圆（与 _fallback_solve 第 4 分支对齐）
+    if _get_circle_params(a) and _get_circle_params(b):
         return True
     return False
 
@@ -200,6 +207,8 @@ class IntersectPoint(AbstractPoint):
         super().__init__(parents=(a, b))
         self.a, self.b = a, b
         self.branch = branch
+        self._fail_count = 0      # ★ v2：防闪烁计数
+        self._initialized = False
         self.recompute()
 
     def recompute(self):
@@ -207,8 +216,18 @@ class IntersectPoint(AbstractPoint):
         if self.branch < len(pts):
             self.x, self.y = pts[self.branch]
             self.exists = True
-        else:
+            self._fail_count = 0
+        elif not self._initialized:
+            # 首次重算即决断（保证新建无效交点不误判）
             self.exists = False
+        else:
+            # ★ v2 存在性滞回：连续 3 帧无解才标记消失，
+            #   期间保持最后位置冻结，避免相切临界处单帧闪烁
+            #   引发下游对象级联跳变。
+            self._fail_count += 1
+            if self._fail_count >= 3:
+                self.exists = False
+        self._initialized = True
 
     def dump(self):
         return {"branch": self.branch}
