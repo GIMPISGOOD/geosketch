@@ -2,7 +2,9 @@
 
 v2 升级（数值稳定性 + 速度）：
 1. 行归一化 —— 残差/雅可比按行范数归一，消除长度/角度量纲混杂的条件数失衡；
-2. Marquardt 对角阻尼 (JᵀJ + λ·diag) 带对角地板，替代旧版 λI；
+2. λI 信赖域阻尼 (JᵀJ + (λ+μ)I)：本系统变量全为二维坐标（同量纲，
+   无需列缩放）且通常秩亏，对角阻尼会把步长扭向弱耦合变量方向；
+   λI 保证最小范数 GN 方向与恒正定；
 3. Nielsen 增益比自适应 λ；拖动模式跨帧热启动；
 4. 拒绝步复用缓存 F/J，不重算残差/雅可比（病态场景的主要提速点）；
 5. 拖动模式 Tikhonov 时间连续项 μ‖x − x_prev‖²，抑制欠约束系统
@@ -29,7 +31,6 @@ from typing import List, Any, Dict, Optional
 from .base import GeometricConstraint
 
 _LAM_MAX = 1e12      # λ 上限
-_DIAG_FLOOR = 1e-4   # Marquardt 对角地板：防止零列导致奇异
 _ROW_FLOOR = 1e-8    # 行范数地板：防止除零
 _STALL_TOL = 1e-3    # 停滞兜底收敛阈值（与旧版一致）
 
@@ -236,23 +237,22 @@ class ConstraintSolver:
         for _ in range(self.max_iter):
             A = Js.T @ Js
             g = Js.T @ Fs
-            diag = A.diagonal().copy()
-            diag[diag < _DIAG_FLOOR] = _DIAG_FLOOR
             if drag_mode and xr is not None:
-                mu = self.drag_tikhonov * max(float(diag.mean()), 1e-12)
+                mu = self.drag_tikhonov * max(
+                    float(A.diagonal().mean()), 1e-12)
             else:
                 mu = 0.0
 
             accepted = False
             for _attempt in range(16):
                 if mu > 0.0:
-                    dref = _cur_vec() - xr
+                    dref = _cur_vec() - xr # pyright: ignore[reportOperatorIssue]
                     rhs = -(g + mu * dref)
                 else:
                     dref = None
                     rhs = -g
                 M = A.copy()
-                M[di] += lam * diag + mu
+                M[di] += lam + mu
                 try:
                     delta = np_solve(M, rhs)
                 except LinAlgError:
@@ -299,13 +299,12 @@ class ConstraintSolver:
                 aug_new = float((new_Fs * new_Fs).sum())
                 aug_old = float((Fs * Fs).sum())
                 if mu > 0.0:
-                    dref_new = _cur_vec() - xr
+                    dref_new = _cur_vec() - xr # pyright: ignore[reportOperatorIssue]
                     aug_new += mu * float(dref_new @ dref_new)
-                    aug_old += mu * float(dref @ dref)
+                    aug_old += mu * float(dref @ dref) # pyright: ignore[reportOperatorIssue]
                 ared = 0.5 * (aug_old - aug_new)
                 pred = (0.5 * float(delta @ (A @ delta))
-                        + lam * float(delta @ (diag * delta))
-                        + mu * float(delta @ delta))
+                        + (lam + mu) * float(delta @ delta))
                 rho = ared / pred if pred > 1e-30 else -1.0
 
                 if rho > 1e-9:
