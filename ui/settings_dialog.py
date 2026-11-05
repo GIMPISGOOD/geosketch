@@ -303,7 +303,10 @@ class SettingsDialog(QDialog):
         self._w_snap_r.setDecimals(0)
         self._w_snap_r.setSuffix(" px")
         f.addRow("磁吸半径", self._w_snap_r)
-
+        
+        self._w_guide_snap = QCheckBox("拖动对齐吸附（红色参考线）")
+        f.addRow(self._w_guide_snap)
+        
         self._w_zoom_spd = QDoubleSpinBox()
         self._w_zoom_spd.setRange(1.01, 2.00)
         self._w_zoom_spd.setSingleStep(0.05)
@@ -599,7 +602,8 @@ class SettingsDialog(QDialog):
         self._w_touch_tol.setValue(s.get("interaction.touch_hit_tol", 26.0))
         self._w_mouse_tol.setValue(s.get("interaction.mouse_hit_tol", 9.0))
         self._w_long_press.setValue(s.get("interaction.long_press_ms", 500))
-
+        self._w_guide_snap.setChecked(s.get("interaction.guide_snap_enabled", False))
+        
         # 工作流
         self._w_undo.setValue(s.get("workflow.undo_limit", 100))
         self._w_autosave.setValue(s.get("workflow.autosave_minutes", 0))
@@ -691,7 +695,8 @@ class SettingsDialog(QDialog):
             s.set("interaction.touch_hit_tol",   self._w_touch_tol.value())
             s.set("interaction.mouse_hit_tol",   self._w_mouse_tol.value())
             s.set("interaction.long_press_ms",   self._w_long_press.value())
-
+            s.set("interaction.guide_snap_enabled", self._w_guide_snap.isChecked())
+            
             # 工作流
             s.set("workflow.undo_limit",        self._w_undo.value())
             s.set("workflow.autosave_minutes",  self._w_autosave.value())

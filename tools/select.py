@@ -48,36 +48,97 @@ class SelectTool(Tool):
         self._click_media = None
         self._press_wpt = None
         self._moved = False
+        self._snap_mem = (None, None)      # 滞回记忆：当前吸附的 (x目标, y目标)
+        self._snap_excl_ids = set()        # 吸附排除集：点的 id()
+        
 
     def cancel_pending_script(self):
         if self._script_timer is not None:
             self._script_timer.stop()
             self._script_timer = None
-
+            
+    def _build_snap_exclusion(self, canvas):
+        """构建对齐吸附排除集：
+        ① 被拖对象所在连通分量内的所有点（防止自吸附）；
+        ② 与被拖点存在约束耦合的所有点（它们每帧被求解器移动，
+           移动的吸附目标会造成反馈震荡）。
+        """
+        seeds = list(self.drag_pts)
+        if self.drag_poo is not None:
+            seeds.append(self.drag_poo)
+        if not seeds:
+            self._snap_excl_ids = set()
+            return
+        # ① 对象图双向 BFS（parents + children）
+        seen = set()
+        objs = []
+        stack = list(seeds)
+        while stack:
+            o = stack.pop()
+            if id(o) in seen:
+                continue
+            seen.add(id(o))
+            objs.append(o)
+            stack.extend(getattr(o, "parents", []) or [])
+            stack.extend(getattr(o, "children", []) or [])
+        excl = {id(o) for o in objs if isinstance(o, AbstractPoint)}
+        # ② 约束耦合的点
+        try:
+            from constraints.graph import get_affected_constraints
+            cons = getattr(canvas.doc, "constraints", None) or []
+            if cons:
+                for c in get_affected_constraints(seeds, cons):
+                    for p in c.involved_points():
+                        if isinstance(p, AbstractPoint):
+                            excl.add(id(p))
+        except Exception:
+            pass
+        self._snap_excl_ids = excl
+        
     def _detect_snap(self, canvas, x, y):
-        THRESHOLD_PX = 12.0
-        thresh_w = THRESHOLD_PX / canvas.scale
-        best_dx, best_dy = thresh_w, thresh_w
-        snap_x, snap_y = None, None
-        guides = []
-        if abs(x) < best_dx:
-            best_dx = abs(x)
-            snap_x = 0.0
-        if abs(y) < best_dy:
-            best_dy = abs(y)
-            snap_y = 0.0
+        """对齐吸附（红色参考线）。
+        ★ 升级版：
+        ① 受设置 interaction.guide_snap_enabled 控制（默认关），
+           且同时受 interaction.snap_enabled 总开关约束；
+        ② 滞回：12px 吸上、16px 以外才释放，消除阈值边界高频翻转；
+        ③ 排除被拖分量内与约束耦合的点（防自吸、防移动目标反馈震荡）。
+        """
+        s = canvas.doc.settings
+        if (not s.get("interaction.guide_snap_enabled", False)
+                or not s.get("interaction.snap_enabled", True)):
+            self._snap_mem = (None, None)
+            return x, y, []
+
+        engage = 12.0 / canvas.scale
+        release = 16.0 / canvas.scale
+        excl = self._snap_excl_ids
+
+        cand_x = [0.0]   # 坐标轴始终保留为候选
+        cand_y = [0.0]
         for obj in canvas.doc.objects:
-            if isinstance(obj, AbstractPoint) and obj.visible and obj.exists:
-                if obj in self.drag_pts:
-                    continue
-                dx = abs(x - obj.x)
-                if dx < best_dx:
-                    best_dx = dx
-                    snap_x = obj.x
-                dy = abs(y - obj.y)
-                if dy < best_dy:
-                    best_dy = dy
-                    snap_y = obj.y
+            if (isinstance(obj, AbstractPoint)
+                    and obj.visible and obj.exists
+                    and id(obj) not in excl):
+                cand_x.append(obj.x)
+                cand_y.append(obj.y)
+
+        mem_x, mem_y = self._snap_mem
+
+        def _pick(v, cands, mem):
+            if mem is not None and abs(v - mem) < release:
+                return mem
+            best, best_d = None, engage
+            for c in cands:
+                d = abs(v - c)
+                if d < best_d:
+                    best, best_d = c, d
+            return best
+
+        snap_x = _pick(x, cand_x, mem_x)
+        snap_y = _pick(y, cand_y, mem_y)
+        self._snap_mem = (snap_x, snap_y)
+
+        guides = []
         if snap_x is not None:
             guides.append(('v', snap_x))
         if snap_y is not None:
@@ -85,7 +146,7 @@ class SelectTool(Tool):
         return (snap_x if snap_x is not None else x,
                 snap_y if snap_y is not None else y,
                 guides)
-
+        
     def press(self, canvas, wpt, hit):
         self._reset()
         target = snap_target(canvas, wpt, hit)
@@ -145,7 +206,8 @@ class SelectTool(Tool):
             self.drag_pts = pts
         self._grab_wpt = wpt
         self._orig_pos = [(p, p.x, p.y) for p in self.drag_pts]
-
+        self._build_snap_exclusion(canvas)
+        
     def move(self, canvas, wpt, hit):
         if (self.drag_poo is None and not self.drag_pts
                 and self.drag_media is None and self.resize_media is None

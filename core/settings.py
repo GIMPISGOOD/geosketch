@@ -65,9 +65,12 @@ DEFAULTS: dict = {
         "hover_highlight":     True,
     },
     # ── 交互 ──────────────────────────────────────────
+    # ── 交互 ──────────────────────────────────────────
     "interaction": {
         "snap_enabled":       True,
         "snap_radius_px":     18.0,
+        # ★ 新增：拖动对齐吸附（红色参考线），默认关闭
+        "guide_snap_enabled": False,
         "zoom_speed":         1.15,
         "touch_hit_tol":      26.0,
         "mouse_hit_tol":      9.0,
