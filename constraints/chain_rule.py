@@ -342,20 +342,15 @@ def _numeric_fallback(ip) -> _DerivMap:
     for parent in ip.parents:
         free_pts.extend(_collect_free(parent))
 
+
     for fp in free_pts:
         key = id(fp)
         if key in result:
             continue
 
         ox, oy = fp.x, fp.y
-        for fp in free_pts:
-            key = id(fp)
-            if key in result:
-                continue
-
-            ox, oy = fp.x, fp.y
-            eps = _fd_eps(max(abs(ox), abs(oy)))   # ★ 逐点尺度自适应
-            fp.x = ox + eps
+        eps = _fd_eps(max(abs(ox), abs(oy)))   # ★ 逐点尺度自适应
+        fp.x = ox + eps
             
         _recompute_subtree_local(fp)
         ip.recompute()
