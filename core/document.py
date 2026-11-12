@@ -608,32 +608,50 @@ class Document(QObject):
                           _depth=0, quick=False, drag_mode=False,
                           max_step=None):
         """约束求解。
+
         ★ v2：
         ① 求解器实例缓存（拖动模式跨帧 λ 热启动 + Tikhonov 时间连续性）；
         ② drag_mode / max_step 为新增可选参数，旧调用方式与语义不变；
         ③ 递归与 pinned 合并语义保持。
+
+        ★ v3：
+        ④ 触发点沿几何依赖向下闭包（由 constraints.graph 负责），
+           拖动宿主端点也能激活吸附点 / 交点上的约束；
+        ⑤ free / pinned 由 list(set) 改为按对象 id 稳定排序 ——
+           旧顺序依赖 id() 哈希，逐帧可能不同，造成雅可比列序抖动、
+           结果不可复现，也破坏 λ 热启动的一致性。
         """
         if not _HAS_CONSTRAINTS or not self.constraints or _depth >= 5:
             return True
+
         if trigger_points:
             affected = get_affected_constraints(trigger_points,
                                                 self.constraints)
         else:
             affected = [c for c in self.constraints if c.enabled]
+
         if not affected:
             return True
+
         pinned_set = set(pinned_points or [])
         free_set = set()
         for c in affected:
             for p in c.involved_points():
                 if p in pinned_set:
                     continue
-                if isinstance(p, FreePoint):
+                if isinstance(p, (FreePoint, PointOnObject)):
                     free_set.add(p)
-                elif isinstance(p, PointOnObject):
-                    free_set.add(p)
+
         if not free_set:
             return True
+
+        # ★ v3：稳定列序（创建顺序），保证跨帧 / 跨进程可复现
+        def _ord(p):
+            return getattr(p, "id", 0)
+
+        free_list = sorted(free_set, key=_ord)
+        pinned_list = sorted(pinned_set, key=_ord)
+
         if quick:
             if self._solver_quick is None:
                 self._solver_quick = ConstraintSolver(max_iter=12, tol=1e-6)
@@ -642,14 +660,17 @@ class Document(QObject):
             if self._solver_full is None:
                 self._solver_full = ConstraintSolver(max_iter=50, tol=1e-9)
             solver = self._solver_full
-        success = solver.solve(affected, list(free_set), list(pinned_set),
+
+        success = solver.solve(affected, free_list, pinned_list,
                                drag_mode=drag_mode, max_step=max_step)
+
         # 重算完整对象列表（含从动点、子对象）
         self.recompute_silent(self.objects)
+
         if free_set and _depth < 4:
-            merged_pinned = list(pinned_set | free_set)
+            merged_pinned = sorted(pinned_set | free_set, key=_ord)
             sub_success = self.solve_constraints(
-                trigger_points=trigger_points or list(free_set),
+                trigger_points=trigger_points or free_list,
                 pinned_points=merged_pinned,
                 _depth=_depth + 1,
                 quick=quick,
@@ -657,6 +678,7 @@ class Document(QObject):
                 max_step=max_step,
             )
             success = success and sub_success
+
         return success
     
     # ──────────────────────────────────────────────────────

@@ -2,7 +2,7 @@
 
 
 def build_doc_lib(interp):
-    def delete(obj):
+    def delete_one(obj):
         interp.destructor.delete_object(obj)
 
     def delete_all():
@@ -22,7 +22,7 @@ def build_doc_lib(interp):
         return None
 
     return {
-        "delete": delete,
+        "delete_one": delete_one,
         "delete_all": delete_all,
         "delete_script_created": delete_script_created,
         "find": find,
