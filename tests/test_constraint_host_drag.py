@@ -86,14 +86,37 @@ class TestDependencyClosure:
 # ═══════════════ 2. 长线段拉伸不跳动（集成级） ═══════════════
 
 class TestHostStretchStability:
+    """长线段拉伸稳定性。
+
+    ★ 断言口径说明（重要）：
+    A 是距离约束的涉及点、且未被 pin，会合法参与分摊修正，
+    因此 P.x ≈ d 不是不变量。正确的不变量是：
+
+        每帧 A 位移  δ_A ≈ t·F ≈ d²·ΔL / L²
+        累计漂移     Σ δ_A ≈ d² ∫_{L₀}^{∞} dL/L² = d² / L₀
+                        ↑ 与拉伸总长无关，收敛
+
+    L₀=200, d=5 → 理论上界 0.125（实测 ≈0.135，含首帧 Δ/L₀ 偏大的加成）。
+    修复前该场景根本不求解，残差会线性漂移到 t·L ≈ 199。
+
+    本测试用「漂移有界 + 漂移收敛 + 单帧位移有界」三条判据锁定
+    「无 1/t 放大、无跳动」，而非要求漂移为零。
+    阶段 3（广义坐标）后漂移将降到 ~1e-9，届时收紧 drift_budget。
+    """
+
     def test_long_segment_stretch_no_jump(self, doc):
-        """L: 200 → 3980，t: 0.025 → 0.00126。P 世界坐标应几乎不动。"""
-        A, B, seg, P, con = _scene(doc, length=200.0, target=5.0)
+        """L: 200 → 3980，t: 0.025 → 0.00126。"""
+        L0, d, step, n = 200.0, 5.0, 63.0, 60
+        A, B, seg, P, con = _scene(doc, length=L0, target=d)
         assert abs(con.residual()[0]) < 1e-9, "初始构型应精确满足约束"
 
-        px_hist = []
-        for i in range(1, 61):
-            B.x, B.y = 200.0 + i * 63.0, 0.0
+        # 合法漂移预算：4×理论上界 d²/L₀ = 0.5
+        # 对照：B 总位移 3780 —— 相差 7500 倍，足以捕获任何 1/t 放大
+        drift_budget = 4.0 * d * d / L0
+
+        px_hist, ax_hist = [], []
+        for i in range(1, n + 1):
+            B.x, B.y = L0 + i * step, 0.0
             doc.recompute_from(B)
             doc.solve_constraints(trigger_points=[B], pinned_points=[B],
                                   quick=True, drag_mode=True)
@@ -101,21 +124,46 @@ class TestHostStretchStability:
             r = con.residual()[0]
             assert math.isfinite(r), f"帧 {i}: 残差 NaN/Inf"
             assert abs(r) < 0.05, f"帧 {i}: 约束漂移 {r:.4f}"
-            assert abs(P.x - 5.0) < 0.1, f"帧 {i}: P.x={P.x:.4f}（应≈5）"
-            assert abs(A.x) < 1.0 and abs(A.y) < 1.0, \
-                f"帧 {i}: 端点 A 被放大修正 ({A.x:.3f},{A.y:.3f})"
+
+            # ① 几何口径的约束跟踪：P 相对 A 的距离恒为 d
+            assert abs((P.x - A.x) - d) < 0.05, \
+                f"帧 {i}: |P−A|={P.x - A.x:.4f}（应≈{d}）"
+
+            # ② 端点漂移有界 —— 核心判据：修正未被 1/t = L/d 放大
+            assert abs(A.x) < drift_budget, \
+                f"帧 {i}: A 累计漂移 {A.x:.4f} 超预算 {drift_budget}"
+            assert abs(A.y) < 1e-9, f"帧 {i}: A 出现轴向漂移 y={A.y}"
+
+            # ③ P 世界坐标基本不动（跟随 A 的合法微漂移）
+            assert abs(P.x - d) < drift_budget + 0.05, \
+                f"帧 {i}: P.x={P.x:.4f}"
+
+            # ④ 宿主完整性
             assert 0.0 <= P.t <= 1.0, f"帧 {i}: t={P.t} 越界"
             assert abs(P.y) < 1e-6, f"帧 {i}: P 脱离线段 y={P.y}"
-            px_hist.append(P.x)
 
+            px_hist.append(P.x)
+            ax_hist.append(A.x)
+
+        # ⑤ 单帧位移有界（防跳动）
         for k in range(1, len(px_hist)):
             assert abs(px_hist[k] - px_hist[k - 1]) < 0.5, \
                 f"帧 {k}: P 单帧跳动 {abs(px_hist[k] - px_hist[k-1]):.3f}"
+            assert abs(ax_hist[k] - ax_hist[k - 1]) < 0.5, \
+                f"帧 {k}: A 单帧跳动 {abs(ax_hist[k] - ax_hist[k-1]):.3f}"
 
-        # 松手级精解
+        # ⑥ 漂移收敛 —— 区分「有界微漂移」与「线性累积」的判别式
+        #    δ_A ∝ 1/L²，后半程应远小于前半程（理论 ≈7%）
+        early = abs(ax_hist[n // 2 - 1] - ax_hist[0])
+        late = abs(ax_hist[-1] - ax_hist[n // 2 - 1])
+        assert late < 0.2 * early + 1e-9, \
+            f"端点漂移未收敛：前 {n//2} 帧 {early:.4f}，后 {n//2} 帧 {late:.4f}"
+
+        # ⑦ 松手级精解
         doc.solve_constraints(trigger_points=[B], pinned_points=[B],
                               quick=False)
         assert abs(con.residual()[0]) < 1e-6
+        assert abs(A.x) < drift_budget
 
     def test_short_segment_stretch_stays_feasible(self, doc):
         """短起步（t=0.5）：允许端点参与分摊，但不得爆炸 / 脱离宿主。"""
