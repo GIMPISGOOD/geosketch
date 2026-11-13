@@ -15,6 +15,7 @@ class GeometricConstraint:
         GeometricConstraint._next_id += 1
         self.enabled = True
         self.status = "ok"
+        self._frozen_ids = frozenset()
 
     # ── 子类必须实现 ──────────────────────────────────
     def involved_points(self) -> List[Any]:
@@ -65,8 +66,17 @@ class GeometricConstraint:
 
         jac = zeros((n_res, n_cols), dtype=float64)
         ept = 1e-7
+        frozen = getattr(self, "_frozen_ids", frozenset())
 
         for p in pts:
+            # ═══════════════════════════════════════════════
+            # ★ v2.2：被 pin 的吸附点位置冻结。
+            #   它的位置不随宿主改变（参数 t 自行吸收宿主运动），
+            #   因此不得把 ∂C/∂P 沿宿主链式法则传播到宿主自由点列 ——
+            #   否则会得到 ∂C/∂A = −t·u 而非 −u，修正量被放大 L²/d。
+            # ═══════════════════════════════════════════════
+            if isinstance(p, PointOnObject) and id(p) in frozen:
+                continue
             # ═══════════════════════════════════════════════
             # ★ P0-1 修复：PointOnObject 在 vars_map 中时，
             #   必须计算沿宿主切线方向的导数，而非自由坐标导数。

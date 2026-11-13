@@ -13,8 +13,11 @@ from media.base import MediaObject
 from tools.base import Tool, snap_target
 from ui import theme
 
+import logging
 import math
 import time
+
+logger = logging.getLogger(__name__)
 
 
 def _free_points_of(obj, acc, seen):
@@ -52,6 +55,8 @@ class SelectTool(Tool):
         self._snap_mem = (None, None)      # 滞回记忆：当前吸附的 (x目标, y目标)
         self._snap_excl_ids = set()        # 吸附排除集：点的 id()
         self._last_wpt: Optional[Tuple[float, float]] = None
+        # ★ v2.2：自上次求解以来累计的拖动位移（max_step 的正确量纲）
+        self._drag_accum: float = 0.0
         self._last_solve_t: float = 0.0
         
 
@@ -68,7 +73,7 @@ class SelectTool(Tool):
         """
         seeds = list(self.drag_pts)
         if self.drag_poo is not None:
-            seeds.append(self.drag_poo)
+            seeds.append(self.drag_poo) # pyright: ignore[reportArgumentType]
         if not seeds:
             self._snap_excl_ids = set()
             return
@@ -152,6 +157,9 @@ class SelectTool(Tool):
         
     def press(self, canvas, wpt, hit):
         self._reset()
+        # ★ v2.2：位移基准从按压点起算。旧版首次 move 时 _last_wpt 为 None
+        #   → frame_delta=0 → max_step=1e-3，首帧几乎不求解。
+        self._last_wpt = wpt
         target = snap_target(canvas, wpt, hit)
         if target is None:
             canvas.doc.set_selection([])
@@ -227,11 +235,13 @@ class SelectTool(Tool):
             canvas.doc.begin_action()
             self._drag_undo_begun = True
         self._guides = []
-        # 帧间位移（供步长钳制使用）
-        frame_delta = 0.0
+        # ★ v2.2：累计「自上次求解以来」的拖动位移。
+        #   旧版用单次鼠标事件位移，而求解节流到 8ms 一次：高频事件下
+        #   max_step 只有实际拖动量的几分之一 → 系统性欠步、滞后累积，
+        #   松手时一次性偿还 → 跳变。节流期间只累计、不清零。
         if self._last_wpt is not None:
-            frame_delta = math.hypot(wpt[0] - self._last_wpt[0],
-                                     wpt[1] - self._last_wpt[1])
+            self._drag_accum += math.hypot(wpt[0] - self._last_wpt[0],
+                                           wpt[1] - self._last_wpt[1])
         self._last_wpt = wpt
 
         if self.rotate_media is not None:
@@ -272,17 +282,22 @@ class SelectTool(Tool):
             canvas.doc.recompute_from([p for p, _, _ in self._orig_pos])
 
         # ★ v2：拖动约束求解（帧节流 + 拖动连续模式 + 步长钳制）
-        self._solve_drag(canvas, frame_delta)
+        self._solve_drag(canvas)
 
-    def _solve_drag(self, canvas, frame_delta):
-        """拖动时的约束求解（v2）。
+    def _solve_drag(self, canvas, frame_delta=None):
+        """拖动时的约束求解（v2.2）。
+
         ① 帧节流：每 8ms 至多一次求解（首次 move 必解，_last_solve_t=0）；
         ② drag_mode：Tikhonov 时间连续 + λ 热启动（抑制抖动）；
-        ③ max_step：单帧步长 ≤ 4×帧间拖动距离，防跳变。
+        ③ max_step：单帧步长 ≤ 4×**自上次求解以来**的拖动距离。
+
+        frame_delta 保留为可选覆盖参数（兼容旧调用）；为 None 时使用
+        内部累计位移，求解后清零。
         """
         doc = canvas.doc
         if not getattr(doc, "constraints", None):
             return
+
         dragged = set()
         if self.drag_poo is not None:
             dragged.add(self.drag_poo)
@@ -290,20 +305,28 @@ class SelectTool(Tool):
             dragged.add(p)
         if not dragged:
             return
+
         now = time.perf_counter()
         if self._last_solve_t > 0.0 and now - self._last_solve_t < 0.008:
-            return
+            return                      # ★ 节流期间继续累计位移，不丢弃
         self._last_solve_t = now
+
+        accum = self._drag_accum if frame_delta is None else float(frame_delta)
+        self._drag_accum = 0.0
+
+        # ★ v2.2：稳定顺序，避免集合迭代序影响约束行序
+        dragged_list = sorted(dragged, key=lambda o: getattr(o, "id", 0))
         try:
             doc.solve_constraints(
-                trigger_points=list(dragged),
-                pinned_points=list(dragged),
+                trigger_points=dragged_list,
+                pinned_points=dragged_list,
                 quick=True,
                 drag_mode=True,
-                max_step=4.0 * frame_delta + 1e-3,
+                max_step=4.0 * accum + 1e-3,
             )
         except Exception:
-            pass
+            # 旧版静默 pass，故障不可诊断
+            logger.debug("拖动约束求解失败", exc_info=True)
 
     def release(self, canvas, wpt, hit):
         if self._click_media is not None and not self._moved:
@@ -345,15 +368,16 @@ class SelectTool(Tool):
                 dragged.add(self.drag_media)
             try:
                 if dragged:
+                    dl = sorted(dragged, key=lambda o: getattr(o, "id", 0))
                     doc.solve_constraints(
-                        trigger_points=list(dragged),
-                        pinned_points=list(dragged),
+                        trigger_points=dl,
+                        pinned_points=dl,
                         quick=False,
                     )
                 else:
                     doc.solve_constraints(quick=False)
             except Exception:
-                pass
+                logger.debug("释放约束求解失败", exc_info=True)
         self._reset()
 
     def activated(self, canvas):
